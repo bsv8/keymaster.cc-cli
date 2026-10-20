@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>km 管理 · {{.Network}}</title>
+<style>
+  :root { color-scheme: light dark; --muted:#888; --line:#8884; }
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; } .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+  input, button { padding: .35rem .6rem; font: inherit; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { text-align: left; padding: .35rem .4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .85rem; color: var(--muted); font-weight: 600; }
+  .muted { color: var(--muted); } code { font-size: .85rem; }
+  #keyBar { margin: 1rem 0; padding: .6rem; border: 1px solid var(--line); border-radius: .4rem; }
+  #status { margin: .5rem 0 1rem; }
+</style>
+</head>
+<body>
+<h1>km 管理 <span class="muted">({{.Network}})</span></h1>
+<div id="keyBar" class="row">
+  <label for="key">API Key</label>
+  <input id="key" type="password" autocomplete="off" style="flex:1;min-width:14rem" placeholder="~/.km/config.json 的 admin.apiKey">
+  <button id="save">保存</button>
+  <span id="hint" class="muted"></span>
+</div>
+<pre id="status" class="muted">未连接</pre>
+<div class="row">
+  <label>批量</label>
+  <select id="mode"><option value="unpriced">仅未定价</option><option value="all">覆盖全部</option></select>
+  <input id="batchPath" placeholder="目录（可选，空=全部）" size="16">
+  <input id="seedPrice" placeholder="Seed 价格 (sats)" size="14">
+  <input id="blockPrice" placeholder="完整块价格 (sats)" size="14">
+  <button id="batch">应用</button>
+</div>
+<table>
+  <thead><tr><th>文件</th><th>大小</th><th>Seed / 块价</th><th>来源</th><th></th></tr></thead>
+  <tbody id="files"><tr><td colspan="5" class="muted">填入 API Key 后加载</td></tr></tbody>
+</table>
+<script>
+const $ = id => document.getElementById(id);
+let key = sessionStorage.getItem('km-admin-key') || '';
+$('key').value = key;
+const headers = () => ({'content-type':'application/json', 'authorization':'Bearer ' + key});
+async function call(path, options = {}) {
+  const response = await fetch(path, { ...options, headers: headers() });
+  if (!response.ok) throw new Error(response.status + ' ' + (await response.text()).slice(0, 200));
+  return response.json();
+}
+async function refresh() {
+  const status = await call('/api/status');
+  $('status').textContent = JSON.stringify(status, null, 2);
+  const { files } = await call('/api/files');
+  $('files').innerHTML = files.map(file => `
+    <tr>
+      <td><code>${escapeHtml(file.path)}</code><div class="muted">${escapeHtml(file.seedHash)}</div></td>
+      <td>${file.size} B<div class="muted">${file.blocks} 块</div></td>
+      <td>${file.seedPrice} / ${file.blockPrice}</td>
+      <td class="muted">${file.override ? '独立定价' : '缺省'}</td>
+      <td class="row">
+        <button data-edit="${escapeHtml(file.path)}">改价</button>
+        <button data-clear="${escapeHtml(file.path)}">恢复缺省</button>
+      </td>
+    </tr>`).join('');
+}
+function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+$('save').onclick = () => { key = $('key').value.trim(); sessionStorage.setItem('km-admin-key', key); refresh().catch(showError); };
+$('batch').onclick = async () => {
+  try {
+    await call('/api/pricing/batch', { method:'POST', body: JSON.stringify({ mode: $('mode').value, path: $('batchPath').value.trim(), seedPrice: $('seedPrice').value.trim(), blockPrice: $('blockPrice').value.trim() }) });
+    await refresh();
+    $('mode').textContent = '已应用';
+    setTimeout(() => { $('mode').innerHTML = '<option value="unpriced">仅未定价</option><option value="all">覆盖全部</option>'; }, 800);
+  } catch (error) { showError(error); }
+};
+$('files').onclick = async event => {
+  const edit = event.target.dataset.edit;
+  const clear = event.target.dataset.clear;
+  try {
+    if (edit) {
+      const seedPrice = prompt('Seed 价格 (sats)'); if (seedPrice === null) return;
+      const blockPrice = prompt('完整块价格 (sats)'); if (blockPrice === null) return;
+      await call('/api/pricing/file', { method:'PUT', body: JSON.stringify({ path: edit, seedPrice, blockPrice }) });
+    } else if (clear) {
+      await call('/api/pricing/file?path=' + encodeURIComponent(clear), { method:'DELETE' });
+    } else return;
+    await refresh();
+  } catch (error) { showError(error); }
+};
+function showError(error) { $('hint').textContent = String(error.message || error); }
+if (key) refresh().catch(() => { $('files').innerHTML = '<tr><td colspan="5" class="muted">API Key 无效或服务未启动</td></tr>'; });
+</script>
+</body>
+</html>

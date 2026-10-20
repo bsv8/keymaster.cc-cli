@@ -1,0 +1,32 @@
+[Unit]
+Description=Keymaster CLI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# User account that owns the wallet and the sold/downloaded files.
+User=km
+Group=km
+# Encrypted wallet password credential; create it with:
+#   systemd-creds encrypt --name=wallet-password - /etc/km/wallet-password.cred
+LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
+# Adjust the mode and paths:
+#   download:  ExecStart=/usr/local/bin/km -config /etc/km/config.json -out /srv/downloads <seed-hash>
+#   server:    ExecStart=/usr/local/bin/km -config /etc/km/config.json -server /srv/files -discover
+ExecStart=/usr/local/bin/km -config /etc/km/config.json -server /srv/files -discover
+Restart=on-failure
+RestartSec=5s
+# Ctrl-C/SIGTERM trigger a bounded cleanup and the documented exit codes.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/km /srv/files /srv/downloads
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

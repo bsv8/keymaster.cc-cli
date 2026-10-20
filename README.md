@@ -1,2 +1,133 @@
 # keymaster.cc-cli
-keymaster.cc cli
+
+Keymaster CLI（命令 `km`）：单二进制 Go 程序，下载与售卖 BitFS 文件。
+
+## 当前状态
+
+买方与卖方主链路已完成，并在 **testnet 真实链路**上跑通（发现 → 报价 → 开池 → Seed/块采购
+→ 关池 → 文件校验；小额测试网资金）。包含：KeyHold 钱包与网络绑定、P2PKH 钱包/WOC、
+调度器（Go 与 TS 语义交叉一致）、exact-bytes 存储与资金账本、买方/卖方协议执行层、
+需求发现（SatSubscription）、BitFS 传输（Go↔Go）、浏览器 WebRTC 信令、文件组装与改名、
+到期退款、仲裁证据层、断线续接、TUI 下载界面、Web Admin。
+剩余（阻断项）：正式下载入口接调度器（价格杆/席位/推荐名 Top5、多卖方采购）、
+浏览器互通的上游报价刷新竞态、仲裁服务可用分支、部分验收矩阵项。
+
+## 构建
+
+```sh
+go build -o km ./cmd/km
+
+# 单文件部署（静态链接，不依赖 libc）：
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
+```
+
+构建需要 `github.com/bsv8/go-bitfs` 包含买方本地付款证据 API
+（`BuyerPoolEvidence.latestBuyerPayment`、`buyer.InspectPool`）与
+`bitcoin-libp2p` 包含 `webrtcinterconnect`/会话 ID API 的版本。这两个版本尚未发布，
+因此 `go.mod` 临时 `replace` 指向同级本地仓库（`../go-bitfs`、`../bitcoin-libp2p`）；
+发版后删除 replace 并升级 require。
+
+## 使用
+
+```sh
+km <seed-hash>                    # 下载一个文件（发布需求，等待卖方；默认输出到当前目录）
+km -out <dir> <seed>              # 指定下载输出目录
+km -listen /ip4/0.0.0.0/tcp/0 <seed>  # 向卖方公布的监听地址
+km -server <path>                 # 售卖目录：扫描 + 定价维护
+km -server <path> -discover       # 接入供应商，监听 Hash 需求并售卖
+km -server <path> -admin 127.0.0.1:8790  # Web Admin（缺省开启；空字符串禁用）
+km -config <file> ...             # 指定配置文件路径
+```
+
+systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
+`BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。
+
+首次运行（`~/.km/config.json` 不存在）需要在交互式终端中选择网络
+（`main` / `test`）并两次输入钱包密码；随后生成 secp256k1 私钥、加密
+KeyHold 文档、写入按网络区分的缺省配置。
+
+无人值守运行使用 systemd credentials：
+
+```ini
+LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
+```
+
+进程从 `$CREDENTIALS_DIRECTORY/wallet-password` 读取密码；凭据缺失或非交互
+环境无凭据时明确报错退出，绝不等待终端输入。
+
+## 配置
+
+- 路径：`~/.km/config.json`（0600，目录 0700）。
+- 只保存加密 KeyHold 文档与网络绑定，不保存明文私钥或密码。
+- 网络（`bsvNetwork`）在初始化时固定；WOC 端点由网络推导，不写入配置。
+- `wocApiKey` 缺省为空，可填写自己的 WhatsonChain API Key。
+- `feeRateSatoshisPerKb` 缺省 1000，用于钱包交易手续费估算（v1 无最高费率阈值）。
+- `server.arbiterPublicKeys`：本服务提供的仲裁公钥（压缩 hex）；为空时买方无法开池，`km -server` 会警告。
+- 调度器、SatSubscription 供应商、server 缺省售价等缺省值随网络写入。
+
+## 目录布局
+
+| 路径 | 用途 |
+| --- | --- |
+| `~/.km/config.json` | 配置（0600） |
+| `~/.km/client/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
+| `~/.km/client/unresolved/` | 未决资金历史（append-only NDJSON；广播未知的交易记录） |
+| `~/.km/server/` | 服务端数据（`pricing.json`、`sessions/` 售卖会话） |
+
+## 退出码
+
+| 码 | 含义 |
+| --- | --- |
+| 0 | 完成 |
+| 1 | 错误 |
+| 2 | 参数/用法错误 |
+| 3 | 文件完成但存在未决资金 |
+| 4 | 用户取消（Ctrl-C / SIGTERM） |
+
+## 钱包与链端口
+
+`internal/wallet` 实现 P2PKH 选币与签名：新鲜 UTXO 快照、逐个加输入重估费、找零、
+`bsv-blockchain/go-sdk` 签名、广播后核对 txid；广播失败或结果未知写入未决历史。
+`internal/woc` 提供 `listunspent`、`tx/raw`、`tx/<txid>/hex` 与 `chain/info`，Base URL 由
+`bsvNetwork` 推导。
+
+## 调度器
+
+`internal/scheduler` 是 `keymaster.cc-download-scheduler` 的 Go 对齐实现：纯状态机
+（createTask/step/restoreTask），无时钟、网络、钱包或存储副作用。状态、命令与视图的
+JSON 字段与 TypeScript 版本逐一对齐；交叉测试在工程仓库
+`test/keymaster.cc-cli/scheduler/`（共享语料 + TS/Go 双运行器 + 独立资金不变量）。
+
+## 存储与卖方基础
+
+| 包 | 用途 |
+| --- | --- |
+| `internal/store` | 单任务工作目录：`SaveExact` 首次写入即绑定 exact bytes，`Save` 原子替换快照 |
+| `internal/ledger` | 资金账本与交易 outbox：txid 绑定原始字节、状态机与累计付款上限、未决查询 |
+| `internal/catalog` | 卖方目录索引：MasterSeed 逐文件计算 Seed，跳过隐藏/符号链接/零字节/临时文件 |
+| `internal/pricing` | 文件定价：缺省回退、文件独立价格、批量「覆盖全部/仅未定价」、无目录继承 |
+| `internal/bitfs` | 买方协议执行层：开池（先验后付）→ 采购（Kind 5/6/7，本地付款日志）→ 关池（Kind 12/13 + 按 txid 观察） |
+| `internal/woc` | WhatsonChain 客户端：UTXO 查询、广播、按 txid 取回原文 |
+| `internal/host` | 调度器宿主：内核状态 + 命令 outbox 持久化、命令幂等执行、`open/download/drain/close` 与买方执行层接线、事实回灌 |
+| `internal/output` | 下载文件组装：以已验证 seed 为清单逐块校验、`<seed-hash>.km` 临时文件、安全唯一名原子改名与改名崩溃恢复 |
+| `internal/sell` | 卖方协议执行层：目录+定价报价、预签/验资/交付/收款/关池（卖方广播），exact 复用与先落盘后发送 |
+| `internal/ssp` | SatSubscription 客户端：libp2p `/ssp/1.0.0` 长连接、uvarint 分帧、订阅/发布/投递 |
+| `internal/discovery` | 需求发现：签名 Hash 请求发布（`bsv8.hash.request.v1`）与卖方验签监听 |
+| `internal/transport` | BitFS 传输：`/bitfs/wire/1.0.0` + uvarint 分帧（与浏览器同一协议），卖方拨号/买方接流 |
+| `internal/signal` | 浏览器 WebRTC 信令：`bsv8.webrtc.signal.v1` 收件箱消息 ↔ interconnect Envelope，会话 ID 与 PeerId 派生 |
+| `internal/admin` | Web Admin：解锁后启动的本地 HTTP API + 内嵌单页界面，API Key / Host / Origin 保护，文件与定价管理 |
+| `internal/ui` | 固定下载界面：阶段状态、进度条、地址二维码、TTY 原地刷新/非 TTY 普通日志 |
+
+`km -server <dir> -discover` 监听需求并按 locator 拨号买方；`-admin` 启动本地管理界面。
+关池由卖方广播，买方只按 txid 观察；付款不逐笔上链。
+
+## 依赖
+
+- [`github.com/bsv8/KeyHold/go/v2`](https://github.com/bsv8/KeyHold)：KeyHold v1 标准 SDK。
+- [`github.com/bsv8/go-bitfs`](https://github.com/bsv8/go-bitfs)：BitFS 协议 SDK（Kind 1–13）。
+- `github.com/bsv-blockchain/go-sdk`：BSV 原语（地址、交易、脚本）。
+- `golang.org/x/term`：隐藏输入密码。
+
+R&D 过程中的需求、施工单与测试位于工程仓库
+`BSV8_Engineering/todo/keymaster.cc-cli/`、`test/keymaster.cc-cli/` 与
+`e2e/keymaster.cc-cli/`；设计事实见 `BSV8_Engineering/docs/keymaster.cc-cli/`。
