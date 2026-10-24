@@ -6,7 +6,6 @@
 package woc
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -102,52 +101,6 @@ func (c *Client) ListUnspent(ctx context.Context, address string) ([]UTXO, error
 		utxos = append(utxos, UTXO{TxID: entry.TxHash, Vout: entry.TxPos, Value: entry.Value, Height: entry.Height})
 	}
 	return utxos, nil
-}
-
-// Broadcast submits exact raw transaction bytes and returns the canonical
-// txid. A response the API cannot interpret is reported as unknown delivery.
-func (c *Client) Broadcast(ctx context.Context, rawHex string) (string, error) {
-	if rawHex == "" {
-		return "", fmt.Errorf("woc: raw transaction is required")
-	}
-	payload, err := json.Marshal(map[string]string{"txhex": rawHex})
-	if err != nil {
-		return "", err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/tx/raw", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	request.Header.Set("content-type", "application/json")
-	c.authorize(request)
-	response, err := c.http.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("woc: broadcast: %w", err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return "", fmt.Errorf("woc: read broadcast response: %w", err)
-	}
-	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("woc: broadcast status %d: %s", response.StatusCode, snippet(body))
-	}
-	trimmed := strings.TrimSpace(string(body))
-	var txid string
-	if strings.HasPrefix(trimmed, "{") {
-		var document struct {
-			TxID string `json:"txid"`
-		}
-		if err := json.Unmarshal(body, &document); err == nil {
-			txid = document.TxID
-		}
-	} else {
-		txid = strings.Trim(trimmed, `"`)
-	}
-	if !txidPattern.MatchString(txid) {
-		return "", fmt.Errorf("woc: broadcast response is not a canonical txid")
-	}
-	return txid, nil
 }
 
 // ChainHeight returns the current best block height.

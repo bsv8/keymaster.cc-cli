@@ -8,11 +8,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/protocol"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
+	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 )
 
 // RefundPreparation is a persisted matured refund ready to broadcast.
@@ -81,6 +85,28 @@ func (t *BuyerTask) PrepareMaturedRefund(ctx context.Context, poolID string) (*R
 	return &RefundPreparation{PoolID: poolID, TxID: txid, RawTx: rawTx}, nil
 }
 
+// protocolDeclaredOutputs extracts the non-self outputs of an exact
+// protocol transaction as the declared business outputs for the manager
+// anchor. Outputs are SDK-determined; the anchor binds this exact shape.
+func protocolDeclaredOutputs(walletScriptHex, rawHex string) ([]wallet.Output, error) {
+	tx, err := transaction.NewTransactionFromHex(rawHex)
+	if err != nil {
+		return nil, fmt.Errorf("bitfs: parse protocol transaction: %w", err)
+	}
+	var declared []wallet.Output
+	for _, out := range tx.Outputs {
+		if out.LockingScript == nil {
+			return nil, fmt.Errorf("bitfs: protocol output has no script")
+		}
+		if strings.EqualFold(out.LockingScript.String(), walletScriptHex) {
+			continue
+		}
+		scriptCopy := *out.LockingScript
+		declared = append(declared, wallet.Output{Satoshis: out.Satoshis, LockingScript: &scriptCopy})
+	}
+	return declared, nil
+}
+
 // BroadcastMaturedRefund broadcasts the exact saved refund bytes. An unknown
 // result stays recovery-pending with the evidence preserved for retry; a
 // confirmed push closes the pool.
@@ -103,9 +129,45 @@ func (t *BuyerTask) BroadcastMaturedRefund(ctx context.Context, poolID string) (
 	if !ok {
 		return nil, fmt.Errorf("bitfs: refund transaction %s is not in the ledger", record.RefundTxID)
 	}
-	txid, err := t.Wallet.BroadcastRaw(ctx, "pool-refund", tx.RawHex)
+	// Explicit protocol submit: bind every refund input to exact known
+	// source bytes (persisted funding + latest SDK-verified payment state).
+	// Unbindable inputs fail closed instead of bypassing validation.
+	state, err := LoadPoolState(t.Store, poolID)
 	if err != nil {
 		return nil, err
+	}
+	sources := make([][]byte, 0, 2)
+	if fundingRaw, err := StoredFunding(t.Store, record.FundingTxID); err == nil {
+		sources = append(sources, fundingRaw)
+	} else {
+		return nil, fmt.Errorf("bitfs: refund funding bytes unavailable: %w", err)
+	}
+	if latest := state.Evidence.LatestPaymentRawTx; len(latest) > 0 {
+		sources = append(sources, latest)
+	}
+	proofs, err := wallet.BindInputs(tx.RawHex, sources)
+	if err != nil {
+		return nil, err
+	}
+	feeRate := uint64(state.Evidence.Opening.MinerFeeRateSatoshisPerKilobyte)
+	if feeRate == 0 {
+		feeRate = uint64(t.MinerFeeRate)
+	}
+	declared, err := protocolDeclaredOutputs(t.Wallet.LockingScript().String(), tx.RawHex)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := t.Wallet.PrepareProtocol(ctx, "pool-refund", wallet.ProtocolRequest{
+		Business: "0", FeeRate: strconv.FormatUint(feeRate, 10), Declared: declared,
+		SignedHex: tx.RawHex, Proofs: proofs,
+		Binding: wallet.ProtocolBinding{Kind: "refund", PoolID: poolID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	txid, err := t.Wallet.BroadcastPrepared(ctx, "pool-refund", prepared)
+	if err != nil {
+		return nil, recordBroadcastFailure(t.Ledger, tx.TxID, err)
 	}
 	if err := t.Ledger.MarkTransition(txid, ledger.TxObserved, ""); err != nil {
 		return nil, err

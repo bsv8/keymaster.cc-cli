@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/content"
@@ -35,7 +36,29 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
+	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 )
+
+// closeDeclaredOutputs extracts the non-self outputs of an exact close
+// transaction as the declared business outputs for the manager anchor.
+func closeDeclaredOutputs(walletScriptHex, closeHex string) ([]wallet.Output, error) {
+	parsed, err := tx.NewTransactionFromHex(closeHex)
+	if err != nil {
+		return nil, fmt.Errorf("sell: parse close transaction: %w", err)
+	}
+	var declared []wallet.Output
+	for _, out := range parsed.Outputs {
+		if out.LockingScript == nil {
+			return nil, fmt.Errorf("sell: close output has no script")
+		}
+		if strings.EqualFold(out.LockingScript.String(), walletScriptHex) {
+			continue
+		}
+		scriptCopy := *out.LockingScript
+		declared = append(declared, wallet.Output{Satoshis: out.Satoshis, LockingScript: &scriptCopy})
+	}
+	return declared, nil
+}
 
 const (
 	defaultQuoteTTL       = 300 * time.Second
@@ -77,9 +100,12 @@ type Seller struct {
 	MaxBlocksPerBatch uint64
 }
 
-// walletBroadcaster is the minimal chain port the seller needs.
+// walletBroadcaster is the minimal chain port the seller needs: explicit
+// protocol submit plus broadcast of the settled exact bytes.
 type walletBroadcaster interface {
-	BroadcastRaw(ctx context.Context, kind, rawHex string) (string, error)
+	PrepareProtocol(ctx context.Context, kind string, req wallet.ProtocolRequest) (*wallet.SpendResult, error)
+	BroadcastPrepared(ctx context.Context, kind string, prepared *wallet.SpendResult) (string, error)
+	LockingScript() *script.Script
 }
 
 type sessionMeta struct {
@@ -431,23 +457,33 @@ func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []b
 		return nil, err
 	}
 	kind13Path := sessionPath(sessionID, sessionKind13Name)
-	if existing, err := s.Sessions.Load(kind13Path); err == nil {
-		if saved, err := s.Sessions.Load(sessionPath(sessionID, sessionKind12Name)); err == nil && string(saved) == string(kind12) {
-			return existing, nil
+	kind13, loadErr := s.Sessions.Load(kind13Path)
+	if loadErr == nil {
+		saved, err := s.Sessions.Load(sessionPath(sessionID, sessionKind12Name))
+		if err != nil {
+			return nil, fmt.Errorf("sell: cached close request unavailable: %w", err)
 		}
-		return nil, errors.New("sell: session already answered a different close request")
+		if !bytes.Equal(saved, kind12) {
+			return nil, errors.New("sell: session already answered a different close request")
+		}
+	} else if !errors.Is(loadErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("sell: cached close response unavailable: %w", loadErr)
 	}
 	poolEvidence, err := s.loadPool(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	artifact, err := seller.CompleteCloseArtifact(ctx, s.Facts(), seller.CompleteCloseArtifactInput{
-		Pool: *poolEvidence, RequestRaw: kind12,
-	}, s.Signer)
-	if err != nil {
-		return nil, fmt.Errorf("sell: complete close: %w", err)
+	if loadErr != nil {
+		artifact, err := seller.CompleteCloseArtifact(ctx, s.Facts(), seller.CompleteCloseArtifactInput{
+			Pool: *poolEvidence, RequestRaw: kind12,
+		}, s.Signer)
+		if err != nil {
+			return nil, fmt.Errorf("sell: complete close: %w", err)
+		}
+		kind13 = artifact.Bytes()
 	}
-	kind13 := artifact.Bytes()
+	// A cached signature is not a successful broadcast receipt. Reuse it below
+	// through the same durable manager path; never sign a replayed close again.
 	artifactResponse, err := wire.ParseAs(wire.PoolCloseResponse, kind13)
 	if err != nil {
 		return nil, err
@@ -470,7 +506,33 @@ func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []b
 		return nil, err
 	}
 	if s.Wallet != nil {
-		if _, err := s.Wallet.BroadcastRaw(ctx, "pool-close", hex.EncodeToString(response.CompleteCloseTransactionRaw)); err != nil {
+		closeHex := hex.EncodeToString(response.CompleteCloseTransactionRaw)
+		sources := make([][]byte, 0, 2)
+		sources = append(sources, poolEvidence.FundingTransactionRaw)
+		if len(poolEvidence.LatestPaymentRawTx) > 0 {
+			sources = append(sources, poolEvidence.LatestPaymentRawTx)
+		}
+		proofs, err := wallet.BindInputs(closeHex, sources)
+		if err != nil {
+			return nil, fmt.Errorf("sell: bind close inputs: %w", err)
+		}
+		feeRate := poolEvidence.Opening.MinerFeeRateSatoshisPerKilobyte
+		if feeRate == 0 {
+			feeRate = 1
+		}
+		declared, err := closeDeclaredOutputs(s.Wallet.LockingScript().String(), closeHex)
+		if err != nil {
+			return nil, err
+		}
+		prepared, err := s.Wallet.PrepareProtocol(ctx, "pool-close", wallet.ProtocolRequest{
+			Business: "0", FeeRate: strconv.FormatUint(feeRate, 10), Declared: declared,
+			SignedHex: closeHex, Proofs: proofs,
+			Binding: wallet.ProtocolBinding{Kind: "close", PoolID: sessionID},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("sell: prepare close %s: %w", parsed.TxID().String(), err)
+		}
+		if _, err := s.Wallet.BroadcastPrepared(ctx, "pool-close", prepared); err != nil {
 			return nil, fmt.Errorf("sell: broadcast close %s: %w", parsed.TxID().String(), err)
 		}
 	}

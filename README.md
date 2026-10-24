@@ -37,7 +37,15 @@ km -server <path>                 # 售卖目录：扫描 + 定价维护
 km -server <path> -discover       # 接入供应商，监听 Hash 需求并售卖
 km -server <path> -admin 127.0.0.1:8790  # Web Admin（缺省开启；空字符串禁用）
 km -config <file> ...             # 指定配置文件路径
+km -pending-conclusions          # 只读列出未决 allocation/txid，不广播
+km -query-conclusion <allocationId> -query-interval 5s  # 显式启动原 exact 查询/重交
 ```
+
+结论查询只重交已经持久化的原交易，不重新选币、签名或变更手续费。重启及只读列表不会自动重交；Ctrl-C 停止循环但不释放未决输入。查询与下载/售卖模式独立使用，间隔至少1秒。同一实例不并行启动同一申请的多个循环，跨进程仍由钱包目录锁保护。
+
+匹配 txid 或同次 exact 提交的精确 already-in-mempool 回执作为成功；未知/冲突诊断保留责任。冲突经单个/批量 spent API 逐 input 核实：消费方是本 tx 则成功；其他 tx 消费使原申请失败收尾，仅确认未花且不受其它责任保护的输入恢复可用。未知输入继续保护，查询结果带 `conclusion`，可查看已释放/已花/仍保护的 outpoint 与历史释放金额。已确定冲突后只继续核实，不再重交无效 exact。全部收尾返回 `delivery=failed`，命令退出码1；新付款须由调用者新建申请，原请求不会自动重选币。
+
+CLI 的 `manager.json` 使用 `km-manager-store/1` 宿主存储封装，将原 canonical manager blob 与提交结果/尝试证据一起原子写入。新版能读取旧版裸 manager blob 并保留责任迁移；旧版不认识新封装，勿不备份直接降级或手工删除状态文件。该封装仅是文件适配，内部仍保存 TS/Go 共同 canonical manager状态；逐输入结论与failed状态需要新版阅读器。普通付款、买方出资、退款与卖方关池使用同一提交/结论路径。退款/关池重放核对并复用原 allocation、冻结事实和 exact，不重新签名；已缓存 Kind 13 不代表广播成功。未知结果保留业务 pending，可信冲突结论记 failed，只有可靠成功才推进对应业务台账。注意：上游 SDK 的交易签名回调尚未提供完整交易/prevout 授权上下文，退款/关池仍有 SDK 先签、manager 后绑定的路径；上述恢复能力不代表所有 SDK 签名均已通过 manager 签前授权。
 
 systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
 `BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。

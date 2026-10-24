@@ -145,6 +145,9 @@ func (t *BuyerTask) PreparePool(ctx context.Context, input PreparePoolInput) (*P
 	if err := t.Store.SaveExact("exact/kind2-"+digestName(kind2), kind2); err != nil {
 		return nil, err
 	}
+	// The funding is signed and held by the wallet manager from here: only a
+	// failure below may release it; CompletePool broadcasts it exactly once.
+	committed = true
 	return &PoolPreparation{
 		PoolID:           input.PoolID,
 		SellerID:         input.SellerID,
@@ -226,14 +229,12 @@ func (t *BuyerTask) CompletePool(ctx context.Context, preparation *PoolPreparati
 }
 
 // BroadcastFunding (re)broadcasts the exact persisted funding bytes and
-// reconciles the ledger: observed on success, result-unknown otherwise.
+// reconciles the ledger: observed on success, failed only on a verified input
+// conclusion, and result-unknown otherwise.
 func (t *BuyerTask) BroadcastFunding(ctx context.Context, preparation *PoolPreparation) error {
 	_, err := t.Wallet.BroadcastPrepared(ctx, "pool-funding", preparation.Funding)
 	if err != nil {
-		if ledgerErr := t.Ledger.MarkTransition(preparation.Funding.TxID, ledger.TxResultUnknown, err.Error()); ledgerErr != nil {
-			return fmt.Errorf("bitfs: record unknown funding: %w", ledgerErr)
-		}
-		return fmt.Errorf("bitfs: broadcast funding: %w", err)
+		return fmt.Errorf("bitfs: broadcast funding: %w", recordBroadcastFailure(t.Ledger, preparation.Funding.TxID, err))
 	}
 	if err := t.Ledger.MarkTransition(preparation.Funding.TxID, ledger.TxObserved, ""); err != nil {
 		return err

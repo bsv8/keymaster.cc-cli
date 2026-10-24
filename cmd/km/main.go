@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -82,8 +83,16 @@ func run(args []string) int {
 	legacyDirect := flags.Bool("legacy-direct", false, "显式使用旧的单卖方直购路径（仅开发对照，禁止自动回退）")
 	maxBlockPrice := flags.String("max-block-price", "", "买方价格上限（sats/块；空=使用 config.scheduler.maxBlockPriceSatoshis，0=自动）")
 	configPath := flags.String("config", "", "配置文件路径（默认 ~/.km/config.json）")
+	pendingConclusions := flags.Bool("pending-conclusions", false, "只读列出未决交易，不广播")
+	queryConclusion := flags.String("query-conclusion", "", "显式启动指定 allocation 的原 exact 结论查询（会重复提交原交易）")
+	queryInterval := flags.Duration("query-interval", 5*time.Second, "原 exact 查询重交间隔（至少1秒）")
 	flags.Usage = func() { usage(os.Stderr) }
 	if err := flags.Parse(args); err != nil {
+		return exitUsage
+	}
+	queryMode := *pendingConclusions || *queryConclusion != ""
+	if queryMode && ((*pendingConclusions && *queryConclusion != "") || flags.NArg() != 0 || *serverPath != "" || *queryInterval < time.Second) {
+		fmt.Fprintln(os.Stderr, "km: 只读未决列表与结论查询须独立调用，查询间隔至少1秒")
 		return exitUsage
 	}
 
@@ -103,6 +112,10 @@ func run(args []string) int {
 	)
 	var password string
 	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+		if queryMode {
+			fmt.Fprintln(os.Stderr, "km: 查询需要已有钱包配置")
+			return exitError
+		}
 		cfg, password, err = initialize(path)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "km: 初始化失败:", err)
@@ -136,14 +149,65 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "km: 派生地址失败:", err)
 		return exitError
 	}
-	fmt.Printf("网络: %s\n收款地址: %s\n", cfg.BsvNetwork, address)
+	if queryMode {
+		fmt.Fprintf(os.Stderr, "网络: %s\n收款地址: %s\n", cfg.BsvNetwork, address)
+	} else {
+		fmt.Printf("网络: %s\n收款地址: %s\n", cfg.BsvNetwork, address)
+	}
 
 	// The signal context covers the execution phase; prompts above keep the
 	// default terminal behaviour (with the password prompt restoring state).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if queryMode {
+		return runConclusions(ctx, cfg, privateKey, path, *queryConclusion, *queryInterval)
+	}
 	return dispatch(ctx, cfg, privateKey, flags.NArg(), flags.Arg, *serverPath, *discover, *outDir, *listen, *adminAddr, path, *legacyDirect)
+}
+
+func runConclusions(ctx context.Context, cfg *config.Config, key []byte, path, allocationID string, interval time.Duration) int {
+	w, err := wallet.New(woc.New(cfg.BsvNetwork.WOCBaseURL(), cfg.WOCAPIKey), wallet.Options{
+		Network: string(cfg.BsvNetwork), PrivateKey: key, FeeRateSatoshisPerKb: cfg.FeeRateSatoshisPerKb,
+		UnresolvedDir: config.ClientUnresolvedDir(path),
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	defer w.Close()
+	if allocationID == "" {
+		pending, err := w.PendingConclusions()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		rows := []map[string]any{}
+		for _, entry := range pending {
+			rows = append(rows, map[string]any{"allocationId": entry.AllocationID, "commandId": entry.CommandID, "txid": entry.TxID, "state": entry.State, "delivery": entry.Delivery})
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(rows); err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		return exitOK
+	}
+	fmt.Fprintln(os.Stderr, "km: 开始查询并重交原交易；Ctrl-C 停止，不释放未决资金")
+	result, err := w.QueryConclusion(ctx, allocationID, interval)
+	if result != nil {
+		_ = json.NewEncoder(os.Stdout).Encode(result)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		if ctx.Err() != nil {
+			return exitCancelled
+		}
+		return exitError
+	}
+	if result != nil && result.Delivery == "failed" {
+		return exitError
+	}
+	return exitOK
 }
 
 // dispatch runs the selected mode. Both modes are stubs until the execution
@@ -268,6 +332,13 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
+	}
+	defer sellerWallet.Close()
+	if recovered, pending, recoverErr := sellerWallet.Recover(ctx); recoverErr != nil {
+		fmt.Fprintln(os.Stderr, "km: 卖方钱包恢复失败:", recoverErr)
+		return exitError
+	} else if len(pending) > 0 {
+		fmt.Fprintf(os.Stderr, "km: 卖方钱包 %d 笔未知交易待确认（已恢复 %d 笔）\n", len(pending), recovered)
 	}
 	service := &sell.Seller{
 		Sessions: sessions,
@@ -544,12 +615,15 @@ func usage(writer *os.File) {
   km <seed-hash>                     下载一个文件（默认输出到当前目录）
   km -server <path>                  售卖指定目录（默认接入供应商并监听 Hash 需求）
   km -server <path> -discover=false  只扫描目录与定价，不启动售卖
+  km -pending-conclusions           只读列出未决交易，不广播
+  km -query-conclusion <allocation> 显式启动原交易结论查询（会重交同一 exact）
 
 选项:
   -out <dir>              下载输出目录
   -listen <multiaddr>     下载时向卖方公布的监听地址（缺省 /ip4/0.0.0.0/tcp/0）
   -admin <addr>           Web Admin 监听地址（缺省 127.0.0.1:8790；空字符串禁用）
   -config <file>          配置文件路径（默认 ~/.km/config.json）
+  -query-interval <duration>  结论查询间隔（默认5s，至少1s）
 
 首次运行没有配置文件时，会在交互式终端中询问网络（main/test）并创建钱包。
 非交互环境通过 systemd 凭据提供密码（CREDENTIALS_DIRECTORY/wallet-password）。`)
@@ -704,6 +778,13 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
+	}
+	defer w.Close()
+	if recovered, pending, recoverErr := w.Recover(ctx); recoverErr != nil {
+		fmt.Fprintln(os.Stderr, "km: 钱包恢复失败:", recoverErr)
+		return exitError
+	} else if len(pending) > 0 {
+		fmt.Fprintf(os.Stderr, "km: 钱包 %d 笔未知交易待确认（已恢复 %d 笔）\n", len(pending), recovered)
 	}
 	workStore, err := store.Open(clientRoot)
 	if err != nil {
