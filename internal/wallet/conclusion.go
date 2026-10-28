@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"
-	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
+	manager "github.com/bsv8/keymaster.cc-cli/utxo"
 )
 
 // InputConflictError is a stable original-request failure, not an instruction

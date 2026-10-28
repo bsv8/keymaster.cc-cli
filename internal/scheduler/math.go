@@ -48,6 +48,7 @@ func integer(value, min int64) int64 {
 }
 
 var forbiddenIdentities = map[string]bool{
+	"prototype":            true,
 	"constructor":          true,
 	"hasOwnProperty":       true,
 	"isPrototypeOf":        true,
@@ -125,7 +126,7 @@ func cloneQuote(quote Quote) Quote {
 		clone.TailPrice = &tail
 	}
 	if quote.ContentIDs != nil {
-		clone.ContentIDs = append([]string(nil), quote.ContentIDs...)
+		clone.ContentIDs = append([]string{}, quote.ContentIDs...)
 	}
 	return clone
 }

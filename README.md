@@ -94,6 +94,11 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 
 ## 钱包与链端口
 
+`utxo/` 是 CLI 内维护的原生 Go UTXO manager（`utm/1`），属于根 Go module，
+导入路径为 `github.com/bsv8/keymaster.cc-cli/utxo`，仅依赖 Go 标准库。
+`internal/wallet` 提供持久化、链上观察及提交端口；不再依赖独立 manager 仓库。
+工程仓 `test/keymaster.cc-cli/utxo-manager/` 保留共享向量、Go 测试与 TS/Go 交叉恢复测试。
+
 `internal/wallet` 实现 P2PKH 选币与签名：新鲜 UTXO 快照、逐个加输入重估费、找零、
 `bsv-blockchain/go-sdk` 签名、广播后核对 txid；广播失败或结果未知写入未决历史。
 `internal/woc` 提供 `listunspent`、`tx/raw`、`tx/<txid>/hex` 与 `chain/info`，Base URL 由
@@ -101,10 +106,15 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 
 ## 调度器
 
-`internal/scheduler` 是 `keymaster.cc-download-scheduler` 的 Go 对齐实现：纯状态机
-（createTask/step/restoreTask），无时钟、网络、钱包或存储副作用。状态、命令与视图的
-JSON 字段与 TypeScript 版本逐一对齐；交叉测试在工程仓库
-`test/keymaster.cc-cli/scheduler/`（共享语料 + TS/Go 双运行器 + 独立资金不变量）。
+调度器的 TS 与 Go 实现分别由钱包和 CLI 维护：
+
+- `../keymaster.cc/packages/download-scheduler/`：原生 TypeScript 包的唯一源码，包名仍为 `keymaster.cc-download-scheduler`，属于钱包 workspace；运行时零依赖。
+- `internal/scheduler/`：CLI 使用的 Go 实现，属于根 Go module，构建 Go CLI 不需要 Node.js。
+
+两端均为纯状态机（createTask/step/restoreTask），无时钟、网络、钱包或存储副作用。
+交叉测试在工程仓 `test/keymaster.cc-cli/scheduler/`（状态、命令、视图、唤醒、恢复及资金不变量）；
+TS 单元测试和外围模拟位于 `test/keymaster.cc-cli/download-scheduler/`。
+TS 包构建见 `../keymaster.cc/packages/download-scheduler/README.md`；CLI 不保留 TS 副本，原独立调度器仓库不再提供源码。
 
 ## 存储与卖方基础
 
@@ -139,3 +149,5 @@ JSON 字段与 TypeScript 版本逐一对齐；交叉测试在工程仓库
 R&D 过程中的需求、施工单与测试位于工程仓库
 `BSV8_Engineering/todo/keymaster.cc-cli/`、`test/keymaster.cc-cli/` 与
 `e2e/keymaster.cc-cli/`；设计事实见 `BSV8_Engineering/docs/keymaster.cc-cli/`。
+调度器与 UTXO manager 的测试、文档和历史资料分别归入以上 CLI 分类下的
+`download-scheduler/`、`utxo-manager/`；运行入口见工程仓 `test/keymaster.cc-cli/README.md`。

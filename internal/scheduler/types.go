@@ -37,7 +37,7 @@ type Quote struct {
 	TailPrice  *Sats    `json:"tailPrice,omitempty"`
 	MaxBlocks  int64    `json:"maxBlocks"`
 	Fees       Fees     `json:"fees"`
-	ContentIDs []string `json:"contentIds,omitempty"`
+	ContentIDs []string `json:"contentIds,omitzero"`
 }
 
 // Config is the explicit task configuration (no kernel defaults).

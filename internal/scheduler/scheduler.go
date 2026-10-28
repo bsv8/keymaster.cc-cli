@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // CreateInput is the explicit task creation input.
@@ -840,11 +842,14 @@ func reviewSeats(s *State, drained []string, desired *orderedSet, qualified []Qu
 
 func pickRandom(s *State, ids []string) string {
 	sorted := append([]string(nil), ids...)
-	sort.Strings(sorted)
+	// JavaScript Array.sort and charCodeAt both operate on UTF-16 code units.
+	sort.Slice(sorted, func(i, j int) bool {
+		return slices.Compare(utf16.Encode([]rune(sorted[i])), utf16.Encode([]rune(sorted[j]))) < 0
+	})
 	seed := fmt.Sprintf("%s|%d|%s", s.TaskID, s.Sequence, strings.Join(sorted, ","))
 	hash := uint32(2166136261)
-	for index := 0; index < len(seed); index++ {
-		hash ^= uint32(seed[index])
+	for _, unit := range utf16.Encode([]rune(seed)) {
+		hash ^= uint32(unit)
 		hash *= 16777619
 	}
 	return sorted[int(hash%uint32(len(sorted)))]

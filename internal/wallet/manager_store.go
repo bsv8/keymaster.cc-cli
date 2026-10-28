@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
+	manager "github.com/bsv8/keymaster.cc-cli/utxo"
 )
 
 // Host storage envelope. The embedded manager state stays canonical utm/1 and

@@ -1,7 +1,7 @@
 // Package wallet implements the P2PKH wallet used by km.
 //
 // Selection, occupation and fee validation are decided by the deterministic
-// UTXO manager (keymaster.cc-utxo-manager, contract utm/1). The wallet is a
+// UTXO manager (keymaster.cc-cli/utxo, contract utm/1). The wallet is a
 // thin trusted adapter: WoC snapshots in, real signing, exact-bytes
 // broadcast, same SpendResult shape as before. Standard P2PKH flows produce
 // byte-identical fees to the previous implementation (10+148n+34m with
@@ -34,7 +34,7 @@ import (
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
 
-	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
+	manager "github.com/bsv8/keymaster.cc-cli/utxo"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/state"
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"

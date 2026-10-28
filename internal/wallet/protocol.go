@@ -8,7 +8,7 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"
-	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
+	manager "github.com/bsv8/keymaster.cc-cli/utxo"
 )
 
 // BindInputs binds every input of an exact signed transaction to the outputs
