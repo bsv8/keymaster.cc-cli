@@ -31,6 +31,7 @@ import (
 	"github.com/bsv8/bitcoin-libp2p/webrtcinterconnect"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/keymaster.cc-cli/internal/admin"
+	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
 	"github.com/bsv8/keymaster.cc-cli/internal/config"
@@ -55,6 +56,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	tpt "github.com/libp2p/go-libp2p/core/transport"
+	"github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	ma "github.com/multiformats/go-multiaddr"
 	"golang.org/x/term"
 )
@@ -107,8 +109,9 @@ func run(args []string) int {
 	}
 
 	var (
-		cfg *config.Config
-		err error
+		cfg         *config.Config
+		keyDocument *wallet.NetworkKeyHold
+		err         error
 	)
 	var password string
 	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
@@ -121,10 +124,30 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "km: 初始化失败:", err)
 			return exitError
 		}
+		keyDocument, err = config.LoadKey(config.KeyPath(path))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 读取钱包失败:", err)
+			return exitError
+		}
 	} else {
+		if migrated, err := config.MigrateEmbeddedWallet(path); err != nil {
+			fmt.Fprintln(os.Stderr, "km: 钱包迁移失败:", err)
+			return exitError
+		} else if migrated {
+			fmt.Printf("已迁移钱包到 %s（原配置已备份）\n", config.KeyPath(path))
+		}
 		cfg, err = config.Load(path)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "km: 读取配置失败:", err)
+			return exitError
+		}
+		keyDocument, err = config.LoadKey(config.KeyPath(path))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 读取钱包失败:", err)
+			return exitError
+		}
+		if err := config.VerifyPair(cfg, keyDocument); err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
 			return exitError
 		}
 		password, err = readPassword("钱包密码: ")
@@ -137,7 +160,7 @@ func run(args []string) int {
 		cfg.Scheduler.MaxBlockPriceSatoshis = *maxBlockPrice
 	}
 
-	privateKey, publicKeyHex, err := cfg.Wallet.Unlock(password)
+	privateKey, publicKeyHex, err := keyDocument.Unlock(password)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -294,8 +317,13 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	arbiters := make([]protocol.PublicKey, 0, len(cfg.Server.ArbiterPublicKeys))
-	for _, encoded := range cfg.Server.ArbiterPublicKeys {
+	arbiterKeys, err := cfg.RuntimeArbiterPublicKeys()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	arbiters := make([]protocol.PublicKey, 0, len(arbiterKeys))
+	for _, encoded := range arbiterKeys {
 		raw, decodeErr := hex.DecodeString(encoded)
 		if decodeErr != nil {
 			fmt.Fprintf(os.Stderr, "km: 仲裁公钥 %s 不是 hex\n", encoded)
@@ -386,6 +414,11 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 				WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
 				Index:         index,
 				Pricing:       table,
+				PersistDefaults: func(seedPrice, blockPrice string) error {
+					cfg.Server.DefaultSeedPriceSatoshis = seedPrice
+					cfg.Server.DefaultFullBlockPriceSatoshis = blockPrice
+					return cfg.Save(configPath)
+				},
 			})
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "km: Web Admin 启动失败:", err)
@@ -405,10 +438,15 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 // runDiscoverLoop connects to the first enabled supplier, subscribes to the
 // hash-request channel and reports verified demands until cancellation.
 func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte, index *catalog.Index, service *sell.Seller) int {
+	services, err := cfg.RuntimeServices()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
 	var supplier *config.Supplier
-	for candidate := range cfg.Services.SatSuppliers {
-		if cfg.Services.SatSuppliers[candidate].Enabled {
-			supplier = &cfg.Services.SatSuppliers[candidate]
+	for candidate := range services.SatSuppliers {
+		if services.SatSuppliers[candidate].Enabled {
+			supplier = &services.SatSuppliers[candidate]
 			break
 		}
 	}
@@ -829,9 +867,15 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		fmt.Fprintln(os.Stderr, "km: 监听地址无效:", err)
 		return exitError
 	}
+	services, err := cfg.RuntimeServices()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
 	buyerHost, err := golibp2p.NewHost(golibp2p.HostConfig{
-		Signer:      localSigner,
-		ListenAddrs: []ma.Multiaddr{listenAddr},
+		Signer:           localSigner,
+		ListenAddrs:      []ma.Multiaddr{listenAddr},
+		TransportOptions: []libp2p.Option{libp2p.Transport(websocket.New)},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 创建监听失败:", err)
@@ -848,10 +892,11 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
+	arbitrationClient := &arbitration.Client{Host: buyerHost, Endpoints: services.ArbitrationServices}
 	var supplier *config.Supplier
-	for index := range cfg.Services.SatSuppliers {
-		if cfg.Services.SatSuppliers[index].Enabled {
-			supplier = &cfg.Services.SatSuppliers[index]
+	for index := range services.SatSuppliers {
+		if services.SatSuppliers[index].Enabled {
+			supplier = &services.SatSuppliers[index]
 			break
 		}
 	}
@@ -928,6 +973,7 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 			defer session.Close()
 			renderer.Render(ui.State{Stage: ui.StageWaiting, SeedHash: seedHash, Detail: locator.Address})
 			result, purchaseErr = task.RunPurchase(ctx, session, bitfs.PurchaseOptions{
+				Arbitration:       arbitrationClient,
 				PoolID:            poolID,
 				SeedHashHex:       seedHash,
 				OutputDir:         outputDir,
@@ -967,7 +1013,8 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		defer runCancel()
 		renderer.Render(ui.State{Stage: ui.StageWaiting, SeedHash: seedHash, Detail: "调度器下载（" + locator.Address + "）"})
 		result, purchaseErr = download.Run(runCtx, download.Options{
-			Task: task, SeedHash: seedHash, OutputDir: outputDir,
+			Arbitration: arbitrationClient,
+			Task:        task, SeedHash: seedHash, OutputDir: outputDir,
 			Wallet: w, Store: workStore,
 			Accept: func(acceptCtx context.Context) (*transport.Session, error) {
 				if _, err := publisher.PublishDemand(acceptCtx, seedHash, 10*time.Minute); err != nil {

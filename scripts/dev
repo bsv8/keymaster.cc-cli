@@ -1,0 +1,11 @@
+#!/bin/sh
+# Local dev environment only; normal km runs do not read dotenv files.
+set -eu
+cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+if [ -f .env.dev.local ]; then
+  set -a
+  . ./.env.dev.local
+  set +a
+fi
+export KEYMASTER_ENV=dev
+exec go run ./cmd/km "$@"

@@ -52,7 +52,8 @@ systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项�
 
 首次运行（`~/.km/config.json` 不存在）需要在交互式终端中选择网络
 （`main` / `test`）并两次输入钱包密码；随后生成 secp256k1 私钥、加密
-KeyHold 文档、写入按网络区分的缺省配置。
+KeyHold 文档写入同目录的 `~/.km/key.json`、按网络区分的缺省配置写入
+`~/.km/config.json`。
 
 无人值守运行使用 systemd credentials：
 
@@ -65,19 +66,32 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 
 ## 配置
 
-- 路径：`~/.km/config.json`（0600，目录 0700）。
-- 只保存加密 KeyHold 文档与网络绑定，不保存明文私钥或密码。
+- 路径：`~/.km/config.json`（设置，0600）与同目录 `~/.km/key.json`（纯 KeyHold 钱包文档，0600），目录 0700。
+- config.json 可覆盖保存（如 Web Admin 改缺省价会写回）；key.json 只在初始化/迁移时写入，启动时输密码解锁。
+- 不保存明文私钥或密码。
 - 网络（`bsvNetwork`）在初始化时固定；WOC 端点由网络推导，不写入配置。
 - `wocApiKey` 缺省为空，可填写自己的 WhatsonChain API Key。
 - `feeRateSatoshisPerKb` 缺省 1000，用于钱包交易手续费估算（v1 无最高费率阈值）。
-- `server.arbiterPublicKeys`：本服务提供的仲裁公钥（压缩 hex）；为空时买方无法开池，`km -server` 会警告。
-- 调度器、SatSubscription 供应商、server 缺省售价等缺省值随网络写入。
+- `server.arbiterPublicKeys`：额外接受的仲裁公钥（压缩 hex）；代码内置/当前 dev 目录公钥自动加入卖方报价。
+- `services.arbitrationServices`：可追加的自定义可信完整端点 `{name?, publicKeyHex, address}`。买方只选择报价与可信目录的交集，并从认证仲裁服务的 info v2 获取条目费率；查询失败不以假定费用开池。
+- main/test 的仲裁和默认 SatSubscription 网关由代码内置；运行时重新注入 `bsv8` 的代码值，同时保留原配置首个启用自定义网关的发布选择，不能用持久配置改写内置身份。调度器和售价初始值随网络写入。
+
+### dev 服务覆盖
+
+`./scripts/dev <km 参数>` 读取本仓 `.env.dev.local` 并设置 `KEYMASTER_ENV=dev`；普通 `km` 不自动读取 dotenv。也可由启动器或集成测试直接注入进程环境：
+
+- `KEYMASTER_ENV=dev`：启用临时覆盖，不改变钱包 main/test 链网络。
+- `KEYMASTER_DEV_ARBITRATION_SERVICES`：JSON 数组，元素为 `{name?, publicKeyHex, address}`，替换完整默认仲裁目录；`[]` 表示无可信仲裁。
+- `KEYMASTER_DEV_SAT_SUPPLIER`：JSON 对象 `{name?, publicKeyHex, multiaddrs}`，替换默认网关。未设置的服务仍用当前钱包网络内置值。
+
+临时目录不写回 `config.json`；公钥与完整地址中的 PeerID 必须一致。费率不写入 env，从服务查询。完整默认身份和两端配置说明见 `../BSV8_Engineering/docs/keymaster.cc/服务缺省与开发覆盖.md`。
 
 ## 目录布局
 
 | 路径 | 用途 |
 | --- | --- |
-| `~/.km/config.json` | 配置（0600） |
+| `~/.km/config.json` | 设置（0600，可覆盖保存） |
+| `~/.km/key.json` | 钱包 KeyHold 文档（0600，启动输密码解锁） |
 | `~/.km/client/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
 | `~/.km/client/unresolved/` | 未决资金历史（append-only NDJSON；广播未知的交易记录） |
 | `~/.km/server/` | 服务端数据（`pricing.json`、`sessions/` 售卖会话） |
@@ -129,6 +143,7 @@ TS 包构建见 `../keymaster.cc/packages/download-scheduler/README.md`；CLI �
 | `internal/host` | 调度器宿主：内核状态 + 命令 outbox 持久化、命令幂等执行、`open/download/drain/close` 与买方执行层接线、事实回灌 |
 | `internal/output` | 下载文件组装：以已验证 seed 为清单逐块校验、`<seed-hash>.km` 临时文件、安全唯一名原子改名与改名崩溃恢复 |
 | `internal/sell` | 卖方协议执行层：目录+定价报价、预签/验资/交付/收款/关池（卖方广播），exact 复用与先落盘后发送 |
+| `internal/arbitration` | 可信端点身份校验与仲裁 info v2 查询；新池预算使用实际条目费率，不提供完整提交/取回应用工作流 |
 | `internal/ssp` | SatSubscription 客户端：libp2p `/ssp/1.0.0` 长连接、uvarint 分帧、订阅/发布/投递 |
 | `internal/discovery` | 需求发现：签名 Hash 请求发布（`bsv8.hash.request.v1`）与卖方验签监听 |
 | `internal/transport` | BitFS 传输：`/bitfs/wire/1.0.0` + uvarint 分帧（与浏览器同一协议），卖方拨号/买方接流 |

@@ -1,8 +1,10 @@
-// Package config manages ~/.km/config.json: first-run initialization,
+// Package config manages ~/.km/config.json (settings) and the sibling
+// ~/.km/key.json (wallet KeyHold document): first-run initialization,
 // network-bound defaults, strict loading and atomic saving.
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -12,7 +14,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
@@ -60,7 +64,8 @@ type Supplier struct {
 
 // Services holds the external services the CLI depends on.
 type Services struct {
-	SatSuppliers []Supplier `json:"satSuppliers"`
+	SatSuppliers        []Supplier             `json:"satSuppliers"`
+	ArbitrationServices []arbitration.Endpoint `json:"arbitrationServices,omitempty"`
 }
 
 // Server holds the seller settings.
@@ -78,12 +83,13 @@ type Admin struct {
 	APIKey string `json:"apiKey"`
 }
 
-// Config is the on-disk configuration.
+// Config is the on-disk settings file. The wallet KeyHold document lives in
+// the sibling key.json (see KeyPath); settings can be freely overwritten
+// without touching the wallet.
 type Config struct {
-	Version    int                   `json:"version"`
-	BsvNetwork Network               `json:"bsvNetwork"`
-	Wallet     wallet.NetworkKeyHold `json:"wallet"`
-	WOCAPIKey  string                `json:"wocApiKey"`
+	Version    int     `json:"version"`
+	BsvNetwork Network `json:"bsvNetwork"`
+	WOCAPIKey  string  `json:"wocApiKey"`
 	// FeeRateSatoshisPerKb is the miner fee rate used for wallet spends.
 	FeeRateSatoshisPerKb int64     `json:"feeRateSatoshisPerKb"`
 	Scheduler            Scheduler `json:"scheduler"`
@@ -101,7 +107,118 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".km", "config.json"), nil
 }
 
-// Init creates a new config with a freshly generated secp256k1 key.
+// KeyPath returns the wallet KeyHold file for a config path: key.json
+// next to the config file.
+func KeyPath(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), "key.json")
+}
+
+// LoadKey reads and strictly validates the wallet KeyHold file.
+func LoadKey(keyPath string) (*wallet.NetworkKeyHold, error) {
+	raw, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	document, err := wallet.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("钱包文件无效: %w", err)
+	}
+	return document, nil
+}
+
+// VerifyPair checks the settings/key network binding. The two files are
+// loaded separately; a network switch in either file is rejected here.
+func VerifyPair(cfg *Config, document *wallet.NetworkKeyHold) error {
+	if document.BsvNetwork != string(cfg.BsvNetwork) {
+		return errors.New("配置网络与钱包网络绑定不一致")
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path atomically with 0600 permissions.
+func writeFileAtomic(path string, data []byte) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".tmp-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return fmt.Errorf("替换文件失败: %w", err)
+	}
+	return nil
+}
+
+// MigrateEmbeddedWallet splits a pre-split config (with an embedded
+// "wallet" document) into key.json plus a wallet-free config. It backs up
+// the original file first and never needs the password: the encrypted
+// KeyHold blob is moved verbatim. It refuses to run when key.json already
+// exists, so an existing wallet is never overwritten. It returns false when
+// there is nothing to migrate.
+func MigrateEmbeddedWallet(configPath string) (bool, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return false, fmt.Errorf("配置文件不是有效 JSON: %w", err)
+	}
+	walletRaw, embedded := document["wallet"]
+	if !embedded {
+		return false, nil
+	}
+	if _, err := wallet.Parse(walletRaw); err != nil {
+		return false, fmt.Errorf("内嵌钱包无效，拒绝迁移: %w", err)
+	}
+	keyPath := KeyPath(configPath)
+	if _, err := os.Stat(keyPath); err == nil {
+		return false, fmt.Errorf("钱包文件已存在，拒绝覆盖: %s", keyPath)
+	}
+	backup := fmt.Sprintf("%s.bak-%d", configPath, time.Now().Unix())
+	if err := writeFileAtomic(backup, raw); err != nil {
+		return false, fmt.Errorf("备份配置失败: %w", err)
+	}
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, walletRaw, "", "  "); err != nil {
+		return false, fmt.Errorf("内嵌钱包无效，拒绝迁移: %w", err)
+	}
+	indented.WriteByte('\n')
+	if err := writeFileAtomic(keyPath, indented.Bytes()); err != nil {
+		return false, err
+	}
+	delete(document, "wallet")
+	rewritten, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("序列化配置失败: %w", err)
+	}
+	rewritten = append(rewritten, '\n')
+	if err := writeFileAtomic(configPath, rewritten); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Init creates wallet key.json plus settings config with a freshly generated secp256k1 key.
 func Init(path string, network Network, password string) (*Config, error) {
 	privateKey, err := secp256k1.GeneratePrivateKey()
 	if err != nil {
@@ -112,9 +229,9 @@ func Init(path string, network Network, password string) (*Config, error) {
 	return InitWithKey(path, network, password, serialized)
 }
 
-// InitWithKey creates a config for an explicitly provided 32-byte secp256k1
-// key (imported or test keys). It performs the same defaults and validation as
-// Init.
+// InitWithKey creates the key.json wallet file plus the settings config for
+// an explicitly provided 32-byte secp256k1 key (imported or test keys). It
+// performs the same defaults and validation as Init.
 func InitWithKey(path string, network Network, password string, privateKey []byte) (*Config, error) {
 	if !network.Valid() {
 		return nil, fmt.Errorf("网络必须是 main 或 test")
@@ -136,10 +253,21 @@ func InitWithKey(path string, network Network, password string, privateKey []byt
 		return nil, err
 	}
 	price := defaultPrices[network]
+	keyPath := KeyPath(path)
+	if _, err := os.Stat(keyPath); err == nil {
+		return nil, fmt.Errorf("钱包文件已存在: %s", keyPath)
+	}
+	keyEncoded, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("序列化钱包失败: %w", err)
+	}
+	keyEncoded = append(keyEncoded, '\n')
+	if err := writeFileAtomic(keyPath, keyEncoded); err != nil {
+		return nil, err
+	}
 	cfg := &Config{
 		Version:              Version,
 		BsvNetwork:           network,
-		Wallet:               *document,
 		WOCAPIKey:            "",
 		FeeRateSatoshisPerKb: 1000,
 		Scheduler: Scheduler{
@@ -165,43 +293,45 @@ func InitWithKey(path string, network Network, password string, privateKey []byt
 		Admin: Admin{APIKey: apiKey},
 	}
 	if err := cfg.Save(path); err != nil {
+		_ = os.Remove(keyPath)
 		return nil, err
 	}
 	return cfg, nil
 }
 
-// Load reads and strictly validates a config file.
+// Load reads and strictly validates the settings file. The wallet lives in
+// the sibling key.json (see LoadKey); a config that still embeds "wallet"
+// is rejected—split it first with MigrateEmbeddedWallet.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var shell struct {
-		Version              int             `json:"version"`
-		BsvNetwork           Network         `json:"bsvNetwork"`
-		Wallet               json.RawMessage `json:"wallet"`
-		WOCAPIKey            string          `json:"wocApiKey"`
-		FeeRateSatoshisPerKb int64           `json:"feeRateSatoshisPerKb"`
-		Scheduler            Scheduler       `json:"scheduler"`
-		Services             Services        `json:"services"`
-		Server               Server          `json:"server"`
-		Admin                Admin           `json:"admin"`
+		Version              int       `json:"version"`
+		BsvNetwork           Network   `json:"bsvNetwork"`
+		WOCAPIKey            string    `json:"wocApiKey"`
+		FeeRateSatoshisPerKb int64     `json:"feeRateSatoshisPerKb"`
+		Scheduler            Scheduler `json:"scheduler"`
+		Services             Services  `json:"services"`
+		Server               Server    `json:"server"`
+		Admin                Admin     `json:"admin"`
 	}
 	if err := json.Unmarshal(raw, &shell); err != nil {
 		return nil, fmt.Errorf("配置文件不是有效 JSON: %w", err)
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("配置文件不是有效 JSON: %w", err)
+	}
+	if _, embedded := probe["wallet"]; embedded {
+		return nil, errors.New("配置仍内嵌钱包字段，请先迁移为 key.json")
 	}
 	if shell.Version != Version {
 		return nil, fmt.Errorf("配置版本不受支持: %d", shell.Version)
 	}
 	if !shell.BsvNetwork.Valid() {
 		return nil, fmt.Errorf("配置网络无效: %q", shell.BsvNetwork)
-	}
-	document, err := wallet.Parse(shell.Wallet)
-	if err != nil {
-		return nil, fmt.Errorf("配置中的钱包无效: %w", err)
-	}
-	if document.BsvNetwork != string(shell.BsvNetwork) {
-		return nil, errors.New("配置网络与钱包网络绑定不一致")
 	}
 	if shell.FeeRateSatoshisPerKb == 0 {
 		// Configs created before the fee-rate field adopt the default.
@@ -210,7 +340,6 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		Version:              shell.Version,
 		BsvNetwork:           shell.BsvNetwork,
-		Wallet:               *document,
 		WOCAPIKey:            shell.WOCAPIKey,
 		FeeRateSatoshisPerKb: shell.FeeRateSatoshisPerKb,
 		Scheduler:            shell.Scheduler,
@@ -274,12 +403,6 @@ func (c *Config) validate() error {
 	if !c.BsvNetwork.Valid() {
 		return fmt.Errorf("配置网络无效: %q", c.BsvNetwork)
 	}
-	if c.Wallet.Format != wallet.Format || c.Wallet.BsvNetwork != string(c.BsvNetwork) {
-		return errors.New("配置钱包与网络不匹配")
-	}
-	if c.Wallet.KeyHold.Format == "" || c.Wallet.KeyHold.PublicKeyHex == "" {
-		return errors.New("配置缺少钱包文档")
-	}
 	if c.Admin.APIKey == "" {
 		return errors.New("配置缺少管理 API Key")
 	}
@@ -298,12 +421,14 @@ func (c *Config) validate() error {
 			return errors.New("server 缺省售价无效")
 		}
 	}
-	if len(c.Services.SatSuppliers) == 0 {
-		return errors.New("配置缺少 SatSubscription 供应商")
-	}
 	for _, supplier := range c.Services.SatSuppliers {
 		if supplier.ID == "" || !regexp.MustCompile(`^(02|03)[0-9a-f]{64}$`).MatchString(supplier.PublicKeyHex) || len(supplier.Multiaddrs) == 0 {
 			return fmt.Errorf("供应商配置无效: %s", supplier.ID)
+		}
+	}
+	for _, endpoint := range c.Services.ArbitrationServices {
+		if _, err := endpoint.AddressInfo(); err != nil {
+			return err
 		}
 	}
 	if strings.Contains(c.WOCAPIKey, "\n") {

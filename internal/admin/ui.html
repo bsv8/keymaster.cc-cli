@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>km 管理 · {{.Network}}</title>
+<title>km 管理</title>
 <style>
   :root { color-scheme: light dark; --muted:#888; --line:#8884; }
   body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; }
@@ -13,31 +13,52 @@
   th, td { text-align: left; padding: .35rem .4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-size: .85rem; color: var(--muted); font-weight: 600; }
   .muted { color: var(--muted); } code { font-size: .85rem; }
-  #keyBar { margin: 1rem 0; padding: .6rem; border: 1px solid var(--line); border-radius: .4rem; }
-  #status { margin: .5rem 0 1rem; }
+  .error { color: #c0392b; }
+  [hidden] { display: none !important; }
+  #loginBox { margin: 4rem auto; max-width: 26rem; padding: 1.2rem; border: 1px solid var(--line); border-radius: .5rem; }
+  #loginBox input { width: 100%; box-sizing: border-box; margin: .6rem 0; }
 </style>
 </head>
 <body>
-<h1>km 管理 <span class="muted">({{.Network}})</span></h1>
-<div id="keyBar" class="row">
-  <label for="key">API Key</label>
-  <input id="key" type="password" autocomplete="off" style="flex:1;min-width:14rem" placeholder="~/.km/config.json 的 admin.apiKey">
-  <button id="save">保存</button>
-  <span id="hint" class="muted"></span>
+<div id="loginView">
+  <div id="loginBox">
+    <h1>km 管理</h1>
+    <p class="muted">请输入 API Key（~/.km/config.json 的 admin.apiKey），正确后进入管理页。</p>
+    <form id="loginForm">
+      <input id="key" type="password" autocomplete="off" placeholder="API Key">
+      <div class="row"><button id="login" type="submit">登录</button></div>
+    </form>
+    <p id="loginError" class="error"></p>
+  </div>
 </div>
-<pre id="status" class="muted">未连接</pre>
-<div class="row">
-  <label>批量</label>
-  <select id="mode"><option value="unpriced">仅未定价</option><option value="all">覆盖全部</option></select>
-  <input id="batchPath" placeholder="目录（可选，空=全部）" size="16">
-  <input id="seedPrice" placeholder="Seed 价格 (sats)" size="14">
-  <input id="blockPrice" placeholder="完整块价格 (sats)" size="14">
-  <button id="batch">应用</button>
+<div id="adminView" hidden>
+  <h1>km 管理 <span class="muted" id="network"></span></h1>
+  <div class="row">
+    <span class="muted">API Key 已验证（仅本标签页有效）</span>
+    <button id="lock" type="button">锁定</button>
+    <span id="hint" class="muted"></span>
+  </div>
+  <pre id="status" class="muted">未连接</pre>
+  <div class="row">
+    <label>缺省</label>
+    <input id="defaultSeedPrice" placeholder="Seed 缺省 (sats)" size="14">
+    <input id="defaultBlockPrice" placeholder="完整块缺省 (sats)" size="14">
+    <button id="saveDefaults">保存缺省</button>
+    <span class="muted">已有独立定价的文件不受影响；保存后写入 config.json，重启保持</span>
+  </div>
+  <div class="row">
+    <label>批量</label>
+    <select id="mode"><option value="unpriced">仅未定价</option><option value="all">覆盖全部</option></select>
+    <input id="batchPath" placeholder="目录（可选，空=全部）" size="16">
+    <input id="seedPrice" placeholder="Seed 价格 (sats)" size="14">
+    <input id="blockPrice" placeholder="完整块价格 (sats)" size="14">
+    <button id="batch">应用</button>
+  </div>
+  <table>
+    <thead><tr><th>文件</th><th>大小</th><th>Seed / 块价</th><th>来源</th><th></th></tr></thead>
+    <tbody id="files"><tr><td colspan="5" class="muted">加载中</td></tr></tbody>
+  </table>
 </div>
-<table>
-  <thead><tr><th>文件</th><th>大小</th><th>Seed / 块价</th><th>来源</th><th></th></tr></thead>
-  <tbody id="files"><tr><td colspan="5" class="muted">填入 API Key 后加载</td></tr></tbody>
-</table>
 <script>
 const $ = id => document.getElementById(id);
 let key = sessionStorage.getItem('km-admin-key') || '';
@@ -48,8 +69,20 @@ async function call(path, options = {}) {
   if (!response.ok) throw new Error(response.status + ' ' + (await response.text()).slice(0, 200));
   return response.json();
 }
+function showLogin(message) {
+  $('adminView').hidden = true;
+  $('loginView').hidden = false;
+  $('loginError').textContent = message || '';
+}
+function showAdmin() {
+  $('loginView').hidden = true;
+  $('adminView').hidden = false;
+}
 async function refresh() {
   const status = await call('/api/status');
+  $('network').textContent = '(' + status.network + ')';
+  $('defaultSeedPrice').value = status.seedPrice;
+  $('defaultBlockPrice').value = status.blockPrice;
   $('status').textContent = JSON.stringify(status, null, 2);
   const { files } = await call('/api/files');
   $('files').innerHTML = files.map(file => `
@@ -65,7 +98,40 @@ async function refresh() {
     </tr>`).join('');
 }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-$('save').onclick = () => { key = $('key').value.trim(); sessionStorage.setItem('km-admin-key', key); refresh().catch(showError); };
+function showError(error) { $('hint').textContent = String(error.message || error); }
+// enter verifies the candidate key against /api/status: only success enters.
+async function enter(candidate) {
+  key = candidate;
+  try {
+    await refresh();
+  } catch (error) {
+    key = sessionStorage.getItem('km-admin-key') || '';
+    throw error;
+  }
+  sessionStorage.setItem('km-admin-key', key);
+  showAdmin();
+}
+$('loginForm').onsubmit = async event => {
+  event.preventDefault();
+  $('loginError').textContent = '';
+  try {
+    await enter($('key').value.trim());
+  } catch (error) {
+    showLogin('API Key 不正确（' + (error.message || error) + '）');
+  }
+};
+$('lock').onclick = () => {
+  sessionStorage.removeItem('km-admin-key');
+  key = '';
+  $('key').value = '';
+  showLogin('');
+};
+$('saveDefaults').onclick = async () => {
+  try {
+    await call('/api/pricing/defaults', { method:'PUT', body: JSON.stringify({ seedPrice: $('defaultSeedPrice').value.trim(), blockPrice: $('defaultBlockPrice').value.trim() }) });
+    await refresh();
+  } catch (error) { showError(error); }
+};
 $('batch').onclick = async () => {
   try {
     await call('/api/pricing/batch', { method:'POST', body: JSON.stringify({ mode: $('mode').value, path: $('batchPath').value.trim(), seedPrice: $('seedPrice').value.trim(), blockPrice: $('blockPrice').value.trim() }) });
@@ -88,8 +154,17 @@ $('files').onclick = async event => {
     await refresh();
   } catch (error) { showError(error); }
 };
-function showError(error) { $('hint').textContent = String(error.message || error); }
-if (key) refresh().catch(() => { $('files').innerHTML = '<tr><td colspan="5" class="muted">API Key 无效或服务未启动</td></tr>'; });
+// Auto-login only when the stored key still verifies; otherwise stay locked.
+if (key) {
+  enter(key).catch(() => {
+    sessionStorage.removeItem('km-admin-key');
+    key = '';
+    $('key').value = '';
+    showLogin('已保存的 API Key 无效，请重新登录');
+  });
+} else {
+  showLogin('');
+}
 </script>
 </body>
 </html>

@@ -23,6 +23,7 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/wire"
 
+	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/host"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
@@ -41,11 +42,12 @@ const (
 
 // Options configures one scheduler-driven download.
 type Options struct {
-	Task      *bitfs.BuyerTask
-	SeedHash  string
-	OutputDir string
-	Wallet    *wallet.Wallet
-	Store     *store.Store
+	Arbitration arbitration.Resolver
+	Task        *bitfs.BuyerTask
+	SeedHash    string
+	OutputDir   string
+	Wallet      *wallet.Wallet
+	Store       *store.Store
 	// Accept returns the next seller session. It is called once at the start
 	// and again whenever a closed pool leaves content pending. The
 	// implementation is responsible for republishing the demand if needed.
@@ -170,8 +172,8 @@ func (p *sessionPeer) Close(_ context.Context, _ string, kind12 []byte) ([]byte,
 // Run drives the download until every content item is purchased and every pool
 // is settled.
 func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
-	if options.Task == nil || options.Wallet == nil || options.Store == nil || options.Accept == nil {
-		return nil, errors.New("download: task, wallet, store and accept are required")
+	if options.Task == nil || options.Wallet == nil || options.Store == nil || options.Accept == nil || options.Arbitration == nil {
+		return nil, errors.New("download: task, wallet, store, accept and arbitration resolver are required")
 	}
 	logf := options.Logf
 	if logf == nil {
@@ -225,18 +227,19 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	quotes := &quoteSource{records: map[string]*host.QuoteRecord{}}
 	var loop *host.Loop
 	var (
-		versionsMu     sync.Mutex
-		versions       = map[string]int64{}
-		quoteByID      = map[string]scheduler.Quote{}
-		latest         = map[string]scheduler.Quote{}
-		sellerSessions = map[string][]string{}
-		pendingSlots   int
-		sessionSeq     int64
-		manifestOnce   bool
-		votesMu        sync.Mutex
-		votes          = map[string]string{}
-		contentMu      sync.Mutex
-		contentBytes   = map[string]int64{}
+		versionsMu      sync.Mutex
+		versions        = map[string]int64{}
+		arbitrationFees = map[string]arbitration.Info{}
+		quoteByID       = map[string]scheduler.Quote{}
+		latest          = map[string]scheduler.Quote{}
+		sellerSessions  = map[string][]string{}
+		pendingSlots    int
+		sessionSeq      int64
+		manifestOnce    bool
+		votesMu         sync.Mutex
+		votes           = map[string]string{}
+		contentMu       sync.Mutex
+		contentBytes    = map[string]int64{}
 	)
 	quoteForSession := func(sessionID string) (host.Peer, error) {
 		peersMu.Lock()
@@ -304,7 +307,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			_ = session.Close()
 			return "", "", nil, errors.New("download: quote offers no arbiter")
 		}
-		arbiterPublicKey, err := protocol.PublicKeyFromBytes(arbiters[0])
+		arbiterPublicKey, feeInfo, err := options.Arbitration.Select(ctx, arbiters)
 		if err != nil {
 			untrackSession(session)
 			_ = session.Close()
@@ -312,6 +315,9 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		}
 		seq := atomic.AddInt64(&sessionSeq, 1)
 		sessionID := fmt.Sprintf("%s-%s-%d", options.SeedHash[:16], sellerID[:16], seq)
+		versionsMu.Lock()
+		arbitrationFees[sessionID] = feeInfo
+		versionsMu.Unlock()
 		quotes.set(sellerID, sessionID, &host.QuoteRecord{
 			QuoteRaw:         raw,
 			SellerPublicKey:  sellerPublicKey,
@@ -369,7 +375,8 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			BlockBytes: int64(masterseed.BlockSize),
 			TailPrice:  &tail,
 			MaxBlocks:  int64(terms.MaxBlocksPerBatch),
-			Fees:       scheduler.Fees{Version: 1, Opening: feeOpening, Settlement: feeSettlement, ArbitrationBase: "1", ArbitrationPerItem: "1"},
+			Fees: scheduler.Fees{Version: 1, Opening: feeOpening, Settlement: feeSettlement,
+				ArbitrationBase: fmt.Sprint(arbitrationFees[sessionID].BaseSat), ArbitrationPerItem: fmt.Sprint(arbitrationFees[sessionID].PerItemSat)},
 		}
 		quoteByID[sessionID] = quote
 		latest[sellerID] = quote

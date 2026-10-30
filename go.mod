@@ -11,6 +11,7 @@ require (
 	github.com/bsv8/bitcoin-libp2p v0.3.1
 	github.com/bsv8/go-bitfs v0.5.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
+	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/libp2p/go-libp2p v0.50.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -29,7 +30,6 @@ require (
 	github.com/dunglas/httpsfv v1.1.1 // indirect
 	github.com/filecoin-project/go-clock v0.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect

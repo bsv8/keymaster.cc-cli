@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/wire"
 
+	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 )
@@ -35,6 +37,7 @@ type PurchaseSession interface {
 
 // PurchaseOptions configures one direct purchase.
 type PurchaseOptions struct {
+	Arbitration        arbitration.Resolver
 	PoolID             string
 	SeedHashHex        string
 	PoolAmountSatoshis uint64
@@ -117,19 +120,32 @@ func (t *BuyerTask) RunPurchase(ctx context.Context, session PurchaseSession, op
 	if len(arbiters) == 0 {
 		return nil, errors.New("bitfs: quote offers no arbiter")
 	}
-	arbiter, err := protocol.PublicKeyFromBytes(arbiters[0])
-	if err != nil {
-		return nil, fmt.Errorf("bitfs: invalid arbiter key: %w", err)
+	var arbiter protocol.PublicKey
+	var feeInfo arbitration.Info
+	if !options.Resume {
+		if options.Arbitration == nil {
+			return nil, errors.New("bitfs: arbitration resolver required for a new pool")
+		}
+		arbiter, feeInfo, err = options.Arbitration.Select(ctx, arbiters)
+		if err != nil {
+			return nil, fmt.Errorf("bitfs: arbitration fee query: %w", err)
+		}
 	}
 	sellerPublicKey, err := protocol.PublicKeyFromBytes(verified.SellerPublicKey())
 	if err != nil {
 		return nil, fmt.Errorf("bitfs: invalid seller key: %w", err)
 	}
 	amount := options.PoolAmountSatoshis
-	if amount == 0 {
-		amount, err = purchasePoolAmount(verified.Terms())
+	if !options.Resume {
+		minimum, err := purchasePoolAmount(verified.Terms(), feeInfo)
 		if err != nil {
 			return nil, err
+		}
+		if amount == 0 {
+			amount = minimum
+		}
+		if amount < minimum {
+			return nil, errors.New("bitfs: pool amount does not cover content, settlement and queried arbitration reserve")
 		}
 	}
 	delay := options.RefundDelayBlocks
@@ -566,9 +582,9 @@ func (t *BuyerTask) exchangeContent(ctx context.Context, session PurchaseSession
 }
 
 // purchasePoolAmount budgets a pool that covers every content price plus a
-// miner-fee reserve for the in-pool payment transactions.
-func purchasePoolAmount(terms *content.FileQuoteTerms) (uint64, error) {
-	total := terms.SeedPriceSatoshis
+// settlement miner fee and the queried fee for the largest delivery batch.
+func purchasePoolAmount(terms *content.FileQuoteTerms, fee arbitration.Info) (uint64, error) {
+	total := new(big.Int).SetUint64(terms.SeedPriceSatoshis)
 	blockCount := masterseed.BlockCountForSourceSize(terms.FileSizeBytes)
 	for index := uint64(0); index < blockCount; index++ {
 		size, err := masterseed.ExpectedBlockSize(terms.FileSizeBytes, index)
@@ -579,9 +595,22 @@ func purchasePoolAmount(terms *content.FileQuoteTerms) (uint64, error) {
 		if err != nil {
 			return 0, err
 		}
-		total += price
+		total.Add(total, new(big.Int).SetUint64(price))
 	}
-	return total + defaultPurchaseFeeReserve, nil
+	items := blockCount
+	if items > uint64(terms.MaxBlocksPerBatch) {
+		items = uint64(terms.MaxBlocksPerBatch)
+	}
+	if items < 1 {
+		items = 1
+	} // Seed and tail blocks are each one content item.
+	total.Add(total, new(big.Int).SetUint64(defaultPurchaseFeeReserve))
+	total.Add(total, new(big.Int).SetUint64(fee.BaseSat))
+	total.Add(total, new(big.Int).Mul(new(big.Int).SetUint64(fee.PerItemSat), new(big.Int).SetUint64(items)))
+	if !total.IsUint64() {
+		return 0, errors.New("bitfs: pool budget overflows uint64")
+	}
+	return total.Uint64(), nil
 }
 
 // anyStaged reports whether at least one of the hashes has verified bytes.

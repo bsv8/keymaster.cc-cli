@@ -18,11 +18,11 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
    install -d -o km -g km -m 0755 /srv/files /srv/downloads
    ```
 
-2. 首次初始化（交互式，创建 `~/.km/config.json` 与钱包）：
+2. 首次初始化（交互式，创建 `~/.km/config.json` 与同目录 `key.json`）：
 
    ```sh
    sudo -u km -H /usr/local/bin/km -config /etc/km/config.json
-   # 或手动执行一次 km 的首次运行流程后把配置放到 /etc/km/config.json
+   # 或手动执行一次 km 的首次运行流程后把配置与钱包（config.json + key.json）放到 /etc/km/
    ```
 
 3. 加密保存钱包密码凭据：
@@ -47,6 +47,6 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
 
 - 配置里的 `bsvNetwork` 决定 WhatsonChain 端点；测试网用 `test`。
 - `-admin` 默认只监听 `127.0.0.1:8790`；API Key 在配置的 `admin.apiKey`。
-- 数据：`~/.km/config.json`、`~/.km/client/<seed-hash>/`（下载/账本/日志）、
+- 数据：`~/.km/config.json`（设置）、`~/.km/key.json`（钱包）、`~/.km/client/<seed-hash>/`（下载/账本/日志）、
   `~/.km/server/`（目录索引、定价、售卖会话）、`~/.km/client/unresolved/`（未决广播）。
-- 备份 `~/.km/config.json` 与 server 会话目录即可；私钥只存在加密的 KeyHold 文档里。
+- 备份 `~/.km/config.json`、`~/.km/key.json` 与 server 会话目录即可；私钥只存在加密的 KeyHold 文档里。

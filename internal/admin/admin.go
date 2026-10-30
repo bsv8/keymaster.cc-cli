@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
@@ -46,13 +47,18 @@ type Options struct {
 	Pricing *pricing.Pricing
 	// Status optionally contributes extra status fields.
 	Status func() map[string]any
+	// PersistDefaults saves new server default prices to the settings
+	// file (config.json). It runs after the in-memory/pricing.json update
+	// validates; a nil value leaves PUT /api/pricing/defaults unavailable.
+	PersistDefaults func(seedPrice, blockPrice string) error
 }
 
 // Server is a running admin HTTP server.
 type Server struct {
-	options Options
-	server  *http.Server
-	addr    string
+	options    Options
+	server     *http.Server
+	addr       string
+	defaultsMu sync.Mutex
 }
 
 // Start validates options and serves in a goroutine.
@@ -79,6 +85,7 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 	mux.HandleFunc("/api/status", server.handleStatus)
 	mux.HandleFunc("/api/files", server.handleFiles)
 	mux.HandleFunc("/api/pricing/batch", server.handleBatch)
+	mux.HandleFunc("/api/pricing/defaults", server.handleDefaults)
 	mux.HandleFunc("/api/pricing/file", server.handleFile)
 	server.server = &http.Server{Addr: options.Address, Handler: server.guard(mux), ReadHeaderTimeout: 10 * time.Second}
 	listener, err := net.Listen("tcp", options.Address)
@@ -154,9 +161,10 @@ func (s *Server) handleUI(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writer.Header().Set("content-type", "text/html; charset=utf-8")
-	_ = uiTemplate.Execute(writer, map[string]any{
-		"Network": s.options.Network,
-	})
+	// The page is a login shell: it carries no network, wallet or file
+	// data. Everything sensitive loads after the key verifies against
+	// /api/status.
+	_ = uiTemplate.Execute(writer, nil)
 }
 
 func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request) {
@@ -261,6 +269,41 @@ func (s *Server) handleBatch(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, map[string]any{"updated": len(paths)})
+}
+
+// handleDefaults updates the server default prices: validation against
+// the pricing table first (400 on bad sats), then the settings file
+// (500 on persistence failure). A persistence failure after the in-memory
+// update is reported as 500 and converges back on restart, which always
+// applies the settings file.
+func (s *Server) handleDefaults(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPut {
+		methodNotAllowed(writer)
+		return
+	}
+	var body struct {
+		SeedPrice  string `json:"seedPrice"`
+		BlockPrice string `json:"blockPrice"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64<<10)).Decode(&body); err != nil {
+		http.Error(writer, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if s.options.PersistDefaults == nil {
+		http.Error(writer, "defaults persistence is not configured", http.StatusInternalServerError)
+		return
+	}
+	s.defaultsMu.Lock()
+	defer s.defaultsMu.Unlock()
+	if err := s.options.Pricing.SetDefaults(body.SeedPrice, body.BlockPrice); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.options.PersistDefaults(body.SeedPrice, body.BlockPrice); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, map[string]any{"seedPrice": body.SeedPrice, "blockPrice": body.BlockPrice})
 }
 
 type fileRequest struct {
