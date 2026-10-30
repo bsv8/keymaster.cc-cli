@@ -94,7 +94,15 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 | `~/.km/key.json` | 钱包 KeyHold 文档（0600，启动输密码解锁） |
 | `~/.km/client/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
 | `~/.km/client/unresolved/` | 未决资金历史（append-only NDJSON；广播未知的交易记录） |
-| `~/.km/server/` | 服务端数据（`pricing.json`、`sessions/` 售卖会话） |
+| `~/.km/server/` | 服务端数据（`catalog.sqlite` 内容映射、`pricing.json`、`sessions/` 售卖会话） |
+
+## 售卖目录与内容索引
+
+售卖目录始终以磁盘为准：Admin 每次直接列文件系统，再关联 SQLite 中已计算的内容映射；不保存另一份文件树。数据库位于配置文件同目录的 `server/catalog.sqlite`，必须位于售卖目录之外。Admin、需求发现与卖方执行共用一个 Catalog，不保留各自的目录快照。
+
+启动、每 5 秒和 SIGHUP 都执行普通核对：只以相对路径和文件长度判断是否需要计算 MasterSeed；同路径、同长度直接复用 SQLite，不比较修改时间、不重算全文件哈希。因此同路径同长度的内容替换不会被自动识别。Admin 的“强制重新索引”可显式完整重算；普通“刷新目录与索引”只处理新增和长度变化。实际交付的数据块仍验证请求的块哈希，不把索引复用当作交付正确性的证明。
+
+SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一个队列串行执行，哈希计算不占写事务。同一售卖根目录、同一数据库均有进程锁，拒绝多个管理进程；数据库绑定原根目录，不能拿到另一目录直接复用。不可读目录报错，不当作空目录清理；不可索引文件在 Admin 显示失败，新文件尚未完成映射时显示“尚未索引”。
 
 ## 退出码
 
@@ -136,7 +144,7 @@ TS 包构建见 `../keymaster.cc/packages/download-scheduler/README.md`；CLI �
 | --- | --- |
 | `internal/store` | 单任务工作目录：`SaveExact` 首次写入即绑定 exact bytes，`Save` 原子替换快照 |
 | `internal/ledger` | 资金账本与交易 outbox：txid 绑定原始字节、状态机与累计付款上限、未决查询 |
-| `internal/catalog` | 卖方目录索引：MasterSeed 逐文件计算 Seed，跳过隐藏/符号链接/零字节/临时文件 |
+| `internal/catalog` | 磁盘直列 + SQLite 内容映射；按路径/长度增量计算 MasterSeed，单写队列；跳过隐藏/符号链接/零字节/临时文件 |
 | `internal/pricing` | 文件定价：缺省回退、文件独立价格、批量「覆盖全部/仅未定价」、无目录继承 |
 | `internal/bitfs` | 买方协议执行层：开池（先验后付）→ 采购（Kind 5/6/7，本地付款日志）→ 关池（Kind 12/13 + 按 txid 观察） |
 | `internal/woc` | WhatsonChain 客户端：UTXO 查询、广播、按 txid 取回原文 |

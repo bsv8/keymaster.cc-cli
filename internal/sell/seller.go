@@ -21,12 +21,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
-	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
@@ -83,11 +81,10 @@ var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`
 
 // Seller serves one catalog root.
 type Seller struct {
-	indexMu  sync.RWMutex
 	Sessions *store.Store
 	Signer   protocol.Signer
 	Facts    func() protocol.Facts
-	Index    *catalog.Index
+	Catalog  *catalog.Catalog
 	Pricing  *pricing.Pricing
 	// Arbiters are the arbiter public keys this server offers in quotes.
 	Arbiters []protocol.PublicKey
@@ -145,7 +142,7 @@ type QuoteResult struct {
 }
 
 func (s *Seller) validate() error {
-	if s.Sessions == nil || s.Signer == nil || s.Facts == nil || s.currentIndex() == nil || s.Pricing == nil {
+	if s.Sessions == nil || s.Signer == nil || s.Facts == nil || s.Catalog == nil || s.Pricing == nil {
 		return errors.New("sell: sessions store, signer, facts, index and pricing are required")
 	}
 	return nil
@@ -176,12 +173,12 @@ func (s *Seller) CreateQuote(ctx context.Context, request QuoteRequest) (*QuoteR
 	if err := validSessionID(request.SessionID); err != nil {
 		return nil, err
 	}
-	entry := s.currentIndex().Preferred(request.SeedHashHex)
+	entry, err := s.Catalog.Preferred(ctx, request.SeedHashHex)
+	if err != nil {
+		return nil, err
+	}
 	if entry == nil {
 		return nil, fmt.Errorf("sell: no catalog file for seed %s", request.SeedHashHex)
-	}
-	if err := ensureCatalogEntryUnchanged(entry); err != nil {
-		return nil, err
 	}
 	if request.RecommendedFilename != "" {
 		if sanitized := sanitizeName(request.RecommendedFilename); sanitized != "" {
@@ -336,7 +333,7 @@ func (s *Seller) PrepareDelivery(ctx context.Context, sessionID string, kind5 []
 	if err != nil {
 		return nil, err
 	}
-	payloads, seed, err := s.servePayloads(meta, kind5)
+	payloads, seed, err := s.servePayloads(ctx, meta, kind5)
 	if err != nil {
 		return nil, err
 	}
@@ -541,17 +538,17 @@ func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []b
 
 // servePayloads resolves the requested hashes from the catalog: the seed hash
 // serves the seed bytes, block hashes serve their block from the file.
-func (s *Seller) servePayloads(meta sessionMeta, kind5 []byte) ([][]byte, []byte, error) {
+func (s *Seller) servePayloads(ctx context.Context, meta sessionMeta, kind5 []byte) ([][]byte, []byte, error) {
 	hashes, err := contentHashesOf(kind5)
 	if err != nil {
 		return nil, nil, err
 	}
-	entry := s.currentIndex().Preferred(meta.SeedHashHex)
+	entry, err := s.Catalog.Preferred(ctx, meta.SeedHashHex)
+	if err != nil {
+		return nil, nil, err
+	}
 	if entry == nil {
 		return nil, nil, fmt.Errorf("sell: catalog file for seed %s disappeared", meta.SeedHashHex)
-	}
-	if err := ensureCatalogEntryUnchanged(entry); err != nil {
-		return nil, nil, err
 	}
 	payloads := make([][]byte, 0, len(hashes))
 	needSeed := false
@@ -561,7 +558,7 @@ func (s *Seller) servePayloads(meta sessionMeta, kind5 []byte) ([][]byte, []byte
 			payloads = append(payloads, append([]byte(nil), entry.Seed...))
 			continue
 		}
-		payload, err := s.readBlock(entry, hash)
+		payload, err := s.Catalog.ReadBlock(ctx, entry, hash)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -573,33 +570,6 @@ func (s *Seller) servePayloads(meta sessionMeta, kind5 []byte) ([][]byte, []byte
 		seed = append([]byte(nil), entry.Seed...)
 	}
 	return payloads, seed, nil
-}
-
-func (s *Seller) readBlock(entry *catalog.Entry, hash []byte) ([]byte, error) {
-	for index := uint64(0); index < entry.BlockCount; index++ {
-		expected, err := masterseed.ReadBlockHash(context.Background(), bytes.NewReader(entry.Seed), uint64(len(entry.Seed)), index)
-		if err != nil {
-			return nil, err
-		}
-		if string(expected.Bytes()) != string(hash) {
-			continue
-		}
-		size, err := masterseed.ExpectedBlockSize(entry.Size, index)
-		if err != nil {
-			return nil, err
-		}
-		file, err := os.Open(entry.Path)
-		if err != nil {
-			return nil, fmt.Errorf("sell: open catalog file: %w", err)
-		}
-		defer file.Close()
-		buffer := make([]byte, size)
-		if _, err := file.ReadAt(buffer, int64(index)*masterseed.BlockSize); err != nil {
-			return nil, fmt.Errorf("sell: read block %d: %w", index, err)
-		}
-		return buffer, nil
-	}
-	return nil, fmt.Errorf("sell: block %s is not part of this file", hex.EncodeToString(hash))
 }
 
 func (s *Seller) saveMeta(meta sessionMeta) error {
@@ -655,19 +625,6 @@ func (s *Seller) loadPool(sessionID string) (*seller.SellerPoolEvidence, error) 
 		return nil, err
 	}
 	return &seller.SellerPoolEvidence{Opening: opening, FundingTransactionRaw: fundingRaw, LatestPaymentRawTx: latest}, nil
-}
-
-// ensureCatalogEntryUnchanged rejects a quote or delivery whose source file
-// changed after the catalog scan, so stale prices or bytes are never served.
-func ensureCatalogEntryUnchanged(entry *catalog.Entry) error {
-	info, err := os.Stat(entry.Path)
-	if err != nil {
-		return fmt.Errorf("sell: catalog file %s is unavailable: %w", entry.RelativePath, err)
-	}
-	if uint64(info.Size()) != entry.Size || !info.ModTime().Equal(entry.ModTime) {
-		return fmt.Errorf("sell: catalog file %s changed since the scan; rescan before selling", entry.RelativePath)
-	}
-	return nil
 }
 
 func mediaTypeFor(name string) string {
@@ -760,22 +717,4 @@ func contentHashesOf(kind5 []byte) ([][]byte, error) {
 		return nil, err
 	}
 	return content.DecodeContentHashes(authorization.ContentHashesCBOR)
-}
-
-// ReloadIndex swaps the catalog index after a rescan. New quotes and deliveries
-// use the new index; sessions whose source disappeared fail safely (no quote,
-// no delivery), and the buyer never pays for undelivered content.
-func (s *Seller) ReloadIndex(index *catalog.Index) {
-	if index == nil {
-		return
-	}
-	s.indexMu.Lock()
-	s.Index = index
-	s.indexMu.Unlock()
-}
-
-func (s *Seller) currentIndex() *catalog.Index {
-	s.indexMu.RLock()
-	defer s.indexMu.RUnlock()
-	return s.Index
 }

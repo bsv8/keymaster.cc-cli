@@ -42,8 +42,8 @@ type Options struct {
 	Network string
 	// Address_ is the wallet receiving address shown in the status view.
 	WalletAddress string
-	// Index and Pricing are the live server state.
-	Index   *catalog.Index
+	// Catalog 统一查询磁盘目录和持久内容映射，不持有扫描快照。
+	Catalog *catalog.Catalog
 	Pricing *pricing.Pricing
 	// Status optionally contributes extra status fields.
 	Status func() map[string]any
@@ -76,7 +76,7 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 	} else if host != "127.0.0.1" && host != "::1" && host != "localhost" {
 		return nil, fmt.Errorf("admin: listen address must be loopback, got %q", host)
 	}
-	if options.Index == nil || options.Pricing == nil {
+	if options.Catalog == nil || options.Pricing == nil {
 		return nil, errors.New("admin: index and pricing are required")
 	}
 	mux := http.NewServeMux()
@@ -84,6 +84,7 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 	mux.HandleFunc("/", server.handleUI)
 	mux.HandleFunc("/api/status", server.handleStatus)
 	mux.HandleFunc("/api/files", server.handleFiles)
+	mux.HandleFunc("/api/catalog/refresh", server.handleRefresh)
 	mux.HandleFunc("/api/pricing/batch", server.handleBatch)
 	mux.HandleFunc("/api/pricing/defaults", server.handleDefaults)
 	mux.HandleFunc("/api/pricing/file", server.handleFile)
@@ -172,15 +173,34 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 		methodNotAllowed(writer)
 		return
 	}
+	entries, err := s.options.Catalog.List(request.Context())
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	seeds := map[string]bool{}
+	ready, failed := 0, 0
+	for _, entry := range entries {
+		if entry.State == "ready" {
+			ready++
+			seeds[entry.SeedHashHex] = true
+		}
+		if entry.State == "failed" {
+			failed++
+		}
+	}
 	seedPrice, blockPrice := s.options.Pricing.Defaults()
 	status := map[string]any{
-		"network":     s.options.Network,
-		"wallet":      s.options.WalletAddress,
-		"files":       len(s.options.Index.Entries),
-		"seeds":       len(s.options.Index.BySeed),
-		"seedPrice":   seedPrice,
-		"blockPrice":  blockPrice,
-		"pricedFiles": len(s.options.Pricing.Files()),
+		"network":        s.options.Network,
+		"wallet":         s.options.WalletAddress,
+		"files":          len(entries),
+		"seeds":          len(seeds),
+		"readyFiles":     ready,
+		"failedFiles":    failed,
+		"unindexedFiles": len(entries) - ready - failed,
+		"seedPrice":      seedPrice,
+		"blockPrice":     blockPrice,
+		"pricedFiles":    len(s.options.Pricing.Files()),
 	}
 	if s.options.Status != nil {
 		for key, value := range s.options.Status() {
@@ -191,14 +211,16 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 }
 
 type fileView struct {
-	Path       string `json:"path"`
-	Name       string `json:"name"`
-	Size       uint64 `json:"size"`
-	SeedHash   string `json:"seedHash"`
-	Blocks     uint64 `json:"blocks"`
-	SeedPrice  string `json:"seedPrice"`
-	BlockPrice string `json:"blockPrice"`
-	Override   bool   `json:"override"`
+	Path       string  `json:"path"`
+	Name       string  `json:"name"`
+	Size       *uint64 `json:"size"`
+	SeedHash   string  `json:"seedHash"`
+	Blocks     *uint64 `json:"blocks"`
+	SeedPrice  string  `json:"seedPrice"`
+	BlockPrice string  `json:"blockPrice"`
+	Override   bool    `json:"override"`
+	State      string  `json:"state"`
+	Error      string  `json:"error,omitempty"`
 }
 
 func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) {
@@ -206,16 +228,52 @@ func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) 
 		methodNotAllowed(writer)
 		return
 	}
-	files := make([]fileView, 0, len(s.options.Index.Entries))
-	for _, entry := range s.options.Index.Entries {
+	entries, err := s.options.Catalog.List(request.Context())
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	files := make([]fileView, 0, len(entries))
+	for _, entry := range entries {
 		seedPrice, blockPrice, override := s.options.Pricing.Effective(entry.RelativePath)
+		var blocks, size *uint64
+		if entry.State == "ready" {
+			count := entry.BlockCount
+			blocks = &count
+		}
+		if entry.Size > 0 {
+			value := entry.Size
+			size = &value
+		}
 		files = append(files, fileView{
-			Path: entry.RelativePath, Name: entry.Name, Size: entry.Size,
-			SeedHash: entry.SeedHashHex, Blocks: entry.BlockCount,
+			Path: entry.RelativePath, Name: entry.Name, Size: size,
+			SeedHash: entry.SeedHashHex, Blocks: blocks,
 			SeedPrice: seedPrice, BlockPrice: blockPrice, Override: override,
+			State: entry.State, Error: entry.Error,
 		})
 	}
 	writeJSON(writer, map[string]any{"files": files})
+}
+
+// handleRefresh 与 SIGHUP、周期核对共用 Catalog 的串行刷新入口。
+func (s *Server) handleRefresh(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	var body struct {
+		Force bool `json:"force"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024)).Decode(&body); err != nil {
+		http.Error(writer, "invalid json", http.StatusBadRequest)
+		return
+	}
+	report, err := s.options.Catalog.Refresh(request.Context(), body.Force)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, report)
 }
 
 type batchRequest struct {
@@ -247,8 +305,13 @@ func (s *Server) handleBatch(writer http.ResponseWriter, request *http.Request) 
 		}
 		prefix = cleaned
 	}
-	paths := make([]string, 0, len(s.options.Index.Entries))
-	for _, entry := range s.options.Index.Entries {
+	entries, listErr := s.options.Catalog.List(request.Context())
+	if listErr != nil {
+		http.Error(writer, listErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
 		if prefix != "" && entry.RelativePath != prefix && !strings.HasPrefix(entry.RelativePath, prefix+"/") {
 			continue
 		}

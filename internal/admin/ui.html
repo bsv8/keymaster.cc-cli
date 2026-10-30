@@ -23,7 +23,7 @@
 <div id="loginView">
   <div id="loginBox">
     <h1>km 管理</h1>
-    <p class="muted">请输入 API Key（~/.km/config.json 的 admin.apiKey），正确后进入管理页。</p>
+    <p class="muted">请输入 API Key（当前配置文件的 admin.apiKey），正确后进入管理页。</p>
     <form id="loginForm">
       <input id="key" type="password" autocomplete="off" placeholder="API Key">
       <div class="row"><button id="login" type="submit">登录</button></div>
@@ -36,6 +36,8 @@
   <div class="row">
     <span class="muted">API Key 已验证（仅本标签页有效）</span>
     <button id="lock" type="button">锁定</button>
+    <button id="refreshFiles" type="button">刷新目录与索引</button>
+    <button id="reindexFiles" type="button">强制重新索引</button>
     <span id="hint" class="muted"></span>
   </div>
   <pre id="status" class="muted">未连接</pre>
@@ -87,8 +89,8 @@ async function refresh() {
   const { files } = await call('/api/files');
   $('files').innerHTML = files.map(file => `
     <tr>
-      <td><code>${escapeHtml(file.path)}</code><div class="muted">${escapeHtml(file.seedHash)}</div></td>
-      <td>${file.size} B<div class="muted">${file.blocks} 块</div></td>
+      <td><code>${escapeHtml(file.path)}</code><div class="muted">${escapeHtml(file.seedHash)}</div><div>${escapeHtml(({ready:'可供应',unindexed:'尚未索引',failed:'索引失败'})[file.state] || file.state)} ${escapeHtml(file.error || '')}</div></td>
+      <td>${file.size === null ? '大小未知' : file.size + ' B'}<div class="muted">${file.blocks === null ? '块数待索引' : file.blocks + ' 块'}</div></td>
       <td>${file.seedPrice} / ${file.blockPrice}</td>
       <td class="muted">${file.override ? '独立定价' : '缺省'}</td>
       <td class="row">
@@ -132,6 +134,18 @@ $('saveDefaults').onclick = async () => {
     await refresh();
   } catch (error) { showError(error); }
 };
+// 普通刷新不重算同路径同长度内容；强制操作明确征求操作者确认。
+async function refreshCatalog(force) {
+  if (force && !confirm('将完整读取所有文件并重新计算内容哈希，确认继续？')) return;
+  $('hint').textContent = '正在核对目录…';
+  try {
+    const result = await call('/api/catalog/refresh', {method:'POST', body:JSON.stringify({force})});
+    await refresh();
+    $('hint').textContent = `新计算 ${result.indexed}，复用 ${result.reused}，移除 ${result.removed}，失败 ${result.failures.length}`;
+  } catch (error) { showError(error); }
+}
+$('refreshFiles').onclick = () => refreshCatalog(false);
+$('reindexFiles').onclick = () => refreshCatalog(true);
 $('batch').onclick = async () => {
   try {
     await call('/api/pricing/batch', { method:'POST', body: JSON.stringify({ mode: $('mode').value, path: $('batchPath').value.trim(), seedPrice: $('seedPrice').value.trim(), blockPrice: $('blockPrice').value.trim() }) });

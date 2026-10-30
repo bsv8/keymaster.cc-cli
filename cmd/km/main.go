@@ -276,10 +276,20 @@ func dispatch(ctx context.Context, cfg *config.Config, privateKey []byte, argCou
 	return code
 }
 
-// runServerScan builds the content index and pricing table for a server
-// directory. Serving (protocol, Web Admin) is wired in a later phase.
+// runServerScan 打开持久内容目录；Admin、发现和售卖共用同一个 Catalog。
 func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, directory string, discover bool, adminAddr, configPath string) int {
-	index, err := catalog.Scan(ctx, directory)
+	files, err := catalog.Open(ctx, directory, filepath.Join(filepath.Dir(configPath), "server", "catalog.sqlite"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	defer files.Close()
+	report, err := files.Refresh(ctx, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	entries, err := files.List(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -288,9 +298,9 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 		fmt.Fprintln(os.Stderr, "退出中/收尾中…")
 		return exitCancelled
 	}
-	fmt.Printf("索引目录: %s\n文件: %d 个，唯一内容(Seed): %d 个\n", index.Root, len(index.Entries), len(index.BySeed))
-	if len(index.Failures) > 0 {
-		fmt.Printf("索引失败: %d 个（例如 %s: %s）\n", len(index.Failures), index.Failures[0].Path, index.Failures[0].Reason)
+	fmt.Printf("索引目录: %s\n文件: %d 个，新计算: %d 个，复用: %d 个\n", files.Root, len(entries), report.Indexed, report.Reused)
+	if len(report.Failures) > 0 {
+		fmt.Printf("索引失败: %d 个（例如 %s: %s）\n", len(report.Failures), report.Failures[0].Path, report.Failures[0].Reason)
 	}
 	pricingPath := filepath.Join(filepath.Dir(configPath), "server", "pricing.json")
 	table, err := pricing.Open(pricingPath, cfg.Server.DefaultSeedPriceSatoshis, cfg.Server.DefaultFullBlockPriceSatoshis)
@@ -298,8 +308,8 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	paths := make([]string, 0, len(index.Entries))
-	for _, entry := range index.Entries {
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
 		paths = append(paths, entry.RelativePath)
 	}
 	if err := table.Prune(paths); err != nil {
@@ -372,34 +382,42 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 		Sessions: sessions,
 		Signer:   signer,
 		Facts:    func() protocol.Facts { return protocol.Facts{Now: time.Now(), BlockHeight: height.get()} },
-		Index:    index,
+		Catalog:  files,
 		Pricing:  table,
 		Arbiters: arbiters,
 		Wallet:   sellerWallet,
 	}
 	fmt.Printf("会话目录: %s\n仲裁方: %d 个\n", sessionsRoot, len(arbiters))
-	// SIGHUP re-scans the catalog. New quotes/deliveries use the new index;
-	// sessions whose source changed or disappeared fail safely without
-	// delivering stale bytes (and the buyer has not paid before delivery).
+	// 周期核对和 SIGHUP 复用同一刷新入口，只重算新增或长度变化的文件。
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
+	refreshCtx, stopRefresh := context.WithCancel(ctx)
+	refreshDone := make(chan struct{})
 	go func() {
+		defer close(refreshDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-refreshCtx.Done():
 				return
 			case <-hup:
-				refreshed, err := catalog.Scan(ctx, index.Root)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "km: 目录重扫失败:", err)
-					continue
+			case <-ticker.C:
+			}
+			report, err := files.Refresh(refreshCtx, false)
+			if err != nil {
+				if refreshCtx.Err() == nil {
+					fmt.Fprintln(os.Stderr, "km: 目录核对失败:", err)
 				}
-				service.ReloadIndex(refreshed)
-				fmt.Printf("目录重扫完成: %d 个文件（旧内容不再参与新报价/交付）\n", len(refreshed.Entries))
+				continue
+			}
+			if report.Indexed > 0 || report.Removed > 0 || len(report.Failures) > 0 {
+				fmt.Printf("目录核对: 新计算 %d，复用 %d，移除 %d，失败 %d\n", report.Indexed, report.Reused, report.Removed, len(report.Failures))
 			}
 		}
 	}()
+	defer func() { stopRefresh(); <-refreshDone }()
 	if len(arbiters) == 0 {
 		fmt.Fprintln(os.Stderr, "km: 警告: 未配置 server.arbiterPublicKeys，买方无法开池（每个池是 2-of-3）。")
 	}
@@ -412,7 +430,7 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 				APIKey:        cfg.Admin.APIKey,
 				Network:       string(cfg.BsvNetwork),
 				WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
-				Index:         index,
+				Catalog:       files,
 				Pricing:       table,
 				PersistDefaults: func(seedPrice, blockPrice string) error {
 					cfg.Server.DefaultSeedPriceSatoshis = seedPrice
@@ -425,19 +443,19 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 				return exitError
 			}
 			defer adminServer.Close()
-			fmt.Printf("Web Admin: http://%s/（API Key 见 ~/.km/config.json 的 admin.apiKey）\n", adminServer.Addr())
+			fmt.Printf("Web Admin: http://%s/（API Key 见 %s 的 admin.apiKey）\n", adminServer.Addr(), configPath)
 		}
 	}
 	if !discover {
 		fmt.Fprintln(os.Stderr, "km: 仅扫描模式（-discover=false）；未启动售卖。")
 		return exitOK
 	}
-	return runDiscoverLoop(ctx, cfg, privateKey, index, service)
+	return runDiscoverLoop(ctx, cfg, privateKey, service)
 }
 
 // runDiscoverLoop connects to the first enabled supplier, subscribes to the
 // hash-request channel and reports verified demands until cancellation.
-func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte, index *catalog.Index, service *sell.Seller) int {
+func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte, service *sell.Seller) int {
 	services, err := cfg.RuntimeServices()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -582,7 +600,12 @@ func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte,
 		},
 		Deliveries: func(handler func(string, []byte)) { client.AddPublishHandler(handler) },
 		OnDemand: func(demand discovery.Demand) {
-			if index.Preferred(demand.SeedHashHex) == nil {
+			entry, err := service.Catalog.Preferred(ctx, demand.SeedHashHex)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "km: 查询供应内容失败:", err)
+				return
+			}
+			if entry == nil {
 				return
 			}
 			// Admission covers the whole unit, including connection setup:
