@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"
-	manager "github.com/bsv8/keymaster.cc-cli/utxo"
+	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
 )
 
 type spentReader interface {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 
 // Orchestrator drives one task: facts enter through Feed, the kernel state and

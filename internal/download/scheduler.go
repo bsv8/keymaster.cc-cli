@@ -27,7 +27,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/host"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 	"github.com/bsv8/keymaster.cc-cli/internal/transport"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"

@@ -10,7 +10,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/download"
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 
 // runPriceKeys reads terminal keys while the scheduler runs and feeds manual

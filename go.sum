@@ -18,6 +18,10 @@ github.com/bsv8/MultisigPool/v4 v4.0.0 h1:7r7MjHpo2R/73trH9XYlEg0NIn6nemKzcue3z4
 github.com/bsv8/MultisigPool/v4 v4.0.0/go.mod h1:gFkul5oin8jrYFfg6uTDocYl+6cZQgXYX/KCra0EHeg=
 github.com/bsv8/SatSubscriptionProtocol v0.3.0 h1:oGN0oLVSUjBzRu6VQOCzqrh/qW8IgRdpS5d4fJ7HBls=
 github.com/bsv8/SatSubscriptionProtocol v0.3.0/go.mod h1:l+RorrPP8crMcvfKuzAtsXjKOsycbwDLZhnE/MkU1/4=
+github.com/bsv8/keymaster.cc-download-scheduler v0.1.1 h1:CdP0cnjRVGLvACPlExqrSiC/UuW4XlzaBI9Ten0rSQA=
+github.com/bsv8/keymaster.cc-download-scheduler v0.1.1/go.mod h1:pKsznjt7kretRmV/RVu0V3LxqIsaZZWB60KILOgp4bs=
+github.com/bsv8/keymaster.cc-utxo-manager v0.1.1 h1:aZU4ko6eG8NTRoI88gkBIpvbPGsHRjRavT/CYesmZHc=
+github.com/bsv8/keymaster.cc-utxo-manager v0.1.1/go.mod h1:JcVOMpYdmaPadkqEbWvCazQItxVFmw46cYBBlBDPc6g=
 github.com/canonical/go-sp800.90a-drbg v0.0.0-20210314144037-6eeb1040d6c3 h1:oe6fCvaEpkhyW3qAicT0TnGtyht/UrgvOwMcEgLb7Aw=
 github.com/canonical/go-sp800.90a-drbg v0.0.0-20210314144037-6eeb1040d6c3/go.mod h1:qdP0gaj0QtgX2RUZhnlVrceJ+Qln8aSlDyJwelLLFeM=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

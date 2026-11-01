@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 
 // Loop is one task's single event loop. Every fact enters through Feed (or a

@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 )
 

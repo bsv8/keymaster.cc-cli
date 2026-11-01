@@ -34,7 +34,7 @@ import (
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
 
-	manager "github.com/bsv8/keymaster.cc-cli/utxo"
+	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/state"
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"

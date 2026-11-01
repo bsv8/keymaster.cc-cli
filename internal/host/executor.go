@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 
 // Ports executes one kernel command type. Implementations must persist any

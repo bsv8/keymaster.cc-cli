@@ -40,7 +40,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
-	"github.com/bsv8/keymaster.cc-cli/internal/scheduler"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 	websignal "github.com/bsv8/keymaster.cc-cli/internal/signal"
 	"github.com/bsv8/keymaster.cc-cli/internal/ssp"
