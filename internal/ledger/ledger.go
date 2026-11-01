@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -128,7 +129,16 @@ func Open(path, taskID, network, seedHash string) (*Ledger, error) {
 }
 
 // Save writes the ledger atomically with 0600 permissions.
-func (l *Ledger) Save() error {
+func (l *Ledger) Save() (failure error) {
+	defer func() {
+		bitfsdebug.Log("keymaster.cc-cli", "funding.ledger.save", func() any {
+			transactions := make([]map[string]any, 0, len(l.state.Transactions))
+			for _, tx := range l.state.Transactions {
+				transactions = append(transactions, map[string]any{"txid": tx.TxID, "kind": tx.Kind, "state": tx.State, "attempts": tx.Attempts, "rawBytes": len(tx.RawHex) / 2, "lastError": tx.LastError})
+			}
+			return map[string]any{"taskId": l.state.TaskID, "seedHashHex": l.state.SeedHash, "network": l.state.Network, "pools": l.state.Pools, "transactions": transactions, "error": failure}
+		})
+	}()
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o700); err != nil {
 		return fmt.Errorf("ledger: create directory: %w", err)
 	}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"sync"
+	"time"
 
 	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
@@ -17,6 +19,11 @@ type Ports interface {
 	DispatchDownload(ctx context.Context, command scheduler.Command) error
 	DrainPool(ctx context.Context, command scheduler.Command) error
 	ClosePool(ctx context.Context, command scheduler.Command) error
+}
+
+// QuoteDiscoveryPort 是可选的真实报价查询执行端口；没有该端口不注入可用事实。
+type QuoteDiscoveryPort interface {
+	DiscoverQuotes(context.Context, scheduler.Command) error
 }
 
 // Executor dispatches commands idempotently by commandId. A command that
@@ -38,7 +45,14 @@ func NewExecutor(ports Ports) (*Executor, error) {
 }
 
 // Run executes one command unless its commandId already ran successfully.
-func (e *Executor) Run(ctx context.Context, command scheduler.Command) error {
+func (e *Executor) Run(ctx context.Context, command scheduler.Command) (failure error) {
+	started := time.Now()
+	bitfsdebug.Log("keymaster.cc-cli", "scheduler.command.start", func() any { return command })
+	defer func() {
+		bitfsdebug.Log("keymaster.cc-cli", "scheduler.command.finish", func() any {
+			return map[string]any{"command": command, "elapsedMs": float64(time.Since(started).Microseconds()) / 1000, "error": failure}
+		})
+	}()
 	if command.CommandID == "" {
 		return errors.New("host: commandId is required")
 	}
@@ -52,6 +66,12 @@ func (e *Executor) Run(ctx context.Context, command scheduler.Command) error {
 
 	var err error
 	switch command.Type {
+	case "discover":
+		if port, ok := e.ports.(QuoteDiscoveryPort); ok {
+			err = port.DiscoverQuotes(ctx, command)
+		} else {
+			err = errors.New("host: quote discovery port is unavailable")
+		}
 	case "open":
 		err = e.ports.OpenPool(ctx, command)
 	case "download":

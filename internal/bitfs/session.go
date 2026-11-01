@@ -539,7 +539,12 @@ func (t *BuyerTask) exchangeContent(ctx context.Context, session PurchaseSession
 	if deadline <= now {
 		return errors.New("bitfs: quote expired before the next authorization")
 	}
+	selectedQuote, err := wire.EncodeFileQuote(quote.Quote())
+	if err != nil {
+		return err
+	}
 	request, err := t.PrepareContentRequest(ctx, ContentRequestInput{
+		QuoteRaw:         selectedQuote.Bytes(),
 		PoolID:           poolID,
 		ContentHashes:    hashes,
 		DeliveryDeadline: content.UnixSeconds(deadline),

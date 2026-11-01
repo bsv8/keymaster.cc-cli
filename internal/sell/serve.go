@@ -3,14 +3,13 @@ package sell
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/bsv8/go-bitfs/content"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"github.com/bsv8/go-bitfs/wire"
 )
 
@@ -24,10 +23,18 @@ type Session interface {
 // Serve handles one seller session until the buyer closes it or an error
 // occurs. The quote must already be persisted for sessionID (CreateQuote) and
 // the session must have been dialed by the seller after hearing a demand.
-func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) error {
+func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) (failure error) {
+	started := time.Now()
+	bitfsdebug.Log("keymaster.cc-cli", "seller.session.start", func() any { return map[string]any{"sessionId": sessionID} })
+	defer func() {
+		bitfsdebug.Log("keymaster.cc-cli", "seller.session.finish", func() any {
+			return map[string]any{"sessionId": sessionID, "elapsedMs": float64(time.Since(started).Microseconds()) / 1000, "error": failure}
+		})
+	}()
 	if session == nil {
 		return errors.New("sell: session is required")
 	}
+	session = &debugSession{Session: session, sessionID: sessionID}
 	defer session.Close()
 	// The seller always speaks first: its exact Kind 1 quote opens the session.
 	quoteRaw, err := s.Sessions.Load(sessionPath(sessionID, sessionQuoteName))
@@ -49,9 +56,13 @@ func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) e
 			}
 			return fmt.Errorf("sell: read artifact: %w", err)
 		}
+		recordID, err := s.poolRecordForArtifact(sessionID, artifact)
+		if err != nil {
+			return err
+		}
 		switch artifact.Kind() {
 		case wire.RefundPresignRequest:
-			kind3, err := s.Presign(ctx, sessionID, artifact.Bytes())
+			kind3, err := s.Presign(ctx, recordID, artifact.Bytes())
 			if err != nil {
 				return err
 			}
@@ -63,11 +74,11 @@ func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) e
 				return err
 			}
 		case wire.FundingTransactionDelivery:
-			if err := s.VerifyFunding(ctx, sessionID, artifact.Bytes()); err != nil {
+			if err := s.VerifyFunding(ctx, recordID, artifact.Bytes()); err != nil {
 				return err
 			}
 		case wire.ContentRequest:
-			kind6, err := s.PrepareDelivery(ctx, sessionID, artifact.Bytes())
+			kind6, err := s.PrepareDelivery(ctx, recordID, artifact.Bytes())
 			if err != nil {
 				return err
 			}
@@ -79,11 +90,11 @@ func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) e
 				return err
 			}
 		case wire.PaymentUpdate:
-			if _, err := s.CompletePayment(ctx, sessionID, artifact.Bytes()); err != nil {
+			if _, err := s.CompletePayment(ctx, recordID, artifact.Bytes()); err != nil {
 				return err
 			}
 		case wire.PoolCloseRequest:
-			kind13, err := s.CompleteClose(ctx, sessionID, artifact.Bytes())
+			kind13, err := s.CompleteClose(ctx, recordID, artifact.Bytes())
 			if err != nil {
 				return err
 			}
@@ -94,70 +105,11 @@ func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) e
 			if err := session.Write(response); err != nil {
 				return err
 			}
-			// The close settles the sale. One seller session serves exactly one
-			// pool; the buyer requests a fresh quote/session for the next pool.
-			// Do not slam the stream shut right after the response: the buyer
-			// still processes the close answer.
-			done := make(chan struct{})
-			go func() {
-				_, _ = session.Read()
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-			}
-			return nil
+			// 一个池结清不关闭连接；后续报文继续按自己的池引用路由。
 		default:
 			return fmt.Errorf("sell: unexpected artifact kind %d", artifact.Kind())
 		}
 	}
-}
-
-// ResumableSession is a still-open seller session that can be served again
-// after a transport disconnect.
-type ResumableSession struct {
-	SessionID   string
-	SeedHashHex string
-}
-
-// FindResumableSession returns a session for the same buyer and seed whose
-// funding is verified and which has no negotiated close yet. It scans the
-// persisted session metadata so a restarted seller can resume a purchase.
-func (s *Seller) FindResumableSession(buyerPublicKeyHex, seedHashHex string) (*ResumableSession, error) {
-	if err := s.validate(); err != nil {
-		return nil, err
-	}
-	names, err := s.Sessions.List("sessions/")
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range names {
-		if !strings.HasSuffix(name, "/"+sessionMetaName) {
-			continue
-		}
-		sessionID := strings.TrimSuffix(strings.TrimPrefix(name, "sessions/"), "/"+sessionMetaName)
-		meta, err := s.loadMeta(sessionID)
-		if err != nil || meta.SeedHashHex != seedHashHex {
-			continue
-		}
-		if exists, _ := s.Sessions.Exists(sessionPath(sessionID, sessionKind13Name)); exists {
-			continue
-		}
-		if exists, _ := s.Sessions.Exists(sessionPath(sessionID, sessionFundingRawName)); !exists {
-			continue
-		}
-		quoteRaw, err := s.Sessions.Load(sessionPath(sessionID, sessionQuoteName))
-		if err != nil {
-			continue
-		}
-		verified, err := verifySavedQuote(quoteRaw)
-		if err != nil || !strings.EqualFold(hex.EncodeToString(verified.BuyerPublicKey()), buyerPublicKeyHex) {
-			continue
-		}
-		return &ResumableSession{SessionID: sessionID, SeedHashHex: meta.SeedHashHex}, nil
-	}
-	return nil, nil
 }
 
 // verifySavedQuote validates a persisted quote as existing contract evidence;

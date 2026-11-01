@@ -96,6 +96,14 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 | `~/.km/client/unresolved/` | 未决资金历史（append-only NDJSON；广播未知的交易记录） |
 | `~/.km/server/` | 服务端数据（`catalog.sqlite` 内容映射、`pricing.json`、`sessions/` 售卖会话） |
 
+## dev 调试日志
+
+`KEYMASTER_ENV=dev` 自动开启 CLI 与 Go go-bitfs 的详细诊断，向 stderr 输出
+`[bitfs-debug] ` 前缀的 JSON 事件；默认不创建任何日志文件，非 dev 不输出。
+可由终端重定向保留，例如 `KEYMASTER_ENV=dev km … 2>>/data/home/km-debug.log`。
+输出含需求/会话/调度/传输/资金/广播及 SDK 解析签名错误，使用运行编号、序号、UTC
+时间与耗时串联；二进制只显示长度/哈希，禁止把秘密写入普通文本。日志不是恢复真值。
+
 ## 售卖目录与内容索引
 
 售卖目录始终以磁盘为准：Admin 每次直接列文件系统，再关联 SQLite 中已计算的内容映射；不保存另一份文件树。数据库位于配置文件同目录的 `server/catalog.sqlite`，必须位于售卖目录之外。Admin、需求发现与卖方执行共用一个 Catalog，不保留各自的目录快照。
@@ -116,27 +124,27 @@ SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一
 
 ## 钱包与链端口
 
-`utxo/` 是 CLI 内维护的原生 Go UTXO manager（`utm/1`），属于根 Go module，
-导入路径为 `github.com/bsv8/keymaster.cc-cli/utxo`，仅依赖 Go 标准库。
-`internal/wallet` 提供持久化、链上观察及提交端口；不再依赖独立 manager 仓库。
-工程仓 `test/keymaster.cc-cli/utxo-manager/` 保留共享向量、Go 测试与 TS/Go 交叉恢复测试。
+UTXO manager（`utm/1`）唯一 Go 源码位于 `../keymaster.cc-utxo-manager/utxo/`，
+导入路径为 `github.com/bsv8/keymaster.cc-utxo-manager/utxo`，仅依赖标准库；CLI 精确使用已发布的根 module `v0.1.1`，无组件本地 `replace`，不保留内部实现。
+`internal/wallet` 提供持久化、链上观察、签名及提交端口，选币和资金责任由独立 manager 裁决。
+工程仓 `test/shared/utxo-manager/` 保留共享向量、Go/TS 测试、随机模拟与双向恢复测试。
 
-`internal/wallet` 实现 P2PKH 选币与签名：新鲜 UTXO 快照、逐个加输入重估费、找零、
+`internal/wallet` 将链上观察输入 manager，使用其选币、费用与找零结果并适配
 `bsv-blockchain/go-sdk` 签名、广播后核对 txid；广播失败或结果未知写入未决历史。
 `internal/woc` 提供 `listunspent`、`tx/raw`、`tx/<txid>/hex` 与 `chain/info`，Base URL 由
 `bsvNetwork` 推导。
 
 ## 调度器
 
-调度器的 TS 与 Go 实现分别由钱包和 CLI 维护：
+调度器 TS 与 Go 统一在独立项目维护，Go 按最新 TS 规则同步，不允许业务分叉：
 
-- `../keymaster.cc/packages/download-scheduler/`：原生 TypeScript 包的唯一源码，包名仍为 `keymaster.cc-download-scheduler`，属于钱包 workspace；运行时零依赖。
-- `internal/scheduler/`：CLI 使用的 Go 实现，属于根 Go module，构建 Go CLI 不需要 Node.js。
+- `../keymaster.cc-download-scheduler/src/`：唯一 TS 源码，包名 `keymaster-trade-scheduler`，钱包使用 npm `0.1.0`。
+- `../keymaster.cc-download-scheduler/scheduler/`：唯一 Go 源码，CLI 导入 `github.com/bsv8/keymaster.cc-download-scheduler/scheduler`；精确使用根 module `v0.1.1`，无组件本地 `replace`，构建不需要 Node.js。
 
 两端均为纯状态机（createTask/step/restoreTask），无时钟、网络、钱包或存储副作用。
 交叉测试在工程仓 `test/keymaster.cc-cli/scheduler/`（状态、命令、视图、唤醒、恢复及资金不变量）；
-TS 单元测试和外围模拟位于 `test/keymaster.cc-cli/download-scheduler/`。
-TS 包构建见 `../keymaster.cc/packages/download-scheduler/README.md`；CLI 不保留 TS 副本，原独立调度器仓库不再提供源码。
+TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
+构建见 `../keymaster.cc-download-scheduler/README.md`；CLI 不保留 TS/Go 组件副本。统一双语言门禁为工程仓 `npm run test:components:parity`，包括双方快照交换后的续跑比较。发布包验证设 `COMPONENTS_RELEASED=1`；产品精确依赖与真实 CLI 编译运行 `npm run test:components:released`。
 
 ## 存储与卖方基础
 
@@ -172,5 +180,4 @@ TS 包构建见 `../keymaster.cc/packages/download-scheduler/README.md`；CLI �
 R&D 过程中的需求、施工单与测试位于工程仓库
 `BSV8_Engineering/todo/keymaster.cc-cli/`、`test/keymaster.cc-cli/` 与
 `e2e/keymaster.cc-cli/`；设计事实见 `BSV8_Engineering/docs/keymaster.cc-cli/`。
-调度器与 UTXO manager 的测试、文档和历史资料分别归入以上 CLI 分类下的
-`download-scheduler/`、`utxo-manager/`；运行入口见工程仓 `test/keymaster.cc-cli/README.md`。
+调度器与 UTXO manager 的组件测试、文档和历史资料统一归入工程仓 `test/docs/todo/e2e/shared/{download-scheduler,utxo-manager}/`；现有调度器交叉运行器位于 `test/keymaster.cc-cli/scheduler/`，不复制套件。宿主专属测试仍归 CLI；入口见工程仓 `test/shared/README.md`。

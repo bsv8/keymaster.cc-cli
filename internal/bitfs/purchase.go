@@ -29,6 +29,8 @@ import (
 
 // ContentRequestInput selects one batch to purchase from an open pool.
 type ContentRequestInput struct {
+	// QuoteRaw 是本次请求的已选 exact Kind 1，不从池的历史报价选取。
+	QuoteRaw         []byte
 	PoolID           string
 	ContentHashes    [][]byte
 	DeliveryDeadline content.UnixSeconds
@@ -83,6 +85,13 @@ func (t *BuyerTask) PrepareContentRequest(ctx context.Context, input ContentRequ
 		if err != nil {
 			return nil, err
 		}
+		quoteRaw, quoteErr := requestQuote(t.Store, state.Meta, authorizationID)
+		if quoteErr != nil {
+			return nil, quoteErr
+		}
+		if !bytes.Equal(quoteRaw, input.QuoteRaw) {
+			return nil, errors.New("bitfs: pending authorization belongs to its original quote")
+		}
 		return &ContentRequest{
 			PoolID:                    input.PoolID,
 			Kind5:                     pending,
@@ -92,12 +101,8 @@ func (t *BuyerTask) PrepareContentRequest(ctx context.Context, input ContentRequ
 			Replayed:                  true,
 		}, nil
 	}
-	quoteRaw, err := state.Meta.QuoteRaw()
-	if err != nil {
-		return nil, err
-	}
 	artifact, _, err := buyer.PrepareContentRequest(ctx, t.Facts(), buyer.RequestContentInput{
-		QuoteRaw:         quoteRaw,
+		QuoteRaw:         input.QuoteRaw,
 		Pool:             state.Evidence,
 		ContentHashes:    input.ContentHashes,
 		DeliveryDeadline: input.DeliveryDeadline,
@@ -117,6 +122,10 @@ func (t *BuyerTask) PrepareContentRequest(ctx context.Context, input ContentRequ
 	}
 	if authorization.PaymentSequence != state.PaymentSequence+1 {
 		return nil, fmt.Errorf("bitfs: content request sequence %d does not extend %d", authorization.PaymentSequence, state.PaymentSequence)
+	}
+	// 报价先于 Kind 5 保存；崩溃恢复按授权取回原条款，不读取新报价。
+	if err := t.Store.SaveExact(poolPath(input.PoolID, kindName("kind1", authorizationID)), input.QuoteRaw); err != nil {
+		return nil, err
 	}
 	if err := t.Store.SaveExact(poolPath(input.PoolID, kindName("kind5", authorizationID)), kind5); err != nil {
 		return nil, err
@@ -212,7 +221,7 @@ func (t *BuyerTask) CompleteDelivery(ctx context.Context, input DeliveryInput) (
 			return nil, err
 		}
 	}
-	quoteRaw, err := state.Meta.QuoteRaw()
+	quoteRaw, err := requestQuote(t.Store, state.Meta, authorizationID)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +488,7 @@ func (t *BuyerTask) validateDeliveryBundle(state *PoolState, authorizationID str
 	if err != nil {
 		return nil, nil, err
 	}
-	quoteRaw, err := state.Meta.QuoteRaw()
+	quoteRaw, err := requestQuote(t.Store, state.Meta, authorizationID)
 	if err != nil {
 		return nil, nil, err
 	}

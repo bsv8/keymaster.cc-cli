@@ -29,6 +29,7 @@ import (
 	"github.com/bsv8/bitcoin-libp2p/golibp2p"
 	"github.com/bsv8/bitcoin-libp2p/signer"
 	"github.com/bsv8/bitcoin-libp2p/webrtcinterconnect"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/keymaster.cc-cli/internal/admin"
 	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
@@ -40,7 +41,6 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
-	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 	websignal "github.com/bsv8/keymaster.cc-cli/internal/signal"
 	"github.com/bsv8/keymaster.cc-cli/internal/ssp"
@@ -51,6 +51,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/ui"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -75,6 +76,8 @@ func main() {
 }
 
 func run(args []string) int {
+	configureDebug()
+	bitfsdebug.Log("keymaster.cc-cli", "process.start", func() any { return map[string]any{"mode": os.Getenv("KEYMASTER_ENV"), "components": componentDebugStatus()} })
 	flags := flag.NewFlagSet("km", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	serverPath := flags.String("server", "", "售卖指定目录及子目录内的文件")
@@ -515,13 +518,14 @@ func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte,
 	}
 	sellerHost, err := golibp2p.NewHost(golibp2p.HostConfig{
 		Signer:           localSigner,
-		TransportOptions: []libp2p.Option{libp2p.Transport(factory)},
+		TransportOptions: []libp2p.Option{libp2p.Transport(factory), libp2p.Transport(websocket.New)},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 创建传输身份失败:", err)
 		return exitError
 	}
 	defer sellerHost.Close()
+	service.Arbitration = &arbitration.Client{Host: sellerHost, Endpoints: services.ArbitrationServices}
 	publicKey := localSigner.PublicKey()
 	sellerID := hex.EncodeToString(publicKey)
 	admission := bitfs.OpenAdmission()
@@ -549,15 +553,8 @@ func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte,
 			return
 		}
 		sessionID := "d-" + demand.MessageID
-		resumable, err := service.FindResumableSession(demand.FromPublicKey, demand.SeedHashHex)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "km: 查找可续会话失败 %s: %v\n", demand.MessageID, err)
-			return
-		}
-		if resumable != nil {
-			sessionID = resumable.SessionID
-			fmt.Printf("续接未完成会话 session=%s seed=%s\n", sessionID, demand.SeedHashHex)
-		} else if _, err := service.CreateQuote(ctx, sell.QuoteRequest{
+		// 新需求总是提供新报价；旧池按报文退款模板/授权引用续接，不冒充新报价。
+		if _, err := service.CreateQuote(ctx, sell.QuoteRequest{
 			SessionID:      sessionID,
 			SellerID:       sellerID,
 			BuyerPublicKey: buyerKey,
@@ -600,6 +597,7 @@ func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte,
 		},
 		Deliveries: func(handler func(string, []byte)) { client.AddPublishHandler(handler) },
 		OnDemand: func(demand discovery.Demand) {
+			bitfsdebug.Log("keymaster.cc-cli", "demand.received", func() any { return map[string]any{"messageId": demand.MessageID, "seedHashHex": demand.SeedHashHex} })
 			entry, err := service.Catalog.Preferred(ctx, demand.SeedHashHex)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "km: 查询供应内容失败:", err)
@@ -1035,14 +1033,19 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		runCtx, runCancel := context.WithCancel(ctx)
 		defer runCancel()
 		renderer.Render(ui.State{Stage: ui.StageWaiting, SeedHash: seedHash, Detail: "调度器下载（" + locator.Address + "）"})
+		if _, err := publisher.PublishDemand(runCtx, seedHash, 10*time.Minute); err != nil {
+			fmt.Fprintln(os.Stderr, "km: 发布需求失败:", err)
+			return exitError
+		}
 		result, purchaseErr = download.Run(runCtx, download.Options{
 			Arbitration: arbitrationClient,
 			Task:        task, SeedHash: seedHash, OutputDir: outputDir,
 			Wallet: w, Store: workStore,
+			RequestQuotes: func(requestCtx context.Context) error {
+				_, err := publisher.PublishDemand(requestCtx, seedHash, 10*time.Minute)
+				return err
+			},
 			Accept: func(acceptCtx context.Context) (*transport.Session, error) {
-				if _, err := publisher.PublishDemand(acceptCtx, seedHash, 10*time.Minute); err != nil {
-					return nil, err
-				}
 				select {
 				case session := <-sessionCh:
 					return session, nil

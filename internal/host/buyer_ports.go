@@ -69,15 +69,16 @@ type Peer interface {
 
 // BuyerPorts executes scheduler commands on one download task.
 type BuyerPorts struct {
-	Task          *bitfs.BuyerTask
-	Peer          Peer
-	PeerFor       func(sessionID string) (Peer, error)
-	Quotes        QuoteSource
-	peerMu        sync.Mutex
-	peerByID      map[string]Peer
-	sessionActive map[string]bool
-	fundedMu      sync.Mutex
-	funded        map[string]string
+	Task    *bitfs.BuyerTask
+	Peer    Peer
+	PeerFor func(sessionID string) (Peer, error)
+	Quotes  QuoteSource
+	// Discover 只由内核 discover 命令调用，不在连接接受或池结清时自行发布。
+	Discover func(context.Context) error
+	peerMu   sync.Mutex
+	peerByID map[string]Peer
+	fundedMu sync.Mutex
+	funded   map[string]string
 	// Feed delivers one scheduler fact; it may advance the kernel and
 	// execute follow-up commands synchronously.
 	Feed func(event scheduler.Event) error
@@ -185,15 +186,6 @@ func (p *BuyerPorts) WalletSnapshot(ctx context.Context) (uint64, []string, erro
 	return available, commands, nil
 }
 
-func (p *BuyerPorts) releaseSession(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	p.peerMu.Lock()
-	delete(p.sessionActive, sessionID)
-	p.peerMu.Unlock()
-}
-
 func (p *BuyerPorts) peerForSession(sessionID string) (Peer, error) {
 	if p.PeerFor != nil {
 		return p.PeerFor(sessionID)
@@ -244,6 +236,30 @@ func (p *BuyerPorts) settle(commandID string) error {
 	return p.Settle(commandID)
 }
 
+// DiscoverQuotes 只执行策略器的一次查询意图；真实失败回灌后不在宿主循环重试。
+func (p *BuyerPorts) DiscoverQuotes(ctx context.Context, command scheduler.Command) error {
+	if err := p.validate(); err != nil {
+		return err
+	}
+	var err error
+	if p.Discover == nil {
+		err = errors.New("host: quote discovery is unavailable")
+	} else {
+		err = p.Discover(ctx)
+	}
+	kind := "quotes-requested"
+	if err != nil {
+		kind = "quotes-request-failed"
+		if p.OnCommandError != nil {
+			p.OnCommandError(command, err)
+		}
+	}
+	if feedErr := p.emit("quote-discovery-"+command.CommandID, scheduler.Event{Type: kind, CommandID: command.CommandID}); feedErr != nil {
+		return feedErr
+	}
+	return p.settle(command.CommandID)
+}
+
 // OpenPool runs the full opening: exact Kind 2 -> seller Kind 3 -> funding
 // broadcast. A failure before the funding transaction is handed out releases
 // the intent; a failure afterwards is reported as an unknown funding result so
@@ -259,19 +275,6 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	peer, err := p.peerForSession(command.SessionID)
 	if err != nil {
 		return p.openFailed(command, true, "peer-unavailable")
-	}
-	if p.PeerFor != nil {
-		p.peerMu.Lock()
-		if p.sessionActive == nil {
-			p.sessionActive = map[string]bool{}
-		}
-		if p.sessionActive[command.SessionID] {
-			p.peerMu.Unlock()
-			// The session is already serving another pool (one quote = one pool).
-			return p.openFailed(command, true, "session-busy")
-		}
-		p.sessionActive[command.SessionID] = true
-		p.peerMu.Unlock()
 	}
 	if p.Quotes == nil {
 		return errors.New("host: quote source is required")
@@ -319,7 +322,6 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	})
 	unlock()
 	if err != nil {
-		p.releaseSession(command.SessionID)
 		return p.openFailed(command, true, "prepare-failed")
 	}
 	p.bindPeer(command.PoolID, peer)
@@ -328,7 +330,6 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 		// The funding was never broadcast: release the prepared inputs so a
 		// retry can build a new funding transaction.
 		p.Task.Wallet.Release(preparation.Funding)
-		p.releaseSession(command.SessionID)
 		return p.openFailed(command, true, "peer-failed")
 	}
 	unlock = p.lockState()
@@ -343,7 +344,6 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	if err != nil {
 		// The funding transaction may already be in flight: report an unknown
 		// result instead of pretending it was released.
-		p.releaseSession(command.SessionID)
 		return p.unknown(command, command.PoolID)
 	}
 	if err := peer.Funding(ctx, command.PoolID, completion.Kind4); err != nil {
@@ -441,7 +441,21 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 		unlock()
 		return p.downloadRejected(command, err, false, "pool")
 	}
+	// 新命令按请求自己的报价取证，池元数据仅保留开池时的原始归属。
+	// 没有Quote的历史outbox仍使用其原始报价，绝不替换为最新条款。
 	quoteRaw, err := meta.QuoteRaw()
+	if command.Quote != nil {
+		if p.Quotes == nil {
+			unlock()
+			return p.downloadRejected(command, errors.New("host: request quote source unavailable"), !pendingAtStart, "quote")
+		}
+		record, quoteErr := p.Quotes.Quote(ctx, command.Quote.SellerID, command.Quote.SessionID)
+		if quoteErr != nil {
+			unlock()
+			return p.downloadRejected(command, quoteErr, !pendingAtStart, "quote")
+		}
+		quoteRaw, err = record.QuoteRaw, nil
+	}
 	if err != nil {
 		unlock()
 		return p.downloadRejected(command, err, false, "quote")
@@ -483,6 +497,16 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 			return p.downloadRejected(command, err, false, "seed")
 		}
 	}
+	actualPrice, priceErr := content.ContentHashesPriceSatoshis(ctx, verified.Terms(), hashes, seed)
+	if priceErr != nil {
+		unlock()
+		return p.downloadRejected(command, priceErr, !pendingAtStart, "prices")
+	}
+	expectedPrice, priceErr := paidForBatch(command, command.ContentIDs)
+	if priceErr != nil || !expectedPrice.IsUint64() || expectedPrice.Uint64() != actualPrice {
+		unlock()
+		return p.downloadRejected(command, errors.New("host: request quote and approved content prices disagree"), !pendingAtStart, "prices")
+	}
 	// The authorization deadline is a protocol fact in Unix seconds; the
 	// scheduler's event times are monotonic milliseconds.
 	nowUnix := p.Task.Facts().Now.Unix()
@@ -508,6 +532,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 		return p.downloadRejected(command, errors.New("host: delivery deadline already passed"), safeToRetry, "deadline")
 	}
 	request, err := p.Task.PrepareContentRequest(ctx, bitfs.ContentRequestInput{
+		QuoteRaw:         quoteRaw,
 		PoolID:           command.PoolID,
 		ContentHashes:    hashes,
 		DeliveryDeadline: content.UnixSeconds(deadline),
@@ -699,9 +724,6 @@ func (p *BuyerPorts) ClosePool(ctx context.Context, command scheduler.Command) e
 	peer, err := p.peerForPool(command.PoolID)
 	if err != nil {
 		return p.closeUnknown(command, err)
-	}
-	if poolRecord, ok := p.Task.Ledger.Pools()[command.PoolID]; ok {
-		defer p.releaseSession(poolRecord.SessionID)
 	}
 	unlock := p.lockState()
 	if err := bitfs.ReconcilePoolLedger(p.Task, command.PoolID); err != nil {

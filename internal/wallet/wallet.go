@@ -1,7 +1,7 @@
 // Package wallet implements the P2PKH wallet used by km.
 //
 // Selection, occupation and fee validation are decided by the deterministic
-// UTXO manager (keymaster.cc-cli/utxo, contract utm/1). The wallet is a
+// UTXO manager (keymaster.cc-utxo-manager/utxo, contract utm/1). The wallet is a
 // thin trusted adapter: WoC snapshots in, real signing, exact-bytes
 // broadcast, same SpendResult shape as before. Standard P2PKH flows produce
 // byte-identical fees to the previous implementation (10+148n+34m with
@@ -806,8 +806,23 @@ func (w *Wallet) PrepareProtocol(ctx context.Context, kind string, req ProtocolR
 	if recovered, err := w.recoverProtocolPreparationLocked(req, parsed, declared, feePolicy, feeCap); recovered != nil || err != nil {
 		return recovered, err
 	}
-	if _, err := w.snapshotLocked(ctx); err != nil {
-		return nil, err
+	// Pool-only settlement spends proven external inputs, not wallet funds.
+	// Do not make recording that responsibility depend on an unrelated UTXO
+	// API refresh. Missing proofs or wallet inputs still require observation;
+	// the manager below remains responsible for classifying every input.
+	needsWalletObservation := false
+	for _, in := range parsed.Inputs {
+		key := fmt.Sprintf("%s:%d", strings.ToLower(in.SourceTXID.String()), in.SourceTxOutIndex)
+		proof, ok := req.Proofs[key]
+		if !ok || strings.EqualFold(strings.TrimPrefix(strings.ToLower(proof.ScriptHex), "0x"), w.lockingHex) {
+			needsWalletObservation = true
+			break
+		}
+	}
+	if needsWalletObservation {
+		if _, err := w.snapshotLocked(ctx); err != nil {
+			return nil, err
+		}
 	}
 	allocationID := newAllocationID()
 	candidate, err := w.core.kernel.Clone()

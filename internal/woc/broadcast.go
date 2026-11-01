@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // BroadcastReceipt is a host HTTP diagnostic, not a manager-specific state.
@@ -31,7 +33,14 @@ func (e *BroadcastError) Error() string {
 
 // BroadcastExact interprets only the exact response to this POST. HTTP/body
 // interpretation stays in the host; the common manager consumes the outcome.
-func (c *Client) BroadcastExact(ctx context.Context, rawHex string) (BroadcastReceipt, error) {
+func (c *Client) BroadcastExact(ctx context.Context, rawHex string) (receipt BroadcastReceipt, failure error) {
+	started := time.Now()
+	bitfsdebug.Log("keymaster.cc-cli", "chain.broadcast.start", func() any { return map[string]any{"transactionBytes": len(rawHex) / 2} })
+	defer func() {
+		bitfsdebug.Log("keymaster.cc-cli", "chain.broadcast.finish", func() any {
+			return map[string]any{"txid": receipt.TxID, "status": receipt.Status, "httpStatus": receipt.HTTPStatus, "elapsedMs": float64(time.Since(started).Microseconds()) / 1000, "error": failure}
+		})
+	}()
 	raw, err := hex.DecodeString(rawHex)
 	if err != nil || len(raw) == 0 {
 		return BroadcastReceipt{}, fmt.Errorf("woc: raw transaction must be nonempty hex")

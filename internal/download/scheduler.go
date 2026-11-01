@@ -27,11 +27,13 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/host"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
-	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 	"github.com/bsv8/keymaster.cc-cli/internal/transport"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
+
+var errAcceptSource = errors.New("download: quote connection source unavailable")
 
 const (
 	// feeOpening is the wallet-funded opening miner fee estimate.
@@ -48,10 +50,10 @@ type Options struct {
 	OutputDir   string
 	Wallet      *wallet.Wallet
 	Store       *store.Store
-	// Accept returns the next seller session. It is called once at the start
-	// and again whenever a closed pool leaves content pending. The
-	// implementation is responsible for republishing the demand if needed.
+	// Accept 只等待下一条真实入站连接，不自行重发需求或按席位过滤报价。
 	Accept func(ctx context.Context) (*transport.Session, error)
+	// RequestQuotes 严格执行内核 discover；首次用户查询由调用者显式发起。
+	RequestQuotes func(context.Context) error
 	// OnView observes the scheduler projection while waiting (optional).
 	OnView func(scheduler.View)
 	// Logf receives diagnostic messages (optional).
@@ -185,14 +187,9 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		monotonic = NewMonotonicClock()
 		now = monotonic.Now
 	}
-	maxSellers := int(options.Config.BaseSeats + options.Config.FloatingSeats)
-	if maxSellers < 1 {
-		maxSellers = 2
-	}
 	var (
 		peersMu    sync.Mutex
 		peers      = map[string]*sessionPeer{}
-		sessions   = map[string]*transport.Session{}
 		sessionSet = map[*transport.Session]bool{}
 		closing    bool
 	)
@@ -230,10 +227,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		versionsMu      sync.Mutex
 		versions        = map[string]int64{}
 		arbitrationFees = map[string]arbitration.Info{}
-		quoteByID       = map[string]scheduler.Quote{}
-		latest          = map[string]scheduler.Quote{}
-		sellerSessions  = map[string][]string{}
-		pendingSlots    int
 		sessionSeq      int64
 		manifestOnce    bool
 		votesMu         sync.Mutex
@@ -254,7 +247,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	readSession := func() (string, string, *content.FileQuoteTerms, error) {
 		session, err := options.Accept(ctx)
 		if err != nil {
-			return "", "", nil, err
+			return "", "", nil, errors.Join(errAcceptSource, err)
 		}
 		if !trackSession(session) {
 			return "", "", nil, context.Canceled
@@ -336,7 +329,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		peer := &sessionPeer{session: session}
 		peersMu.Lock()
 		peers[sessionID] = peer
-		sessions[sessionID] = session
 		peersMu.Unlock()
 		return sellerID, sessionID, terms, nil
 	}
@@ -378,8 +370,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			Fees: scheduler.Fees{Version: 1, Opening: feeOpening, Settlement: feeSettlement,
 				ArbitrationBase: fmt.Sprint(arbitrationFees[sessionID].BaseSat), ArbitrationPerItem: fmt.Sprint(arbitrationFees[sessionID].PerItemSat)},
 		}
-		quoteByID[sessionID] = quote
-		latest[sellerID] = quote
 		versionsMu.Unlock()
 		eventID := fmt.Sprintf("quote-%s-%d", sessionID, version)
 		if err := loop.Feed(ctx, scheduler.Event{EventID: eventID, Type: "quote", Quote: &quote}); err != nil {
@@ -387,87 +377,23 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		}
 		return loop.Feed(ctx, scheduler.Event{EventID: "seller-" + sellerID, Type: "seller", SellerID: sellerID, Online: boolPointer(true)})
 	}
-	// expireQuote stops the kernel from opening a new pool on a session that
-	// just closed its pool.
-	expireQuote := func(sellerID, closedSession string) {
-		versionsMu.Lock()
-		current, found := latest[sellerID]
-		if !found || current.SessionID != closedSession {
-			// A newer standby quote is already current; keep it.
-			versionsMu.Unlock()
-			return
-		}
-		versionsMu.Unlock()
-		if !found {
-			return
-		}
-		versionsMu.Lock()
-		versions[sellerID]++
-		current.Version = versions[sellerID]
-		versionsMu.Unlock()
-		current.ExpiresAt = now() - 1
-		_ = loop.Feed(ctx, scheduler.Event{EventID: fmt.Sprintf("quote-expire-%s-%d", sellerID, current.Version), Type: "quote", Quote: &current})
-	}
-	// acceptSession integrates one new session into the seller seats.
-	acceptSession := func() error {
-		sellerID, sessionID, terms, err := readSession()
-		if err != nil {
-			return err
-		}
-		versionsMu.Lock()
-		if len(sellerSessions[sellerID]) >= 2 {
-			// One active + at most one standby per seller; more sessions only
-			// replace quotes without adding a seat.
-			versionsMu.Unlock()
-			peersMu.Lock()
-			if session := sessions[sessionID]; session != nil {
-				_ = session.Close()
+	// 连接接收器只观察真实新报价；席位、换人和是否重发需求均由内核决定。
+	intake := func() {
+		for ctx.Err() == nil {
+			sellerID, sessionID, terms, err := readSession()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logf("接受卖方会话失败: %v", err)
+				if errors.Is(err, errAcceptSource) {
+					_ = loop.Feed(ctx, scheduler.Event{EventID: "quote-source-offline", Type: "quote-source", Enabled: boolPointer(false)})
+					return
+				}
+				continue
 			}
-			delete(sessions, sessionID)
-			delete(peers, sessionID)
-			peersMu.Unlock()
-			return errors.New("download: seller already has two sessions")
-		}
-		sellerSessions[sellerID] = append(sellerSessions[sellerID], sessionID)
-		versionsMu.Unlock()
-		return feedQuote(sellerID, sessionID, terms)
-	}
-	// pump fills the seat cap with distinct sellers and replaces closed
-	// sessions. It only calls Accept when a seat is actually needed, so the
-	// demand is not republished in a hot loop.
-	var wake = make(chan struct{}, 1)
-	pump := func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-wake:
-			}
-			for {
-				versionsMu.Lock()
-				need := len(sellerSessions) < maxSellers || pendingSlots > 0
-				duplicateCap := len(sellerSessions) >= maxSellers
-				versionsMu.Unlock()
-				if !need {
-					break
-				}
-				if err := acceptSession(); err != nil {
-					logf("接受卖方会话失败: %v", err)
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(2 * time.Second):
-					}
-					if duplicateCap {
-						break
-					}
-					continue
-				}
-				versionsMu.Lock()
-				if pendingSlots > 0 {
-					pendingSlots--
-				}
-				versionsMu.Unlock()
+			if err := feedQuote(sellerID, sessionID, terms); err != nil {
+				logf("报价事实回灌失败: %v", err)
 			}
 		}
 	}
@@ -520,6 +446,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		Task:        options.Task,
 		PeerFor:     quoteForSession,
 		Quotes:      quotes,
+		Discover:    options.RequestQuotes,
 		StateMu:     &sync.Mutex{},
 		SeedHashHex: options.SeedHash,
 		OutputDir:   options.OutputDir,
@@ -546,45 +473,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		return nil, err
 	}
 	loop.OnError = func(err error) { logf("调度器: %v", err) }
-	loop.OnCommands = func(command scheduler.Command, state scheduler.State) {
-		if command.Type != "close" && command.Type != "drain" {
-			return
-		}
-		pool := state.Pools[command.PoolID]
-		if pool == nil {
-			return
-		}
-		versionsMu.Lock()
-		sessionsForSeller := sellerSessions[pool.SellerID]
-		hasStandby := false
-		for _, id := range sessionsForSeller {
-			if id != pool.SessionID {
-				hasStandby = true
-			}
-		}
-		if command.Type == "close" {
-			remaining := make([]string, 0, len(sessionsForSeller))
-			for _, id := range sessionsForSeller {
-				if id != pool.SessionID {
-					remaining = append(remaining, id)
-				}
-			}
-			sellerSessions[pool.SellerID] = remaining
-		}
-		versionsMu.Unlock()
-		// Stop the kernel from opening another pool on this session before the
-		// old pool has actually closed (the session serves exactly one pool).
-		expireQuote(pool.SellerID, pool.SessionID)
-		if !hasStandby && scheduler.ProjectView(state).Execution != "finished" {
-			versionsMu.Lock()
-			pendingSlots++
-			versionsMu.Unlock()
-			select {
-			case wake <- struct{}{}:
-			default:
-			}
-		}
-	}
 	loop.AfterEvent = func(event scheduler.Event, state scheduler.State) []scheduler.Event {
 		followUps := make([]scheduler.Event, 0, 2)
 		if !manifestOnce && !state.ManifestKnown && event.Type == "delivery" {
@@ -605,17 +493,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 				contentMu.Unlock()
 				followUps = append(followUps, scheduler.Event{EventID: "manifest-" + options.SeedHash, Type: "manifest", Content: manifest})
 				break
-			}
-		}
-		if event.Type == "closed" {
-			if pool := state.Pools[event.PoolID]; pool != nil {
-				peersMu.Lock()
-				if session := sessions[pool.SessionID]; session != nil {
-					_ = session.Close()
-				}
-				delete(sessions, pool.SessionID)
-				delete(peers, pool.SessionID)
-				peersMu.Unlock()
 			}
 		}
 		if event.Type == "closed" || event.Type == "refund-available" {
@@ -649,6 +526,11 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		_ = loop.StopContext(stopCtx)
 	}()
 
+	if options.RequestQuotes != nil {
+		if err := loop.Feed(ctx, scheduler.Event{EventID: "quote-source-ready", Type: "quote-source", Enabled: boolPointer(true)}); err != nil {
+			return nil, err
+		}
+	}
 	available, reflected, err := ports.WalletSnapshot(ctx)
 	if err != nil {
 		return nil, err
@@ -659,7 +541,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	}
 	versionsMu.Lock()
 	versions[firstSeller] = previousVersion
-	sellerSessions[firstSeller] = append(sellerSessions[firstSeller], firstSession)
 	versionsMu.Unlock()
 	if err := feedQuote(firstSeller, firstSession, firstTerms); err != nil {
 		return nil, err
@@ -671,11 +552,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	if err := loop.Feed(ctx, scheduler.Event{EventID: intent + "-1", Type: intent}); err != nil {
 		return nil, err
 	}
-	go pump()
-	select {
-	case wake <- struct{}{}:
-	default:
-	}
+	go intake()
 	stopControls := func() {}
 	if options.Ready != nil {
 		stopControls = options.Ready(func(event scheduler.Event) error { return loop.Feed(ctx, event) })
@@ -727,7 +604,25 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		if options.OnView != nil {
 			options.OnView(view)
 		}
-		if view.Funds == "problem" {
+		if view.Failure != nil && view.Funds != "pending" {
+			// 内核已经停止新工作。等待真实在途购买结束，而不是把任务错误
+			// 当成取消传输；未决资金仍由原证据继续追溯。
+			state, stateErr := loop.State(ctx)
+			if stateErr != nil {
+				return nil, stateErr
+			}
+			pending := false
+			for _, request := range state.Requests {
+				if request.State == "pending" {
+					pending = true
+					break
+				}
+			}
+			if !pending {
+				return nil, fmt.Errorf("download: 资金不足：需要至少 %s sats，可用 %s sats；任务已停止新增购买，内容 %d/%d，资金状态 %s", view.Failure.Required, view.Failure.Available, view.Completed, view.Total, view.Funds)
+			}
+		}
+		if view.Funds == "problem" && view.Failure == nil {
 			return nil, errors.New("download: scheduler reports a funding problem; check unresolved records")
 		}
 		if view.Execution != "finished" || view.Funds != "settled" {

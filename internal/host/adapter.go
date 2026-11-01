@@ -14,10 +14,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"os"
 
-	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
+	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 
 // SnapshotFormat identifies the persisted scheduler host snapshot.
@@ -166,7 +167,13 @@ func (a *Adapter) save() error {
 
 // Handle applies one fact, persists the new state with the extended outbox and
 // returns the step result. The caller executes the returned commands.
-func (a *Adapter) Handle(event scheduler.Event) (*scheduler.Result, error) {
+func (a *Adapter) Handle(event scheduler.Event) (output *scheduler.Result, failure error) {
+	bitfsdebug.Log("keymaster.cc-cli", "scheduler.event.received", func() any { return map[string]any{"taskId": a.taskID, "seedHashHex": a.seedHash, "event": event} })
+	defer func() {
+		bitfsdebug.Log("keymaster.cc-cli", "scheduler.decision", func() any {
+			return map[string]any{"taskId": a.taskID, "seedHashHex": a.seedHash, "result": output, "state": a.state, "error": failure}
+		})
+	}()
 	if event.EventID == "" {
 		return nil, errors.New("host: eventId is required")
 	}

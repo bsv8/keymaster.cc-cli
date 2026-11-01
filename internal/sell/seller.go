@@ -11,10 +11,12 @@ package sell
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"mime"
 	"os"
 	"path/filepath"
@@ -26,11 +28,13 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv8/go-bitfs/content"
+	bitfsdebug "github.com/bsv8/go-bitfs/debug"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
 	"github.com/bsv8/go-bitfs/wire"
 
+	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
@@ -88,6 +92,8 @@ type Seller struct {
 	Pricing  *pricing.Pricing
 	// Arbiters are the arbiter public keys this server offers in quotes.
 	Arbiters []protocol.PublicKey
+	// Arbitration 查询池指定仲裁方的真实认证费率；不可缺省为零。
+	Arbitration arbitration.Resolver
 	// Wallet broadcasts the close transaction (optional: without it closes are
 	// persisted but not submitted).
 	Wallet walletBroadcaster
@@ -106,6 +112,8 @@ type walletBroadcaster interface {
 }
 
 type sessionMeta struct {
+	// QuoteSessionID 固定引用原开池连接的 exact 报价；不限制此池的后续购买。
+	QuoteSessionID    string `json:"quoteSessionId,omitempty"`
 	SessionID         string `json:"sessionId"`
 	SellerID          string `json:"sellerId"`
 	SeedHashHex       string `json:"seedHash"`
@@ -167,6 +175,7 @@ func sessionPath(sessionID, name string) string {
 // CreateQuote prices one file and signs exact Kind 1. The quote is persisted
 // before it is returned.
 func (s *Seller) CreateQuote(ctx context.Context, request QuoteRequest) (*QuoteResult, error) {
+	bitfsdebug.Log("keymaster.cc-cli", "seller.quote.prepare", func() any { return request })
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -206,7 +215,7 @@ func (s *Seller) CreateQuote(ctx context.Context, request QuoteRequest) (*QuoteR
 		maxBlocks = defaultMaxBlocksBatch
 	}
 	expiresAt := s.Facts().Now.Unix() + int64(ttl/time.Second)
-	artifact, _, err := seller.CreateQuote(ctx, s.Facts(), s.Signer, seller.QuoteDraft{
+	artifact, terms, err := seller.CreateQuote(ctx, s.Facts(), s.Signer, seller.QuoteDraft{
 		SeedHash:                   seedHashBytes(entry.SeedHashHex),
 		BuyerPublicKey:             request.BuyerPublicKey,
 		SeedPriceSatoshis:          protocol.Satoshis(seedPriceValue),
@@ -232,6 +241,15 @@ func (s *Seller) CreateQuote(ctx context.Context, request QuoteRequest) (*QuoteR
 	if err := s.saveMeta(meta); err != nil {
 		return nil, err
 	}
+	termsCBOR, err := content.EncodeFileQuoteTerms(terms)
+	if err != nil {
+		return nil, err
+	}
+	termsID := sha256.Sum256(termsCBOR)
+	// 条款ID是报价索引，传输会话不是池身份；各会话及逐次交付仍保留 exact 原文。
+	if err := s.Sessions.Save("quotes/"+hex.EncodeToString(termsID[:])+".bin", kind1); err != nil {
+		return nil, err
+	}
 	return &QuoteResult{
 		SessionID: request.SessionID, Kind1: kind1, ExpiresAt: expiresAt,
 		SeedPrice: seedPriceValue, BlockPrice: blockPriceValue,
@@ -242,6 +260,7 @@ func (s *Seller) CreateQuote(ctx context.Context, request QuoteRequest) (*QuoteR
 // Presign answers exact Kind 2 with exact Kind 3. Repeated calls for the same
 // Kind 2 return the saved Kind 3.
 func (s *Seller) Presign(ctx context.Context, sessionID string, kind2 []byte) ([]byte, error) {
+	bitfsdebug.Log("keymaster.cc-cli", "seller.opening.presign", func() any { return map[string]any{"sessionId": sessionID, "bytes": len(kind2)} })
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -273,6 +292,7 @@ func (s *Seller) Presign(ctx context.Context, sessionID string, kind2 []byte) ([
 
 // VerifyFunding verifies exact Kind 4 and persists the opening and pool state.
 func (s *Seller) VerifyFunding(ctx context.Context, sessionID string, kind4 []byte) error {
+	bitfsdebug.Log("keymaster.cc-cli", "seller.funding.verify", func() any { return map[string]any{"sessionId": sessionID, "bytes": len(kind4)} })
 	if err := s.validate(); err != nil {
 		return err
 	}
@@ -307,6 +327,7 @@ func (s *Seller) VerifyFunding(ctx context.Context, sessionID string, kind4 []by
 // and persists exact Kind 6. A repeated authorization returns the saved
 // delivery byte for byte.
 func (s *Seller) PrepareDelivery(ctx context.Context, sessionID string, kind5 []byte) ([]byte, error) {
+	bitfsdebug.Log("keymaster.cc-cli", "seller.delivery.prepare", func() any { return map[string]any{"sessionId": sessionID, "bytes": len(kind5)} })
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -321,28 +342,51 @@ func (s *Seller) PrepareDelivery(ctx context.Context, sessionID string, kind5 []
 	if existing, err := s.Sessions.Load(kind6Path); err == nil {
 		return existing, nil
 	}
-	quoteRaw, err := s.Sessions.Load(sessionPath(sessionID, sessionQuoteName))
+	quoteRaw, err := s.quoteForRequest(sessionID, kind5)
 	if err != nil {
-		return nil, fmt.Errorf("sell: session quote is missing: %w", err)
+		return nil, err
 	}
 	poolEvidence, err := s.loadPool(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	meta, err := s.loadMeta(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	payloads, seed, err := s.servePayloads(ctx, meta, kind5)
-	if err != nil {
-		return nil, err
-	}
-	// Pre-checking turns protocol rejections into errors before any content is
-	// read or signed.
-	if _, err := seller.InspectDeliveryRequest(s.Facts(), seller.InspectDeliveryRequestInput{
+	// 验证授权和完整仲裁候选后才允许读取正文，不能只检查内容款余额。
+	summary, err := seller.InspectDeliveryRequest(s.Facts(), seller.InspectDeliveryRequestInput{
 		QuoteRaw: quoteRaw, Pool: *poolEvidence, RequestRaw: kind5,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("sell: reject delivery request: %w", err)
+	}
+	if s.Arbitration == nil {
+		return nil, errors.New("sell: arbitration fee resolver is required before delivery")
+	}
+	_, info, err := s.Arbitration.Select(ctx, [][]byte{poolEvidence.Opening.ArbiterPublicKey})
+	if err != nil {
+		return nil, fmt.Errorf("sell: arbitration fee query: %w", err)
+	}
+	fee := new(big.Int).Mul(new(big.Int).SetUint64(info.PerItemSat), new(big.Int).SetUint64(uint64(len(summary.ContentHashes))))
+	fee.Add(fee, new(big.Int).SetUint64(info.BaseSat))
+	if !fee.IsUint64() {
+		return nil, errors.New("sell: arbitration fee overflows uint64")
+	}
+	details, err := pool.DeriveOpeningDetails(poolEvidence.Opening)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := pool.BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, poolEvidence.Opening.RefundTemplateRaw, uint32(summary.PaymentSequence), uint64(summary.SellerAmountAfterSatoshis), fee.Uint64()); err != nil {
+		return nil, fmt.Errorf("sell: insufficient complete delivery capacity: %w", err)
+	}
+	signedQuote, err := content.DecodeSignedFileQuote(quoteRaw)
+	if err != nil {
+		return nil, err
+	}
+	terms, err := content.DecodeFileQuoteTerms(signedQuote.FileQuoteTermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	payloads, seed, err := s.servePayloads(ctx, hex.EncodeToString(terms.SeedHash), kind5)
+	if err != nil {
+		return nil, err
 	}
 	artifact, _, err := seller.PrepareDelivery(ctx, s.Facts(), seller.DeliveryInput{
 		QuoteRaw: quoteRaw, Pool: *poolEvidence, RequestRaw: kind5,
@@ -352,6 +396,9 @@ func (s *Seller) PrepareDelivery(ctx context.Context, sessionID string, kind5 []
 		return nil, fmt.Errorf("sell: prepare delivery: %w", err)
 	}
 	kind6 := artifact.Bytes()
+	if err := s.Sessions.SaveExact(sessionPath(sessionID, deliveriesDir+"/"+authorizationID+"/quote.bin"), quoteRaw); err != nil {
+		return nil, err
+	}
 	if err := s.Sessions.SaveExact(sessionPath(sessionID, deliveriesDir+"/"+authorizationID+"/kind5.bin"), kind5); err != nil {
 		return nil, err
 	}
@@ -374,6 +421,7 @@ func (s *Seller) PrepareDelivery(ctx context.Context, sessionID string, kind5 []
 // CompletePayment verifies exact Kind 7 against the saved delivery and
 // persists the completed payment transaction as the pool's latest state.
 func (s *Seller) CompletePayment(ctx context.Context, sessionID string, kind7 []byte) ([]byte, error) {
+	bitfsdebug.Log("keymaster.cc-cli", "seller.payment.complete", func() any { return map[string]any{"sessionId": sessionID, "bytes": len(kind7)} })
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -404,7 +452,10 @@ func (s *Seller) CompletePayment(ctx context.Context, sessionID string, kind7 []
 	if err != nil {
 		return nil, err
 	}
-	quoteRaw, err := s.Sessions.Load(sessionPath(sessionID, sessionQuoteName))
+	quoteRaw, err := s.Sessions.Load(sessionPath(sessionID, deliveriesDir+"/"+authorizationID+"/quote.bin"))
+	if errors.Is(err, os.ErrNotExist) {
+		quoteRaw, err = s.loadQuote(sessionID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -447,6 +498,7 @@ func (s *Seller) CompletePayment(ctx context.Context, sessionID string, kind7 []
 // close transaction (when a wallet port is configured). The buyer only
 // observes it; the seller is the submitter.
 func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []byte) ([]byte, error) {
+	bitfsdebug.Log("keymaster.cc-cli", "seller.close.complete", func() any { return map[string]any{"sessionId": sessionID, "bytes": len(kind12)} })
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -538,23 +590,23 @@ func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []b
 
 // servePayloads resolves the requested hashes from the catalog: the seed hash
 // serves the seed bytes, block hashes serve their block from the file.
-func (s *Seller) servePayloads(ctx context.Context, meta sessionMeta, kind5 []byte) ([][]byte, []byte, error) {
+func (s *Seller) servePayloads(ctx context.Context, seedHashHex string, kind5 []byte) ([][]byte, []byte, error) {
 	hashes, err := contentHashesOf(kind5)
 	if err != nil {
 		return nil, nil, err
 	}
-	entry, err := s.Catalog.Preferred(ctx, meta.SeedHashHex)
+	entry, err := s.Catalog.Preferred(ctx, seedHashHex)
 	if err != nil {
 		return nil, nil, err
 	}
 	if entry == nil {
-		return nil, nil, fmt.Errorf("sell: catalog file for seed %s disappeared", meta.SeedHashHex)
+		return nil, nil, fmt.Errorf("sell: catalog file for seed %s disappeared", seedHashHex)
 	}
 	payloads := make([][]byte, 0, len(hashes))
 	needSeed := false
 	for _, hash := range hashes {
 		hashHex := hex.EncodeToString(hash)
-		if hashHex == meta.SeedHashHex {
+		if hashHex == seedHashHex {
 			payloads = append(payloads, append([]byte(nil), entry.Seed...))
 			continue
 		}
@@ -577,7 +629,7 @@ func (s *Seller) saveMeta(meta sessionMeta) error {
 	if err != nil {
 		return err
 	}
-	return s.Sessions.Save(sessionPath(meta.SessionID, sessionMetaName), append(encoded, '\n'))
+	return s.Sessions.SaveExact(sessionPath(meta.SessionID, sessionMetaName), append(encoded, '\n'))
 }
 
 func (s *Seller) loadMeta(sessionID string) (sessionMeta, error) {
