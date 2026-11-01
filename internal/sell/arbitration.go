@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bsv8/go-bitfs/seller"
+	"github.com/bsv8/BitFSProtocol/seller"
 )
 
 // ArbitrationClaim is the persisted exact Kind 8.

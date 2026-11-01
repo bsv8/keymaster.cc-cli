@@ -14,10 +14,10 @@ import (
 	"time"
 
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv8/go-bitfs/buyer"
-	"github.com/bsv8/go-bitfs/content"
-	"github.com/bsv8/go-bitfs/protocol"
-	"github.com/bsv8/go-bitfs/wire"
+	"github.com/bsv8/BitFSProtocol/buyer"
+	"github.com/bsv8/BitFSProtocol/content"
+	"github.com/bsv8/BitFSProtocol/protocol"
+	"github.com/bsv8/BitFSProtocol/wire"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"

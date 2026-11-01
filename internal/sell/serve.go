@@ -8,9 +8,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/bsv8/go-bitfs/content"
-	bitfsdebug "github.com/bsv8/go-bitfs/debug"
-	"github.com/bsv8/go-bitfs/wire"
+	"github.com/bsv8/BitFSProtocol/content"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
+	"github.com/bsv8/BitFSProtocol/wire"
 )
 
 // Session is the minimal exact-artifact stream the seller needs.

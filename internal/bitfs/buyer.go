@@ -1,4 +1,4 @@
-// Package bitfs wires the go-bitfs protocol steps into the km client store,
+// Package bitfs wires the BitFSProtocol protocol steps into the km client store,
 // fund ledger and wallet.
 //
 // The buyer flow is persist-before-send: funding bytes, exact Kind 2/3/4
@@ -16,9 +16,9 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv8/go-bitfs/buyer"
-	"github.com/bsv8/go-bitfs/pool"
-	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/BitFSProtocol/buyer"
+	"github.com/bsv8/BitFSProtocol/pool"
+	"github.com/bsv8/BitFSProtocol/protocol"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"

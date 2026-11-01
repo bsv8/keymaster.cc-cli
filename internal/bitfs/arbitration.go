@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bsv8/go-bitfs/buyer"
+	"github.com/bsv8/BitFSProtocol/buyer"
 )
 
 // RetrievalPreparation is the persisted exact Kind 10.

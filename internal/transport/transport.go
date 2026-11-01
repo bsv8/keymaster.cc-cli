@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"sync"
 
-	bitfstransport "github.com/bsv8/go-bitfs/transport"
-	"github.com/bsv8/go-bitfs/wire"
+	bitfstransport "github.com/bsv8/BitFSProtocol/transport"
+	"github.com/bsv8/BitFSProtocol/wire"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"

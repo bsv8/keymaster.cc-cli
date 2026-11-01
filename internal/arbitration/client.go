@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"time"
 
+	bitfsprotocol "github.com/bsv8/BitFSProtocol/protocol"
 	"github.com/bsv8/bitcoin-libp2p/streamio"
-	bitfsprotocol "github.com/bsv8/go-bitfs/protocol"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"

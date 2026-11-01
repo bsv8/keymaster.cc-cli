@@ -21,11 +21,10 @@ go build -o km ./cmd/km
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
 ```
 
-构建需要 `github.com/bsv8/go-bitfs` 包含买方本地付款证据 API
-（`BuyerPoolEvidence.latestBuyerPayment`、`buyer.InspectPool`）与
-`bitcoin-libp2p` 包含 `webrtcinterconnect`/会话 ID API 的版本。这两个版本尚未发布，
-因此 `go.mod` 临时 `replace` 指向同级本地仓库（`../go-bitfs`、`../bitcoin-libp2p`）；
-发版后删除 replace 并升级 require。
+协议 SDK 使用正式 `github.com/bsv8/BitFSProtocol v0.5.1`，
+包含买方本地付款证据 API（`BuyerPoolEvidence.latestBuyerPayment`、`buyer.InspectPool`）。
+网络层使用正式 `github.com/bsv8/bitcoin-libp2p v0.3.2`。
+两者均通过远端 module 下载及 go.sum 校验，不使用相邻 SDK replace；构建不要求相邻 SDK 源码。
 
 ## 使用
 
@@ -98,7 +97,7 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 
 ## dev 调试日志
 
-`KEYMASTER_ENV=dev` 自动开启 CLI 与 Go go-bitfs 的详细诊断，向 stderr 输出
+`KEYMASTER_ENV=dev` 自动开启 CLI 与 Go BitFSProtocol 的详细诊断，向 stderr 输出
 `[bitfs-debug] ` 前缀的 JSON 事件；默认不创建任何日志文件，非 dev 不输出。
 可由终端重定向保留，例如 `KEYMASTER_ENV=dev km … 2>>/data/home/km-debug.log`。
 输出含需求/会话/调度/传输/资金/广播及 SDK 解析签名错误，使用运行编号、序号、UTC
@@ -173,7 +172,7 @@ TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
 ## 依赖
 
 - [`github.com/bsv8/KeyHold/go/v2`](https://github.com/bsv8/KeyHold)：KeyHold v1 标准 SDK。
-- [`github.com/bsv8/go-bitfs`](https://github.com/bsv8/go-bitfs)：BitFS 协议 SDK（Kind 1–13）。
+- [`github.com/bsv8/BitFSProtocol`](https://github.com/bsv8/BitFSProtocol)：BitFS 协议 SDK（Kind 1–13）。
 - `github.com/bsv-blockchain/go-sdk`：BSV 原语（地址、交易、脚本）。
 - `golang.org/x/term`：隐藏输入密码。
 

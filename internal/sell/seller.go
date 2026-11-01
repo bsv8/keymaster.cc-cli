@@ -27,12 +27,12 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv8/go-bitfs/content"
-	bitfsdebug "github.com/bsv8/go-bitfs/debug"
-	"github.com/bsv8/go-bitfs/pool"
-	"github.com/bsv8/go-bitfs/protocol"
-	"github.com/bsv8/go-bitfs/seller"
-	"github.com/bsv8/go-bitfs/wire"
+	"github.com/bsv8/BitFSProtocol/content"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
+	"github.com/bsv8/BitFSProtocol/pool"
+	"github.com/bsv8/BitFSProtocol/protocol"
+	"github.com/bsv8/BitFSProtocol/seller"
+	"github.com/bsv8/BitFSProtocol/wire"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"

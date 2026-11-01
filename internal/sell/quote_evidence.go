@@ -5,8 +5,8 @@ import (
 	"errors"
 	"os"
 
-	"github.com/bsv8/go-bitfs/content"
-	"github.com/bsv8/go-bitfs/wire"
+	"github.com/bsv8/BitFSProtocol/content"
+	"github.com/bsv8/BitFSProtocol/wire"
 )
 
 // 这里只读取未经验证的路由引用定位候选证据；交付前 SDK 仍全量验证

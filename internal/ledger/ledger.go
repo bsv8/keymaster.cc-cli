@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	bitfsdebug "github.com/bsv8/go-bitfs/debug"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	"os"
 	"path/filepath"
 	"regexp"

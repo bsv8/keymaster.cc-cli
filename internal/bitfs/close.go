@@ -15,8 +15,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bsv8/go-bitfs/buyer"
-	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/BitFSProtocol/buyer"
+	"github.com/bsv8/BitFSProtocol/protocol"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"

@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	bitfsdebug "github.com/bsv8/go-bitfs/debug"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	schedulerdebug "github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 	managerdebug "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
 )

@@ -24,13 +24,13 @@ import (
 
 	primitives "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
+	"github.com/bsv8/BitFSProtocol/protocol"
 	channels "github.com/bsv8/ChannelProtocol"
 	"github.com/bsv8/ChannelProtocol/hashrequest"
 	"github.com/bsv8/bitcoin-libp2p/golibp2p"
 	"github.com/bsv8/bitcoin-libp2p/signer"
 	"github.com/bsv8/bitcoin-libp2p/webrtcinterconnect"
-	bitfsdebug "github.com/bsv8/go-bitfs/debug"
-	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/keymaster.cc-cli/internal/admin"
 	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
@@ -77,7 +77,9 @@ func main() {
 
 func run(args []string) int {
 	configureDebug()
-	bitfsdebug.Log("keymaster.cc-cli", "process.start", func() any { return map[string]any{"mode": os.Getenv("KEYMASTER_ENV"), "components": componentDebugStatus()} })
+	bitfsdebug.Log("keymaster.cc-cli", "process.start", func() any {
+		return map[string]any{"mode": os.Getenv("KEYMASTER_ENV"), "components": componentDebugStatus()}
+	})
 	flags := flag.NewFlagSet("km", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	serverPath := flags.String("server", "", "售卖指定目录及子目录内的文件")

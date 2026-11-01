@@ -6,7 +6,7 @@
 //     (scheduler/tasks/<taskId>.json). Facts enter through Handle, commands
 //     leave through the outbox and are only removed by Settle.
 //   - Executor: commandId-idempotent dispatch to the execution ports.
-//   - BuyerPorts: the buyer execution layer (go-bitfs steps over the client
+//   - BuyerPorts: the buyer execution layer (BitFSProtocol steps over the client
 //     store/fund ledger) behind an injected peer for protocol transport.
 package host
 
@@ -14,7 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	bitfsdebug "github.com/bsv8/go-bitfs/debug"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	"os"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/store"

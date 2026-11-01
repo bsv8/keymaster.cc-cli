@@ -4,12 +4,12 @@ go 1.26.0
 
 require (
 	github.com/bsv-blockchain/go-sdk v1.7.2
+	github.com/bsv8/BitFSProtocol v0.5.1
 	github.com/bsv8/ChannelProtocol v0.6.0
 	github.com/bsv8/KeyHold/go/v2 v2.1.0
 	github.com/bsv8/MasterSeed v1.1.0
 	github.com/bsv8/SatSubscriptionProtocol v0.3.0
-	github.com/bsv8/bitcoin-libp2p v0.3.1
-	github.com/bsv8/go-bitfs v0.5.0
+	github.com/bsv8/bitcoin-libp2p v0.3.2
 	github.com/bsv8/keymaster.cc-download-scheduler v0.1.2
 	github.com/bsv8/keymaster.cc-utxo-manager v0.1.2
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
@@ -122,10 +122,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-// TODO(release): replace these local modules with the first published
-// versions that contain BuyerPoolEvidence.LatestBuyerPayment / InspectPool
-// (go-bitfs) and webrtcinterconnect + session-ID APIs (bitcoin-libp2p).
-replace github.com/bsv8/go-bitfs => ../go-bitfs
-
-replace github.com/bsv8/bitcoin-libp2p => ../bitcoin-libp2p

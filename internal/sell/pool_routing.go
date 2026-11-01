@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bsv8/go-bitfs/content"
-	"github.com/bsv8/go-bitfs/pool"
-	"github.com/bsv8/go-bitfs/wire"
+	"github.com/bsv8/BitFSProtocol/content"
+	"github.com/bsv8/BitFSProtocol/pool"
+	"github.com/bsv8/BitFSProtocol/wire"
 )
 
 // 报价记录属于连接，池记录属于退款模板。连接更换不改写原池证据。
