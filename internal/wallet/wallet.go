@@ -245,7 +245,19 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if !strings.EqualFold(txid, p.TxID) {
 		return "", fmt.Errorf("wallet: provider txid mismatch: %s", txid)
 	}
-	if err := w.pool.AcceptTransaction(p.RawHex); err != nil {
+	// The caller owns transaction bytes; the pool receives only UTXO changes.
+	tx, err := manager.ParseTx(p.RawHex, p.TxID)
+	if err != nil {
+		return "", err
+	}
+	accepted := manager.AcceptedTransaction{TxID: p.TxID}
+	for _, input := range tx.Inputs {
+		accepted.SpentOutpoints = append(accepted.SpentOutpoints, input.OutpointKey)
+	}
+	for vout, output := range tx.Outputs {
+		accepted.Outputs = append(accepted.Outputs, manager.AcceptedOutput{Vout: uint32(vout), Value: strconv.FormatUint(output.Value, 10), ScriptHex: output.Script})
+	}
+	if err := w.pool.AcceptTransaction(accepted); err != nil {
 		return "", err
 	}
 	w.accepted[p.TxID] = true
