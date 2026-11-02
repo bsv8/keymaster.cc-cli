@@ -10,14 +10,15 @@ import (
 	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
 
-// BroadcastReceipt is a host HTTP diagnostic, not a manager-specific state.
-// Conflict requires per-input spent observations; unknown never permits release.
+// BroadcastReceipt classifies submission as successful, explicitly rejected,
+// or unknown. HTTP/network failures alone do not prove a transaction rejection.
 type BroadcastReceipt struct {
-	Status         string `json:"status"` // accepted, already-known, conflict, unknown
+	Status         string `json:"status"` // accepted, already-known, failed, unknown
 	TxID           string `json:"txid"`
 	HTTPStatus     int    `json:"httpStatus"`
 	HTTPStatusText string `json:"httpStatusText"`
@@ -96,8 +97,10 @@ func (c *Client) BroadcastExact(ctx context.Context, rawHex string) (receipt Bro
 		switch text {
 		case "unexpected response code 500: Transaction already in the mempool":
 			result.Status = "already-known"
-		case "unexpected response code 500: 258: txn-mempool-conflict":
-			result.Status = "conflict"
+		default:
+			if regexp.MustCompile(`^unexpected response code 500: [0-9]+: .+`).MatchString(text) {
+				result.Status = "failed"
+			}
 		}
 	}
 	return result, nil

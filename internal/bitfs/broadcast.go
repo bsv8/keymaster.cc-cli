@@ -5,15 +5,14 @@ import (
 	"fmt"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
-	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
+	"github.com/bsv8/keymaster.cc-cli/internal/woc"
 )
 
-// Preserve the manager's conclusion in the host ledger. An HTTP conflict alone
-// is not a terminal failure: only the manager's verified input conclusion is.
+// Submission results belong to the caller, not to the UTXO allocation pool.
 func recordBroadcastFailure(l *ledger.Ledger, txid string, broadcastErr error) error {
 	state := ledger.TxResultUnknown
-	var conflict *wallet.InputConflictError
-	if errors.As(broadcastErr, &conflict) && conflict.Result != nil && conflict.Result.Delivery == "failed" {
+	var rejection *woc.BroadcastError
+	if errors.As(broadcastErr, &rejection) && rejection.Receipt.Status == "failed" {
 		state = ledger.TxFailed
 	}
 	if err := l.MarkTransition(txid, state, broadcastErr.Error()); err != nil {

@@ -36,15 +36,13 @@ km -server <path>                 # 售卖目录：扫描 + 定价维护
 km -server <path> -discover       # 接入供应商，监听 Hash 需求并售卖
 km -server <path> -admin 127.0.0.1:8790  # Web Admin（缺省开启；空字符串禁用）
 km -config <file> ...             # 指定配置文件路径
-km -pending-conclusions          # 只读列出未决 allocation/txid，不广播
-km -query-conclusion <allocationId> -query-interval 5s  # 显式启动原 exact 查询/重交
 ```
 
-结论查询只重交已经持久化的原交易，不重新选币、签名或变更手续费。重启及只读列表不会自动重交；Ctrl-C 停止循环但不释放未决输入。查询与下载/售卖模式独立使用，间隔至少1秒。同一实例不并行启动同一申请的多个循环，跨进程仍由钱包目录锁保护。
+钱包使用运行期内存 UTXO 分配池。分配即冻结；调用者成功提交交易（含 already-in-mempool）后立即注入自有找零；明确的节点交易拒绝主动释放，未知网络错误不释放。付款、买方出资、退款及卖方关池都经过同一成功注入出口。
 
-匹配 txid 或同次 exact 提交的精确 already-in-mempool 回执作为成功；未知/冲突诊断保留责任。冲突经单个/批量 spent API 逐 input 核实：消费方是本 tx 则成功；其他 tx 消费使原申请失败收尾，仅确认未花且不受其它责任保护的输入恢复可用。未知输入继续保护，查询结果带 `conclusion`，可查看已释放/已花/仍保护的 outpoint 与历史释放金额。已确定冲突后只继续核实，不再重交无效 exact。全部收尾返回 `delivery=failed`，命令退出码1；新付款须由调用者新建申请，原请求不会自动重选币。
+manager 无持久化、恢复、交易审批或冲突取证。实例销毁丢弃冻结及本地找零，不读旧 manager 文件或 unresolved 日志重建资金；跨重启 WoC 延迟风险已明确接受。业务台账仍记录自身交易结果，不作为 manager 补偿账本。
 
-CLI 的 `manager.json` 使用 `km-manager-store/1` 宿主存储封装，将原 canonical manager blob 与提交结果/尝试证据一起原子写入。新版能读取旧版裸 manager blob 并保留责任迁移；旧版不认识新封装，勿不备份直接降级或手工删除状态文件。该封装仅是文件适配，内部仍保存 TS/Go 共同 canonical manager状态；逐输入结论与failed状态需要新版阅读器。普通付款、买方出资、退款与卖方关池使用同一提交/结论路径。退款/关池重放核对并复用原 allocation、冻结事实和 exact，不重新签名；已缓存 Kind 13 不代表广播成功。未知结果保留业务 pending，可信冲突结论记 failed，只有可靠成功才推进对应业务台账。注意：上游 SDK 的交易签名回调尚未提供完整交易/prevout 授权上下文，退款/关池仍有 SDK 先签、manager 后绑定的路径；上述恢复能力不代表所有 SDK 签名均已通过 manager 签前授权。
+新内存 API 使用已公共发布的 Go 根 module `github.com/bsv8/keymaster.cc-utxo-manager v0.2.0`，无组件本地替换。正式依赖验收与候选源码构建分别报告。
 
 systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
 `BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。
@@ -123,13 +121,10 @@ SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一
 
 ## 钱包与链端口
 
-UTXO manager（`utm/1`）唯一 Go 源码位于 `../keymaster.cc-utxo-manager/utxo/`，
-导入路径为 `github.com/bsv8/keymaster.cc-utxo-manager/utxo`，仅依赖标准库；CLI 精确使用已发布的根 module `v0.1.1`，无组件本地 `replace`，不保留内部实现。
-`internal/wallet` 提供持久化、链上观察、签名及提交端口，选币和资金责任由独立 manager 裁决。
-工程仓 `test/shared/utxo-manager/` 保留共享向量、Go/TS 测试、随机模拟与双向恢复测试。
+UTXO manager 唯一 Go 源码位于 `../keymaster.cc-utxo-manager/utxo/`，导入路径为 `github.com/bsv8/keymaster.cc-utxo-manager/utxo`，只依赖标准库，不保留内部副本。
+`internal/wallet` 负责 WoC 初始建池、真实构建/签名/提交及三类回执判断。成功立即调用 `AcceptTransaction`，可连续使用找零，不隐式刷新 WoC；显式 `Refresh` 获取新观察。
 
-`internal/wallet` 将链上观察输入 manager，使用其选币、费用与找零结果并适配
-`bsv-blockchain/go-sdk` 签名、广播后核对 txid；广播失败或结果未知写入未决历史。
+工程仓 `COMPONENTS_RELEASED=1 npm run test:utxo:cli` 使用产品原 go.mod 与工程仓测试 overlay 验正式依赖和真实 CLI 编译；不设该变量时以临时 modfile 验开发源码。公共池测试位于 `test/shared/utxo-manager/`。无持久化或恢复测试契约。
 `internal/woc` 提供 `listunspent`、`tx/raw`、`tx/<txid>/hex` 与 `chain/info`，Base URL 由
 `bsvNetwork` 推导。
 
@@ -179,4 +174,4 @@ TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
 R&D 过程中的需求、施工单与测试位于工程仓库
 `BSV8_Engineering/todo/keymaster.cc-cli/`、`test/keymaster.cc-cli/` 与
 `e2e/keymaster.cc-cli/`；设计事实见 `BSV8_Engineering/docs/keymaster.cc-cli/`。
-调度器与 UTXO manager 的组件测试、文档和历史资料统一归入工程仓 `test/docs/todo/e2e/shared/{download-scheduler,utxo-manager}/`；现有调度器交叉运行器位于 `test/keymaster.cc-cli/scheduler/`，不复制套件。宿主专属测试仍归 CLI；入口见工程仓 `test/shared/README.md`。
+调度器与 UTXO manager 的组件测试、文档和历史资料统一归入工程仓 `test/shared/{download-scheduler,utxo-manager}/` 和 `docs/{download-scheduler,utxo-manager}/`；现有调度器交叉运行器位于 `test/keymaster.cc-cli/scheduler/`，不复制套件。宿主专属测试仍归 CLI；入口见工程仓 `test/shared/README.md`。
