@@ -42,6 +42,8 @@ type SpendResult struct {
 	Address      string
 	AllocationID string
 	Transaction  *transaction.Transaction
+	preparedRaw  string
+	preparedBy   *Wallet
 }
 type Wallet struct {
 	mu            sync.Mutex
@@ -215,7 +217,7 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 		return fail(err)
 	}
 	fee, _ := manager.ParseAmount(view.FeeSats)
-	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx}, nil
+	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx, preparedRaw: tx.Hex(), preparedBy: w}, nil
 }
 
 // BroadcastPrepared owns all three outcomes. Every success actively injects own
@@ -229,8 +231,42 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if p == nil {
 		return "", errors.New("wallet: prepared transaction required")
 	}
+	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex {
+		return "", errors.New("wallet: transaction was not prepared by this wallet")
+	}
+	parsed, err := manager.ParseTx(p.RawHex, p.TxID)
+	if err != nil {
+		return "", err
+	}
+	if parsed.CanonicalTxID != p.TxID {
+		return "", errors.New("wallet: prepared txid does not match exact bytes")
+	}
 	if w.accepted[p.TxID] {
 		return p.TxID, nil
+	}
+	if p.AllocationID != "" {
+		view, err := w.pool.AllocationView(p.AllocationID)
+		if err != nil {
+			return "", err
+		}
+		if view.State != "held" || len(view.Inputs) != len(parsed.Inputs) {
+			return "", errors.New("wallet: transaction does not match a held allocation")
+		}
+		keys := map[string]bool{}
+		for _, in := range parsed.Inputs {
+			keys[in.OutpointKey] = true
+		}
+		for _, key := range view.Inputs {
+			if !keys[key] {
+				return "", errors.New("wallet: transaction inputs do not match allocation")
+			}
+		}
+	} else {
+		for _, in := range parsed.Inputs {
+			if _, err := w.pool.Lookup(in.OutpointKey); err == nil {
+				return "", errors.New("wallet: protocol transaction contains a wallet input without prior allocation")
+			}
+		}
 	}
 	txid, err := w.chain.Broadcast(ctx, p.RawHex)
 	if err != nil {
@@ -284,8 +320,9 @@ type ProtocolRequest struct {
 	FeePolicy  string
 }
 
-// Protocol SDK/caller owns validation. Only wallet inputs belong to this pool;
-// pool-contract inputs and partial signatures are not manager allocations.
+// PrepareProtocol accepts protocol-only exact transactions. Wallet funding must
+// be selected and frozen by Request in Build before signing, never retroactively.
+// Protocol inputs need no wallet allocation; success still injects own outputs.
 func (w *Wallet) PrepareProtocol(ctx context.Context, kind string, req ProtocolRequest) (*SpendResult, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -296,33 +333,31 @@ func (w *Wallet) PrepareProtocol(ctx context.Context, kind string, req ProtocolR
 	if err != nil {
 		return nil, err
 	}
-	keys := []string{}
 	inputs := []woc.UTXO{}
 	var total uint64
-	known := true
 	for _, in := range tx.Inputs {
 		key := in.SourceTXID.String() + ":" + strconv.FormatUint(uint64(in.SourceTxOutIndex), 10)
-		value := uint64(0)
-		if row, e := w.pool.Lookup(key); e == nil {
-			keys = append(keys, key)
-			value, _ = manager.ParseAmount(row.Value)
-		} else if proof, ok := req.Proofs[key]; ok {
-			value = proof.Value
-		} else {
-			known = false
+		if _, err := w.pool.Lookup(key); err == nil {
+			return nil, errors.New("wallet: protocol input belongs to wallet; request funding before signing")
 		}
-		inputs = append(inputs, woc.UTXO{TxID: in.SourceTXID.String(), Vout: in.SourceTxOutIndex, Value: value})
-		total += value
+		proof, ok := req.Proofs[key]
+		if !ok || proof.ScriptHex == "" {
+			return nil, fmt.Errorf("wallet: protocol input proof required: %s", key)
+		}
+		if strings.EqualFold(proof.ScriptHex, w.lockingHex) {
+			return nil, errors.New("wallet: wallet input requires prior manager allocation")
+		}
+		inputs = append(inputs, woc.UTXO{TxID: in.SourceTXID.String(), Vout: in.SourceTxOutIndex, Value: proof.Value})
+		total, err = manager.AddChecked(total, proof.Value)
+		if err != nil {
+			return nil, err
+		}
 	}
-	id := newAllocationID()
-	if _, err := w.pool.Allocate(id, keys); err != nil {
-		return nil, err
+	if total < tx.TotalOutputSatoshis() {
+		return nil, errors.New("wallet: protocol outputs exceed inputs")
 	}
-	fee := uint64(0)
-	if known && total >= tx.TotalOutputSatoshis() {
-		fee = total - tx.TotalOutputSatoshis()
-	}
-	return &SpendResult{TxID: tx.TxID().String(), RawHex: req.SignedHex, Inputs: inputs, Fee: fee, Address: w.Address(), AllocationID: id, Transaction: tx}, nil
+	fee := total - tx.TotalOutputSatoshis()
+	return &SpendResult{TxID: tx.TxID().String(), RawHex: req.SignedHex, Inputs: inputs, Fee: fee, Address: w.Address(), Transaction: tx, preparedRaw: req.SignedHex, preparedBy: w}, nil
 }
 func (w *Wallet) Spend(ctx context.Context, kind string, outputs []Output) (*SpendResult, error) {
 	p, err := w.Build(ctx, outputs)
