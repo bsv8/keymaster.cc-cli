@@ -34,16 +34,17 @@ type Output struct {
 	LockingScript *script.Script
 }
 type SpendResult struct {
-	TxID         string
-	RawHex       string
-	Inputs       []woc.UTXO
-	Fee          uint64
-	Change       uint64
-	Address      string
-	AllocationID string
-	Transaction  *transaction.Transaction
-	preparedRaw  string
-	preparedBy   *Wallet
+	TxID               string
+	RawHex             string
+	Inputs             []woc.UTXO
+	Fee                uint64
+	Change             uint64
+	Address            string
+	AllocationID       string
+	Transaction        *transaction.Transaction
+	preparedRaw        string
+	preparedBy         *Wallet
+	preparedAllocation string
 }
 type Wallet struct {
 	mu            sync.Mutex
@@ -191,11 +192,11 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 	fail := func(err error) (*SpendResult, error) { return nil, errors.Join(err, w.pool.Release(id)) }
 	tx := transaction.NewTransaction()
 	inputs := []woc.UTXO{}
-	for _, key := range view.Inputs {
-		row, err := w.pool.Lookup(key)
-		if err != nil {
-			return fail(err)
-		}
+	material, err := w.pool.ResolveAllocation(id)
+	if err != nil {
+		return fail(err)
+	}
+	for _, row := range material.Inputs {
 		value, err := manager.ParseAmount(row.Value)
 		if err != nil {
 			return fail(err)
@@ -217,7 +218,7 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 		return fail(err)
 	}
 	fee, _ := manager.ParseAmount(view.FeeSats)
-	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx, preparedRaw: tx.Hex(), preparedBy: w}, nil
+	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx, preparedRaw: tx.Hex(), preparedBy: w, preparedAllocation: id}, nil
 }
 
 // BroadcastPrepared owns all three outcomes. Every success actively injects own
@@ -231,7 +232,7 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if p == nil {
 		return "", errors.New("wallet: prepared transaction required")
 	}
-	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex {
+	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex || p.preparedAllocation != p.AllocationID {
 		return "", errors.New("wallet: transaction was not prepared by this wallet")
 	}
 	parsed, err := manager.ParseTx(p.RawHex, p.TxID)
@@ -245,27 +246,8 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 		return p.TxID, nil
 	}
 	if p.AllocationID != "" {
-		view, err := w.pool.AllocationView(p.AllocationID)
-		if err != nil {
+		if _, err := w.pool.ResolveAllocation(p.AllocationID); err != nil {
 			return "", err
-		}
-		if view.State != "held" || len(view.Inputs) != len(parsed.Inputs) {
-			return "", errors.New("wallet: transaction does not match a held allocation")
-		}
-		keys := map[string]bool{}
-		for _, in := range parsed.Inputs {
-			keys[in.OutpointKey] = true
-		}
-		for _, key := range view.Inputs {
-			if !keys[key] {
-				return "", errors.New("wallet: transaction inputs do not match allocation")
-			}
-		}
-	} else {
-		for _, in := range parsed.Inputs {
-			if _, err := w.pool.Lookup(in.OutpointKey); err == nil {
-				return "", errors.New("wallet: protocol transaction contains a wallet input without prior allocation")
-			}
 		}
 	}
 	txid, err := w.chain.Broadcast(ctx, p.RawHex)
@@ -282,15 +264,11 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 		return "", fmt.Errorf("wallet: provider txid mismatch: %s", txid)
 	}
 	// The caller owns transaction bytes; the pool receives only UTXO changes.
-	tx, err := manager.ParseTx(p.RawHex, p.TxID)
-	if err != nil {
-		return "", err
-	}
 	accepted := manager.AcceptedTransaction{TxID: p.TxID}
-	for _, input := range tx.Inputs {
+	for _, input := range parsed.Inputs {
 		accepted.SpentOutpoints = append(accepted.SpentOutpoints, input.OutpointKey)
 	}
-	for vout, output := range tx.Outputs {
+	for vout, output := range parsed.Outputs {
 		accepted.Outputs = append(accepted.Outputs, manager.AcceptedOutput{Vout: uint32(vout), Value: strconv.FormatUint(output.Value, 10), ScriptHex: output.Script})
 	}
 	if err := w.pool.AcceptTransaction(accepted); err != nil {
@@ -337,9 +315,6 @@ func (w *Wallet) PrepareProtocol(ctx context.Context, kind string, req ProtocolR
 	var total uint64
 	for _, in := range tx.Inputs {
 		key := in.SourceTXID.String() + ":" + strconv.FormatUint(uint64(in.SourceTxOutIndex), 10)
-		if _, err := w.pool.Lookup(key); err == nil {
-			return nil, errors.New("wallet: protocol input belongs to wallet; request funding before signing")
-		}
 		proof, ok := req.Proofs[key]
 		if !ok || proof.ScriptHex == "" {
 			return nil, fmt.Errorf("wallet: protocol input proof required: %s", key)
