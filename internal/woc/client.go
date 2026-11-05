@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,9 +36,11 @@ var txidPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Client talks to one network's WhatsonChain endpoint.
 type Client struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
+	baseURL     string
+	apiKey      string
+	http        *http.Client
+	requestMu   sync.Mutex
+	nextRequest time.Time
 }
 
 // New creates a client for the given API base URL (for example
@@ -72,7 +75,7 @@ func (c *Client) ListUnspent(ctx context.Context, address string) ([]UTXO, error
 		return nil, err
 	}
 	c.authorize(request)
-	response, err := c.http.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, fmt.Errorf("woc: list unspent: %w", err)
 	}
@@ -110,7 +113,7 @@ func (c *Client) ChainHeight(ctx context.Context) (uint32, error) {
 		return 0, err
 	}
 	c.authorize(request)
-	response, err := c.http.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return 0, fmt.Errorf("woc: chain info: %w", err)
 	}
@@ -143,7 +146,7 @@ func (c *Client) TransactionRaw(ctx context.Context, txid string) ([]byte, error
 		return nil, err
 	}
 	c.authorize(request)
-	response, err := c.http.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, fmt.Errorf("woc: fetch transaction: %w", err)
 	}

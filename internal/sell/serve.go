@@ -96,7 +96,13 @@ func (s *Seller) Serve(ctx context.Context, sessionID string, session Session) (
 		case wire.PoolCloseRequest:
 			kind13, err := s.CompleteClose(ctx, recordID, artifact.Bytes())
 			if err != nil {
-				return err
+				var pending *CloseBroadcastPendingError
+				if !errors.As(err, &pending) {
+					return err
+				}
+				bitfsdebug.Log("keymaster.cc-cli", "seller.close.pending", func() any {
+					return map[string]any{"sessionId": recordID, "txid": pending.TxID, "error": pending.Cause, "settled": false}
+				})
 			}
 			response, err := wire.ParseAs(wire.PoolCloseResponse, kind13)
 			if err != nil {

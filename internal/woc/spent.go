@@ -73,7 +73,7 @@ func (c *Client) spentRequest(ctx context.Context, method, path string, payload 
 		request.Header.Set("content-type", "application/json")
 	}
 	c.authorize(request)
-	response, err := c.http.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return 0, nil, err
 	}

@@ -62,8 +62,6 @@ type Options struct {
 	Now func() int64
 	// Config overrides the scheduler limits (zero fields use defaults).
 	Config scheduler.Config
-	// WalletRefresh is the wallet-fact polling interval (default 5s).
-	WalletRefresh time.Duration
 	// Ready is called once the scheduler is running. It receives a thread-safe
 	// event feed for live controls (price slider) and returns a stop function.
 	Ready func(feed func(scheduler.Event) error) (stop func())
@@ -438,7 +436,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			monotonic.AdvanceTo(restored + 1)
 		}
 	}
-	var walletRevision int64 = 1
 	contentMu.Lock()
 	contentBytes[options.SeedHash] = int64(seedBytes)
 	contentMu.Unlock()
@@ -495,17 +492,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 				break
 			}
 		}
-		if event.Type == "closed" || event.Type == "refund-available" {
-			available, reflected, err := ports.WalletSnapshot(ctx)
-			if err == nil {
-				revision := atomic.AddInt64(&walletRevision, 1)
-				followUps = append(followUps, scheduler.Event{
-					EventID: fmt.Sprintf("wallet-%d", revision), Type: "wallet",
-					Revision: &revision, Available: new(big.Int).SetUint64(available).String(),
-					ReflectedCommands: reflected,
-				})
-			}
-		}
 		return followUps
 	}
 	ports.Feed = func(event scheduler.Event) error { return loop.Feed(ctx, event) }
@@ -515,9 +501,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		previousVersion = state.Sellers[firstSeller].Quote.Version
 	}
 	restored := adapter.State().Revision > 0
-	// Recover the funding-command association before the loop replays the
-	// outbox, so the first wallet snapshot already reflects historical pools.
-	ports.RestoreFunded(adapter.State())
 	loop.Start(ctx)
 	defer func() {
 		closeSessions()
@@ -530,14 +513,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		if err := loop.Feed(ctx, scheduler.Event{EventID: "quote-source-ready", Type: "quote-source", Enabled: boolPointer(true)}); err != nil {
 			return nil, err
 		}
-	}
-	available, reflected, err := ports.WalletSnapshot(ctx)
-	if err != nil {
-		return nil, err
-	}
-	revision := atomic.AddInt64(&walletRevision, 1)
-	if err := loop.Feed(ctx, scheduler.Event{EventID: "wallet-1", Type: "wallet", Revision: &revision, Available: new(big.Int).SetUint64(available).String(), ReflectedCommands: reflected}); err != nil {
-		return nil, err
 	}
 	versionsMu.Lock()
 	versions[firstSeller] = previousVersion
@@ -558,34 +533,16 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		stopControls = options.Ready(func(event scheduler.Event) error { return loop.Feed(ctx, event) })
 	}
 	defer stopControls()
-	// Keep the kernel's clock moving (request timeouts) and refresh the wallet
-	// fact periodically so a top-up can unblock a zero-balance start.
+	// Keep request timeout clocks moving; funding is requested only on demand.
 	go func() {
 		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
-		refresh := options.WalletRefresh
-		if refresh <= 0 {
-			refresh = 5 * time.Second
-		}
-		walletTick := time.NewTicker(refresh)
-		defer walletTick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
 				_ = loop.Feed(ctx, scheduler.Event{EventID: fmt.Sprintf("tick-%d", time.Now().UnixNano()), Type: "tick"})
-			case <-walletTick.C:
-				available, reflected, err := ports.WalletSnapshot(ctx)
-				if err != nil {
-					continue
-				}
-				revision := atomic.AddInt64(&walletRevision, 1)
-				_ = loop.Feed(ctx, scheduler.Event{
-					EventID: fmt.Sprintf("wallet-auto-%d", revision), Type: "wallet",
-					Revision: &revision, Available: new(big.Int).SetUint64(available).String(),
-					ReflectedCommands: reflected,
-				})
 			}
 		}
 	}()
@@ -619,7 +576,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 				}
 			}
 			if !pending {
-				return nil, fmt.Errorf("download: 资金不足：需要至少 %s sats，可用 %s sats；任务已停止新增购买，内容 %d/%d，资金状态 %s", view.Failure.Required, view.Failure.Available, view.Completed, view.Total, view.Funds)
+				return nil, fmt.Errorf("download: 资金申请不足：本次需求 %s sats；任务已停止新增购买，内容 %d/%d，资金状态 %s", view.Failure.Required, view.Completed, view.Total, view.Funds)
 			}
 		}
 		if view.Funds == "problem" && view.Failure == nil {

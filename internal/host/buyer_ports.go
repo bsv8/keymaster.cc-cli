@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sort"
 	"sync"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
 	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
+	manager "github.com/bsv8/keymaster.cc-utxo-manager/utxo"
 )
 
 const (
@@ -77,8 +77,6 @@ type BuyerPorts struct {
 	Discover func(context.Context) error
 	peerMu   sync.Mutex
 	peerByID map[string]Peer
-	fundedMu sync.Mutex
-	funded   map[string]string
 	// Feed delivers one scheduler fact; it may advance the kernel and
 	// execute follow-up commands synchronously.
 	Feed func(event scheduler.Event) error
@@ -125,65 +123,6 @@ func (p *BuyerPorts) validate() error {
 		return errors.New("host: seed hash is required")
 	}
 	return nil
-}
-
-// RestoreFunded rebuilds the funding-command association from a persisted
-// kernel state before the loop replays its outbox.
-func (p *BuyerPorts) RestoreFunded(state scheduler.State) {
-	if p.Task == nil {
-		return
-	}
-	for poolID, pool := range state.Pools {
-		if pool.OpenCommandID == "" {
-			continue
-		}
-		reflect := false
-		switch pool.Funding {
-		case "open", "closing", "closed":
-			reflect = true
-		case "opening":
-			if p.Task.Ledger != nil {
-				if record, ok := p.Task.Ledger.Pools()[poolID]; ok {
-					reflect = record.State == ledger.PoolOpen || record.State == ledger.PoolRecoveryPending || record.State == ledger.PoolClosed
-				}
-			}
-		}
-		if reflect {
-			p.recordFunded(poolID, pool.OpenCommandID)
-		}
-	}
-}
-
-func (p *BuyerPorts) recordFunded(poolID, commandID string) {
-	p.fundedMu.Lock()
-	defer p.fundedMu.Unlock()
-	if p.funded == nil {
-		p.funded = map[string]string{}
-	}
-	p.funded[poolID] = commandID
-}
-
-// WalletSnapshot returns the spendable balance and the open commands whose
-// funding is already reflected in that same snapshot. Both values are read
-// under the state lock, so an open cannot interleave between them.
-func (p *BuyerPorts) WalletSnapshot(ctx context.Context) (uint64, []string, error) {
-	unlock := p.lockState()
-	defer unlock()
-	if p.Task == nil || p.Task.Wallet == nil {
-		return 0, nil, errors.New("host: wallet is required")
-	}
-	available, err := p.Task.Wallet.Available(ctx)
-	if err != nil {
-		return 0, nil, err
-	}
-	p.fundedMu.Lock()
-	commands := make([]string, 0, len(p.funded))
-	for _, command := range p.funded {
-		commands = append(commands, command)
-	}
-	p.fundedMu.Unlock()
-	sort.Strings(commands)
-	return available, commands, nil
 }
 
 func (p *BuyerPorts) peerForSession(sessionID string) (Peer, error) {
@@ -322,6 +261,10 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	})
 	unlock()
 	if err != nil {
+		var fundingError *manager.Error
+		if errors.As(err, &fundingError) && (fundingError.Code == manager.ErrInsufficient || fundingError.Code == manager.ErrNoUTXOs) {
+			return p.openFailed(command, true, "insufficient-funds")
+		}
 		return p.openFailed(command, true, "prepare-failed")
 	}
 	p.bindPeer(command.PoolID, peer)
@@ -334,12 +277,6 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	}
 	unlock = p.lockState()
 	completion, err := p.Task.CompletePool(ctx, preparation, kind3)
-	if err == nil {
-		// The funding was broadcast; bind its open command to this funding
-		// boundary before releasing the lock so a wallet snapshot cannot see a
-		// post-funding balance with a pre-funding reflected set.
-		p.recordFunded(command.PoolID, command.CommandID)
-	}
 	unlock()
 	if err != nil {
 		// The funding transaction may already be in flight: report an unknown
@@ -363,10 +300,11 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 
 func (p *BuyerPorts) openFailed(command scheduler.Command, released bool, reason string) error {
 	if err := p.emit("open-failed-"+command.PoolID+"-"+reason, scheduler.Event{
-		Type:      "open-failed",
-		PoolID:    command.PoolID,
-		CommandID: command.CommandID,
-		Released:  &released,
+		Type:              "open-failed",
+		PoolID:            command.PoolID,
+		CommandID:         command.CommandID,
+		Released:          &released,
+		InsufficientFunds: reason == "insufficient-funds",
 	}); err != nil {
 		return err
 	}

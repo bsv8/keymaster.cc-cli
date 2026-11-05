@@ -155,7 +155,7 @@ func (w *Wallet) Available(ctx context.Context) (uint64, error) {
 			return 0, err
 		}
 	}
-	return manager.ParseAmount(w.pool.SpendableBalance())
+	return manager.ParseAmount(w.pool.Funds().AvailableSats)
 }
 func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, error) {
 	w.mu.Lock()
@@ -185,17 +185,14 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 		return nil, errors.New("wallet: positive output amount required")
 	}
 	id := newAllocationID()
-	view, err := w.pool.Request(manager.RequestInput{RequestID: id, BusinessAmount: strconv.FormatUint(target, 10), FeeRate: strconv.FormatInt(w.feeRate, 10), Outputs: declared})
+	material, err := w.pool.Request(manager.RequestInput{RequestID: id, BusinessAmount: strconv.FormatUint(target, 10), FeeRate: strconv.FormatInt(w.feeRate, 10), Outputs: declared})
 	if err != nil {
 		return nil, err
 	}
 	fail := func(err error) (*SpendResult, error) { return nil, errors.Join(err, w.pool.Release(id)) }
 	tx := transaction.NewTransaction()
 	inputs := []woc.UTXO{}
-	material, err := w.pool.ResolveAllocation(id)
-	if err != nil {
-		return fail(err)
-	}
+	view := material.Allocation
 	for _, row := range material.Inputs {
 		value, err := manager.ParseAmount(row.Value)
 		if err != nil {
@@ -246,7 +243,7 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 		return p.TxID, nil
 	}
 	if p.AllocationID != "" {
-		if _, err := w.pool.ResolveAllocation(p.AllocationID); err != nil {
+		if err := w.pool.AssertAllocationUsable(p.AllocationID); err != nil {
 			return "", err
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	"io"
@@ -62,7 +63,7 @@ func (c *Client) BroadcastExact(ctx context.Context, rawHex string) (receipt Bro
 	}
 	request.Header.Set("content-type", "application/json")
 	c.authorize(request)
-	response, err := c.http.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return result, fmt.Errorf("woc: broadcast: %w", err)
 	}
@@ -112,6 +113,9 @@ func (c *Client) BroadcastExact(ctx context.Context, rawHex string) (receipt Bro
 func (c *Client) Broadcast(ctx context.Context, rawHex string) (string, error) {
 	receipt, err := c.BroadcastExact(ctx, rawHex)
 	if err != nil {
+		if receipt.TxID != "" {
+			return "", errors.Join(err, &BroadcastError{Receipt: receipt})
+		}
 		return "", err
 	}
 	if receipt.Status == "accepted" || receipt.Status == "already-known" {

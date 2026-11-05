@@ -24,8 +24,12 @@ github.com/bsv8/bitcoin-libp2p v0.3.2 h1:4cSGmB2hSNlzY903sRbxTe2w0DuG4UR5BnByhhk
 github.com/bsv8/bitcoin-libp2p v0.3.2/go.mod h1:MqJ6OJVnBEPeBHZuZ5pWPGkUMG8QcBaYZAzYPSe4K0w=
 github.com/bsv8/keymaster.cc-download-scheduler v0.1.2 h1:QhcLlObVC15541XJbUwmV8o6ctW7uImKF4FcOAg82vA=
 github.com/bsv8/keymaster.cc-download-scheduler v0.1.2/go.mod h1:pKsznjt7kretRmV/RVu0V3LxqIsaZZWB60KILOgp4bs=
+github.com/bsv8/keymaster.cc-download-scheduler v0.2.0 h1:VL318YPabbC12PZcobaABKCBygl3t+rv2qokP2f8oxA=
+github.com/bsv8/keymaster.cc-download-scheduler v0.2.0/go.mod h1:pKsznjt7kretRmV/RVu0V3LxqIsaZZWB60KILOgp4bs=
 github.com/bsv8/keymaster.cc-utxo-manager v0.2.0 h1:WMn+IMj3JD+czyqRVNpMEYLOU31XXD0XbBOWa1K4qHI=
 github.com/bsv8/keymaster.cc-utxo-manager v0.2.0/go.mod h1:JcVOMpYdmaPadkqEbWvCazQItxVFmw46cYBBlBDPc6g=
+github.com/bsv8/keymaster.cc-utxo-manager v0.3.0 h1:p50bijp0CBAoNJObkVoTv3W+OJGWjkKtWghfQtUmJ2s=
+github.com/bsv8/keymaster.cc-utxo-manager v0.3.0/go.mod h1:JcVOMpYdmaPadkqEbWvCazQItxVFmw46cYBBlBDPc6g=
 github.com/canonical/go-sp800.90a-drbg v0.0.0-20210314144037-6eeb1040d6c3 h1:oe6fCvaEpkhyW3qAicT0TnGtyht/UrgvOwMcEgLb7Aw=
 github.com/canonical/go-sp800.90a-drbg v0.0.0-20210314144037-6eeb1040d6c3/go.mod h1:qdP0gaj0QtgX2RUZhnlVrceJ+Qln8aSlDyJwelLLFeM=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

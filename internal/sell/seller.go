@@ -39,6 +39,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
+	"github.com/bsv8/keymaster.cc-cli/internal/woc"
 )
 
 // closeDeclaredOutputs extracts the non-self outputs of an exact close
@@ -494,6 +495,18 @@ func (s *Seller) CompletePayment(ctx context.Context, sessionID string, kind7 []
 	return completeRaw, nil
 }
 
+// CloseBroadcastPendingError retains an unknown broadcast independently of
+// the signed response. It does not claim settlement or close another pool's stream.
+type CloseBroadcastPendingError struct {
+	TxID  string
+	Cause error
+}
+
+func (e *CloseBroadcastPendingError) Error() string {
+	return fmt.Sprintf("sell: close %s remains unknown: %v", e.TxID, e.Cause)
+}
+func (e *CloseBroadcastPendingError) Unwrap() error { return e.Cause }
+
 // CompleteClose answers exact Kind 12 with exact Kind 13 and broadcasts the
 // close transaction (when a wallet port is configured). The buyer only
 // observes it; the seller is the submitter.
@@ -582,6 +595,12 @@ func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []b
 			return nil, fmt.Errorf("sell: prepare close %s: %w", parsed.TxID().String(), err)
 		}
 		if _, err := s.Wallet.BroadcastPrepared(ctx, "pool-close", prepared); err != nil {
+			var unknown *woc.BroadcastError
+			if ctx.Err() == nil && errors.As(err, &unknown) && unknown.Receipt.Status == "unknown" {
+				// All exact evidence is already durable. Kind 13 is a signed transaction,
+				// not a claim that the provider accepted it; the buyer still observes txid.
+				return kind13, &CloseBroadcastPendingError{TxID: parsed.TxID().String(), Cause: err}
+			}
 			return nil, fmt.Errorf("sell: broadcast close %s: %w", parsed.TxID().String(), err)
 		}
 	}
