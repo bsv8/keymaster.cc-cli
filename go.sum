@@ -32,6 +32,8 @@ github.com/bsv8/keymaster.cc-utxo-manager v0.3.0 h1:p50bijp0CBAoNJObkVoTv3W+OJGW
 github.com/bsv8/keymaster.cc-utxo-manager v0.3.0/go.mod h1:JcVOMpYdmaPadkqEbWvCazQItxVFmw46cYBBlBDPc6g=
 github.com/bsv8/keymaster.cc-utxo-manager v0.4.0 h1:GVlD2cRcw6zPmo2TJsqvwH431fyPqFosLwGxQ/EVFos=
 github.com/bsv8/keymaster.cc-utxo-manager v0.4.0/go.mod h1:JcVOMpYdmaPadkqEbWvCazQItxVFmw46cYBBlBDPc6g=
+github.com/bsv8/keymaster.cc-utxo-manager v0.5.0 h1:vqdylK7mVE4O7MYJGsvZ0Szh4wISUhEKRfo8VGhPlqE=
+github.com/bsv8/keymaster.cc-utxo-manager v0.5.0/go.mod h1:JcVOMpYdmaPadkqEbWvCazQItxVFmw46cYBBlBDPc6g=
 github.com/canonical/go-sp800.90a-drbg v0.0.0-20210314144037-6eeb1040d6c3 h1:oe6fCvaEpkhyW3qAicT0TnGtyht/UrgvOwMcEgLb7Aw=
 github.com/canonical/go-sp800.90a-drbg v0.0.0-20210314144037-6eeb1040d6c3/go.mod h1:qdP0gaj0QtgX2RUZhnlVrceJ+Qln8aSlDyJwelLLFeM=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

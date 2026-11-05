@@ -168,7 +168,7 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 			return nil, err
 		}
 	}
-	declared := []manager.RequestOutput{}
+	declared := []int{}
 	var target uint64
 	for _, o := range outputs {
 		if o.LockingScript == nil {
@@ -179,13 +179,13 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 		if err != nil {
 			return nil, err
 		}
-		declared = append(declared, manager.RequestOutput{ScriptHex: o.LockingScript.String(), Value: strconv.FormatUint(o.Satoshis, 10)})
+		declared = append(declared, len(o.LockingScript.Bytes()))
 	}
 	if target == 0 {
 		return nil, errors.New("wallet: positive output amount required")
 	}
 	id := newAllocationID()
-	material, err := w.pool.Request(manager.RequestInput{RequestID: id, BusinessAmount: strconv.FormatUint(target, 10), FeeRate: strconv.FormatInt(w.feeRate, 10), Outputs: declared})
+	material, err := w.pool.Request(manager.RequestInput{RequestID: id, BusinessAmount: strconv.FormatUint(target, 10), FeeRate: strconv.FormatInt(w.feeRate, 10), OutputScriptLengths: declared})
 	if err != nil {
 		return nil, err
 	}
