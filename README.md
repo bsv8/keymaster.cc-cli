@@ -42,7 +42,7 @@ km -config <file> ...             # 指定配置文件路径
 
 manager 无持久化、恢复、交易审批或冲突取证。实例销毁丢弃冻结及本地找零，不读旧 manager 文件或 unresolved 日志重建资金；跨重启 WoC 延迟风险已明确接受。业务台账仍记录自身交易结果，不作为 manager 补偿账本。
 
-新内存 API 使用已公共发布的 Go 根 module `github.com/bsv8/keymaster.cc-utxo-manager v0.2.0`，无组件本地替换。正式依赖验收与候选源码构建分别报告。
+正式依赖精确锁定已发布的 Go 根 module `github.com/bsv8/keymaster.cc-utxo-manager v0.4.0`，使用可用 P2PKH UTXO 注入接口，无组件本地替换。构建与业务 E2E 验收分别报告。
 
 systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
 `BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。
@@ -122,9 +122,9 @@ SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一
 ## 钱包与链端口
 
 UTXO manager 唯一 Go 源码位于 `../keymaster.cc-utxo-manager/utxo/`，导入路径为 `github.com/bsv8/keymaster.cc-utxo-manager/utxo`，只依赖标准库，不保留内部副本。
-`internal/wallet` 负责 WoC 初始建池、真实构建/签名/提交及三类回执判断。成功立即调用 `AcceptTransaction`，可连续使用找零，不隐式刷新 WoC；显式 `Refresh` 获取新观察。
+`internal/wallet` 负责 WoC 初始建池、真实构建/签名/提交及三类回执判断。成功后筛选当前钱包非零 P2PKH 输出，有输出才调用 `InjectP2pkhUtxos([{TxID,Vout,Value}])`；manager 不检查脚本归属，不上报已花费输入；原分配继续锁定，成功或广播未知不得释放，可连续使用找零，不隐式刷新 WoC；显式 `Refresh` 获取新观察。
 
-工程仓 `COMPONENTS_RELEASED=1 npm run test:utxo:cli` 使用产品原 go.mod 与工程仓测试 overlay 验正式依赖和真实 CLI 编译；不设该变量时以临时 modfile 验开发源码。公共池测试位于 `test/shared/utxo-manager/`。无持久化或恢复测试契约。
+正式依赖锁定 manager v0.4.0，使用产品原 go.mod 构建，不设置组件本地 replace。工程仓 `npm run parity:utxo-manager` 对照组件 TS／Go 源码，发布依赖验证与源码验证分开。无持久化或恢复测试契约。
 `internal/woc` 提供 `listunspent`、`tx/raw`、`tx/<txid>/hex` 与 `chain/info`，Base URL 由
 `bsvNetwork` 推导。
 

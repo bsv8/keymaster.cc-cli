@@ -260,16 +260,18 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if !strings.EqualFold(txid, p.TxID) {
 		return "", fmt.Errorf("wallet: provider txid mismatch: %s", txid)
 	}
-	// The caller owns transaction bytes; the pool receives only UTXO changes.
-	accepted := manager.AcceptedTransaction{TxID: p.TxID}
-	for _, input := range parsed.Inputs {
-		accepted.SpentOutpoints = append(accepted.SpentOutpoints, input.OutpointKey)
-	}
+	// The caller owns transaction bytes; the pool receives only new outputs.
+	// Successful input allocations stay locked and must not be released.
+	utxos := []manager.P2pkhUtxo{}
 	for vout, output := range parsed.Outputs {
-		accepted.Outputs = append(accepted.Outputs, manager.AcceptedOutput{Vout: uint32(vout), Value: strconv.FormatUint(output.Value, 10), ScriptHex: output.Script})
+		if output.Script == w.lockingHex && output.Value != 0 {
+			utxos = append(utxos, manager.P2pkhUtxo{TxID: p.TxID, Vout: uint32(vout), Value: strconv.FormatUint(output.Value, 10)})
+		}
 	}
-	if err := w.pool.AcceptTransaction(accepted); err != nil {
-		return "", err
+	if len(utxos) > 0 {
+		if err := w.pool.InjectP2pkhUtxos(utxos); err != nil {
+			return "", err
+		}
 	}
 	w.accepted[p.TxID] = true
 	w.initialized = true
