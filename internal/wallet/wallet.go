@@ -87,7 +87,7 @@ func New(chain Chain, options Options) (*Wallet, error) {
 	if err != nil {
 		return nil, err
 	}
-	pool, err := manager.NewFundingKernel(manager.Scope{Owner: hex.EncodeToString(key.PubKey().Compressed()), Network: options.Network}, manager.ManagerConfig{WalletScriptHex: locking.String(), DustThresholdSats: "1"})
+	pool, err := manager.NewFundingKernel(manager.Scope{Owner: hex.EncodeToString(key.PubKey().Compressed()), Network: options.Network}, manager.ManagerConfig{DustThresholdSats: "1"})
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (w *Wallet) refreshLocked(ctx context.Context) error {
 		if u.Height <= 0 {
 			status = "unconfirmed"
 		}
-		snapshot = append(snapshot, manager.SnapshotUtxo{TxID: u.TxID, Vout: u.Vout, Value: strconv.FormatUint(u.Value, 10), ScriptHex: w.lockingHex, Status: status, Height: u.Height})
+		snapshot = append(snapshot, manager.SnapshotUtxo{TxID: u.TxID, Vout: u.Vout, Value: strconv.FormatUint(u.Value, 10), Status: status, Height: u.Height})
 	}
 	if _, err := w.pool.ApplySnapshot(manager.SnapshotInput{Generation: 1, Revision: w.revision + 1, Utxos: snapshot}); err != nil {
 		return err
@@ -192,7 +192,6 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 	fail := func(err error) (*SpendResult, error) { return nil, errors.Join(err, w.pool.Release(id)) }
 	tx := transaction.NewTransaction()
 	inputs := []woc.UTXO{}
-	view := material.Allocation
 	for _, row := range material.Inputs {
 		value, err := manager.ParseAmount(row.Value)
 		if err != nil {
@@ -207,14 +206,14 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 	for _, o := range outputs {
 		tx.AddOutput(&transaction.TransactionOutput{Satoshis: o.Satoshis, LockingScript: o.LockingScript})
 	}
-	change, _ := manager.ParseAmount(view.ChangeSats)
+	change, _ := manager.ParseAmount(material.ChangeSats)
 	if change > 0 {
 		tx.AddOutput(&transaction.TransactionOutput{Satoshis: change, LockingScript: w.lockingScript, Change: true})
 	}
 	if err := tx.Sign(); err != nil {
 		return fail(err)
 	}
-	fee, _ := manager.ParseAmount(view.FeeSats)
+	fee, _ := manager.ParseAmount(material.FeeSats)
 	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx, preparedRaw: tx.Hex(), preparedBy: w, preparedAllocation: id}, nil
 }
 
