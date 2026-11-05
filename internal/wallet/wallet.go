@@ -45,6 +45,7 @@ type SpendResult struct {
 	preparedRaw        string
 	preparedBy         *Wallet
 	preparedAllocation string
+	preparedTxID       string
 }
 type Wallet struct {
 	mu            sync.Mutex
@@ -59,6 +60,7 @@ type Wallet struct {
 	initialized   bool
 	closed        bool
 	accepted      map[string]bool
+	revoked       map[string]bool
 }
 
 func New(chain Chain, options Options) (*Wallet, error) {
@@ -91,7 +93,7 @@ func New(chain Chain, options Options) (*Wallet, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Wallet{chain: chain, unlocker: unlocker, address: address, lockingScript: locking, lockingHex: locking.String(), feeRate: options.FeeRateSatoshisPerKb, pool: pool, accepted: map[string]bool{}}, nil
+	return &Wallet{chain: chain, unlocker: unlocker, address: address, lockingScript: locking, lockingHex: locking.String(), feeRate: options.FeeRateSatoshisPerKb, pool: pool, accepted: map[string]bool{}, revoked: map[string]bool{}}, nil
 }
 func (w *Wallet) Close() error {
 	w.mu.Lock()
@@ -99,6 +101,7 @@ func (w *Wallet) Close() error {
 	w.closed = true
 	w.pool = nil
 	w.accepted = nil
+	w.revoked = nil
 	return nil
 }
 func (w *Wallet) live() error {
@@ -214,11 +217,15 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 		return fail(err)
 	}
 	fee, _ := manager.ParseAmount(material.FeeSats)
-	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx, preparedRaw: tx.Hex(), preparedBy: w, preparedAllocation: id}, nil
+	return &SpendResult{TxID: tx.TxID().String(), RawHex: tx.Hex(), Inputs: inputs, Fee: fee, Change: change, Address: w.Address(), AllocationID: id, Transaction: tx, preparedRaw: tx.Hex(), preparedBy: w, preparedAllocation: id, preparedTxID: tx.TxID().String()}, nil
 }
 
 // BroadcastPrepared owns all three outcomes. Every success actively injects own
 // outputs BEFORE returning; unknown network errors never release the allocation.
+// Cancelled preparations stay cancelled: Release records the Wallet-saved
+// allocation identity, and any copy of that preparation is rejected here.
+// Revocation is keyed by allocation, not TxID: rebuilding the same payment
+// yields the same TxID with a new allocation and must remain submittable.
 func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendResult) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -228,7 +235,10 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if p == nil {
 		return "", errors.New("wallet: prepared transaction required")
 	}
-	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex || p.preparedAllocation != p.AllocationID {
+	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex || p.preparedAllocation != p.AllocationID || p.preparedTxID == "" || p.preparedTxID != p.TxID {
+		return "", errors.New("wallet: transaction was not prepared by this wallet")
+	}
+	if p.preparedAllocation != "" && w.revoked[p.preparedAllocation] {
 		return "", errors.New("wallet: transaction was not prepared by this wallet")
 	}
 	parsed, err := manager.ParseTx(p.RawHex, p.TxID)
@@ -238,13 +248,8 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if parsed.CanonicalTxID != p.TxID {
 		return "", errors.New("wallet: prepared txid does not match exact bytes")
 	}
-	if w.accepted[p.TxID] {
+	if w.accepted[p.preparedTxID] {
 		return p.TxID, nil
-	}
-	if p.AllocationID != "" {
-		if err := w.pool.AssertAllocationUsable(p.AllocationID); err != nil {
-			return "", err
-		}
 	}
 	txid, err := w.chain.Broadcast(ctx, p.RawHex)
 	if err != nil {
@@ -253,6 +258,7 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 			if releaseErr := w.pool.Release(p.AllocationID); releaseErr != nil {
 				return "", errors.Join(err, releaseErr)
 			}
+			w.revoked[p.preparedAllocation] = true
 		}
 		return "", err
 	}
@@ -272,7 +278,7 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 			return "", err
 		}
 	}
-	w.accepted[p.TxID] = true
+	w.accepted[p.preparedTxID] = true
 	w.initialized = true
 	return txid, nil
 }
@@ -330,7 +336,7 @@ func (w *Wallet) PrepareProtocol(ctx context.Context, kind string, req ProtocolR
 		return nil, errors.New("wallet: protocol outputs exceed inputs")
 	}
 	fee := total - tx.TotalOutputSatoshis()
-	return &SpendResult{TxID: tx.TxID().String(), RawHex: req.SignedHex, Inputs: inputs, Fee: fee, Address: w.Address(), Transaction: tx, preparedRaw: req.SignedHex, preparedBy: w}, nil
+	return &SpendResult{TxID: tx.TxID().String(), RawHex: req.SignedHex, Inputs: inputs, Fee: fee, Address: w.Address(), Transaction: tx, preparedRaw: req.SignedHex, preparedBy: w, preparedTxID: tx.TxID().String()}, nil
 }
 func (w *Wallet) Spend(ctx context.Context, kind string, outputs []Output) (*SpendResult, error) {
 	p, err := w.Build(ctx, outputs)
@@ -351,5 +357,12 @@ func (w *Wallet) Release(p *SpendResult) error {
 	if err := w.live(); err != nil {
 		return err
 	}
-	return w.pool.Release(p.AllocationID)
+	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex || p.preparedAllocation != p.AllocationID || p.preparedTxID == "" || p.preparedTxID != p.TxID {
+		return errors.New("wallet: transaction was not prepared by this wallet")
+	}
+	if err := w.pool.Release(p.AllocationID); err != nil {
+		return err
+	}
+	w.revoked[p.preparedAllocation] = true
+	return nil
 }
