@@ -490,10 +490,9 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	if progressPeer, ok := peer.(ProgressPeer); ok {
 		var lastProgress int64
 		kind6, err = progressPeer.DeliverWithProgress(ctx, command.PoolID, request.Kind5, func(bytes int64) {
-			if totalBytes <= 0 {
-				return
-			}
-			if bytes > totalBytes {
+			// Unknown total only disables clamping, never progress itself:
+			// seed bytes are unknown, but stall detection still needs progress.
+			if totalBytes > 0 && bytes > totalBytes {
 				bytes = totalBytes
 			}
 			if bytes <= lastProgress {

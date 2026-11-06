@@ -5,11 +5,11 @@
 package download
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -399,11 +399,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	blockCount := masterseed.BlockCountForSourceSize(firstTerms.FileSizeBytes)
-	seedBytes, err := masterseed.SeedSizeForBlockCount(blockCount)
-	if err != nil {
-		return nil, err
-	}
 	limits := options.Config
 	if limits.MaxBlockPrice == "" || limits.MaxBlockPrice == "0" {
 		limits.MaxBlockPrice = new(big.Int).SetUint64(firstTerms.FullBlockPriceSatoshis).String()
@@ -420,13 +415,30 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	if limits.RequestTimeoutMs < 1 {
 		limits.RequestTimeoutMs = 5000
 	}
+	sched, err := sharedScheduler(limits)
+	if err != nil {
+		return nil, err
+	}
+	create := scheduler.CreateTaskInput{TaskID: options.SeedHash, SeedHash: options.SeedHash}
+	// 本地重验通过才复用；种子缺失/损坏（已安全隔离）按新购买处理。
+	// 隔离或存储操作失败则向上返回错误：损坏文件可能仍占据原路径，
+	// 继续采购只会在交付落盘时失败，不能静默开始。
+	info, ok, verifyErr := verifyLocalFile(options.Store, options.SeedHash, firstTerms.FileSizeBytes)
+	if verifyErr != nil {
+		return nil, verifyErr
+	}
+	if ok {
+		fileBytes := int64(info.FileBytes)
+		blockBytes := info.BlockBytes
+		create.FileBytes = &fileBytes
+		create.BlockBytes = &blockBytes
+		create.BlockHashes = info.BlockHashes
+		create.ReusedBlockHashes = info.ReusedBlockHashes
+	}
 	adapter, err := host.OpenAdapter(options.Store, host.AdapterInit{
-		TaskID:        options.SeedHash,
-		SeedHash:      options.SeedHash,
-		ManifestKnown: false,
-		Clock:         now,
-		Config:        limits,
-		Content:       []scheduler.Content{{ID: options.SeedHash, Kind: "seed", Bytes: int64(seedBytes)}},
+		Scheduler: sched,
+		Create:    create,
+		Clock:     now,
 	})
 	if err != nil {
 		return nil, err
@@ -436,8 +448,17 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			monotonic.AdvanceTo(restored + 1)
 		}
 	}
+	// Seed the progress-size map from the kernel content the task already
+	// knows (creation with file info or a restored manifest). Seed bytes are
+	// unknown by design and stay absent: only the upper-bound clamp is
+	// skipped for them, progress itself is still reported.
 	contentMu.Lock()
-	contentBytes[options.SeedHash] = int64(seedBytes)
+	state := adapter.State()
+	for _, item := range state.Content.Values() {
+		if item.Bytes != nil {
+			contentBytes[item.ID] = *item.Bytes
+		}
+	}
 	contentMu.Unlock()
 	ports := &host.BuyerPorts{
 		Task:        options.Task,
@@ -453,7 +474,13 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			defer contentMu.Unlock()
 			var total int64
 			for _, id := range ids {
-				total += contentBytes[id]
+				bytes, ok := contentBytes[id]
+				if !ok {
+					// Any unknown member (notably the seed) makes the whole
+					// request total unknown: report progress unclamped.
+					return 0
+				}
+				total += bytes
 			}
 			return total
 		},
@@ -472,7 +499,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	loop.OnError = func(err error) { logf("调度器: %v", err) }
 	loop.AfterEvent = func(event scheduler.Event, state scheduler.State) []scheduler.Event {
 		followUps := make([]scheduler.Event, 0, 2)
-		if !manifestOnce && !state.ManifestKnown && event.Type == "delivery" {
+		if !manifestOnce && state.Manifest == nil && event.Type == "delivery" {
 			for _, id := range event.Accepted {
 				if id != options.SeedHash {
 					continue
@@ -484,11 +511,19 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 				}
 				manifestOnce = true
 				contentMu.Lock()
-				for _, item := range manifest {
-					contentBytes[item.ID] = item.Bytes
+				for id, bytes := range manifest.bytesByID {
+					contentBytes[id] = bytes
 				}
 				contentMu.Unlock()
-				followUps = append(followUps, scheduler.Event{EventID: "manifest-" + options.SeedHash, Type: "manifest", Content: manifest})
+				blockBytes := manifest.blockBytes
+				followUps = append(followUps, scheduler.Event{
+					EventID:           "manifest-" + options.SeedHash,
+					Type:              "manifest",
+					FileBytes:         &manifest.fileBytes,
+					BlockBytes:        &blockBytes,
+					BlockHashes:       manifest.hashes,
+					ReusedBlockHashes: manifest.reused,
+				})
 				break
 			}
 		}
@@ -582,7 +617,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		if view.Funds == "problem" && view.Failure == nil {
 			return nil, errors.New("download: scheduler reports a funding problem; check unresolved records")
 		}
-		if view.Execution != "finished" || view.Funds != "settled" {
+		if view.Execution != "finished" || (view.Funds != "settled" && view.Funds != "none") {
 			continue
 		}
 		assembler, err := output.New(options.Store, options.OutputDir)
@@ -590,8 +625,25 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			return nil, err
 		}
 		final, err := assembler.Final()
-		if err != nil || final == nil {
-			continue
+		if err != nil {
+			return nil, err
+		}
+		if final == nil {
+			// No pool was ever opened (full local reuse): every block is
+			// already staged but no final file exists yet. Assemble from
+			// staging instead of waiting for a pool that will never come.
+			votesMu.Lock()
+			recommended := RankRecommendations(votes)
+			votesMu.Unlock()
+			preferred := ""
+			if len(recommended) > 0 {
+				preferred = recommended[0]
+			}
+			completed, err := assembler.Complete(ctx, options.SeedHash, preferred)
+			if err != nil {
+				return nil, err
+			}
+			final = &output.FinalFile{SeedHashHex: options.SeedHash, Path: completed.Path, Bytes: completed.Bytes}
 		}
 		committed := uint64(0)
 		for id, pool := range options.Task.Ledger.Pools() {
@@ -613,25 +665,44 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	}
 }
 
-func buildManifest(workStore *store.Store, seedHash string, terms *content.FileQuoteTerms) ([]scheduler.Content, error) {
-	seed, err := workStore.Load("staging/seed")
+type manifestInfo struct {
+	fileBytes  int64
+	blockBytes int64
+	hashes     []string
+	bytesByID  map[string]int64
+	reused     []string
+}
+
+// buildManifest 从本地已验证的 Seed 推导完整有序清单（含重复位置），并重验
+// 本地块作为 reusedBlockHashes 提供。种子缺失或损坏时返回错误。
+func buildManifest(workStore *store.Store, seedHash string, terms *content.FileQuoteTerms) (*manifestInfo, error) {
+	if terms.FileSizeBytes > uint64(math.MaxInt64) || terms.FileSizeBytes > uint64(1<<53-1) {
+		return nil, fmt.Errorf("文件大小超出调度器安全整数范围")
+	}
+	info, ok, err := verifyLocalFile(workStore, seedHash, terms.FileSizeBytes)
 	if err != nil {
 		return nil, err
 	}
-	blockCount := masterseed.BlockCountForSourceSize(terms.FileSizeBytes)
-	manifest := make([]scheduler.Content, 0, blockCount)
-	for index := uint64(0); index < blockCount; index++ {
-		hash, err := masterseed.ReadBlockHash(context.Background(), bytes.NewReader(seed), uint64(len(seed)), index)
-		if err != nil {
-			return nil, err
-		}
+	if !ok {
+		return nil, fmt.Errorf("本地 Seed 未通过验证")
+	}
+	out := &manifestInfo{
+		fileBytes:  int64(info.FileBytes),
+		blockBytes: info.BlockBytes,
+		hashes:     info.BlockHashes,
+		bytesByID:  make(map[string]int64, len(info.BlockHashes)),
+		reused:     info.ReusedBlockHashes,
+	}
+	for index := uint64(0); index < uint64(len(out.hashes)); index++ {
 		size, err := masterseed.ExpectedBlockSize(terms.FileSizeBytes, index)
 		if err != nil {
 			return nil, err
 		}
-		manifest = append(manifest, scheduler.Content{ID: hex.EncodeToString(hash.Bytes()), Kind: "block", Bytes: int64(size)})
+		if _, ok := out.bytesByID[out.hashes[index]]; !ok {
+			out.bytesByID[out.hashes[index]] = int64(size)
+		}
 	}
-	return manifest, nil
+	return out, nil
 }
 
 func boolPointer(value bool) *bool { return &value }

@@ -46,13 +46,12 @@ type snapshot struct {
 }
 
 // AdapterInit describes a fresh task; it is ignored when a snapshot exists.
+// The Scheduler instance carries the shared kernel configuration.
 type AdapterInit struct {
-	TaskID        string
-	SeedHash      string
-	Config        scheduler.Config
-	Content       []scheduler.Content
-	ManifestKnown bool
-	Reused        []string
+	// Scheduler is the shared download scheduler instance (owner/network lifecycle).
+	Scheduler *scheduler.Scheduler
+	// Create carries the task identity and (optionally) the verified local file info.
+	Create scheduler.CreateTaskInput
 	// Clock supplies ReceivedAt/OccurredAt defaults for events that do not
 	// carry them. It must be monotonic.
 	Clock func() int64
@@ -69,20 +68,20 @@ type Adapter struct {
 	outbox   []OutboxEntry
 }
 
-// OpenAdapter restores the snapshot for init.TaskID or creates the task and
+// OpenAdapter restores the snapshot for init.Create.TaskID or creates the task and
 // persists it immediately.
 func OpenAdapter(s *store.Store, init AdapterInit) (*Adapter, error) {
 	if s == nil {
 		return nil, errors.New("host: store is required")
 	}
-	if init.TaskID == "" || init.SeedHash == "" {
+	if init.Create.TaskID == "" || init.Create.SeedHash == "" {
 		return nil, errors.New("host: taskId and seedHash are required")
 	}
 	adapter := &Adapter{
 		store:    s,
-		path:     "scheduler/tasks/" + init.TaskID + ".json",
-		taskID:   init.TaskID,
-		seedHash: init.SeedHash,
+		path:     "scheduler/tasks/" + init.Create.TaskID + ".json",
+		taskID:   init.Create.TaskID,
+		seedHash: init.Create.SeedHash,
 		clock:    init.Clock,
 	}
 	if adapter.clock == nil {
@@ -97,10 +96,10 @@ func OpenAdapter(s *store.Store, init AdapterInit) (*Adapter, error) {
 		if stored.Format != SnapshotFormat || stored.Version != SnapshotVersion {
 			return nil, errors.New("host: unsupported scheduler snapshot")
 		}
-		if stored.TaskID != init.TaskID || stored.SeedHash != init.SeedHash {
+		if stored.TaskID != init.Create.TaskID || stored.SeedHash != init.Create.SeedHash {
 			return nil, errors.New("host: scheduler snapshot belongs to another task")
 		}
-		if stored.State.TaskID != init.TaskID || stored.State.SeedHash != init.SeedHash {
+		if stored.State.TaskID != init.Create.TaskID || stored.State.SeedHash != init.Create.SeedHash {
 			return nil, errors.New("host: scheduler snapshot state does not match its header")
 		}
 		state, err := scheduler.RestoreTask(stored.State)
@@ -118,14 +117,10 @@ func OpenAdapter(s *store.Store, init AdapterInit) (*Adapter, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	state, err := scheduler.CreateTask(scheduler.CreateInput{
-		TaskID:        init.TaskID,
-		SeedHash:      init.SeedHash,
-		Config:        init.Config,
-		Content:       init.Content,
-		ManifestKnown: init.ManifestKnown,
-		Reused:        init.Reused,
-	})
+	if init.Scheduler == nil {
+		return nil, errors.New("host: scheduler instance is required")
+	}
+	state, err := init.Scheduler.CreateTask(init.Create)
 	if err != nil {
 		return nil, err
 	}
