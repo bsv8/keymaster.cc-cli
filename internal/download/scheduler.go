@@ -9,8 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,11 +21,11 @@ import (
 	"github.com/bsv8/BitFSProtocol/content"
 	"github.com/bsv8/BitFSProtocol/protocol"
 	"github.com/bsv8/BitFSProtocol/wire"
-	masterseed "github.com/bsv8/MasterSeed"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/host"
+	"github.com/bsv8/keymaster.cc-cli/internal/lock"
 	"github.com/bsv8/keymaster.cc-cli/internal/output"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 	"github.com/bsv8/keymaster.cc-cli/internal/transport"
@@ -67,6 +67,11 @@ type Options struct {
 	Ready func(feed func(scheduler.Event) error) (stop func())
 	// OnRecommendations observes the ranked top-5 seller filename votes.
 	OnRecommendations func([]string)
+	// PinExecID binds this run to one execution. After the seed lock is held
+	// and the pointer is resolved, the run refuses with an explicit error
+	// when the pointer names another execution (or none) instead of quietly
+	// driving the wrong execution. Empty means interactive resume semantics.
+	PinExecID string
 }
 
 type quoteSource struct {
@@ -175,6 +180,29 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	if options.Task == nil || options.Wallet == nil || options.Store == nil || options.Accept == nil || options.Arbitration == nil {
 		return nil, errors.New("download: task, wallet, store, accept and arbitration resolver are required")
 	}
+	// One live download per seed in this wallet/network/store scope: a second
+	// concurrent run for the same seed must manage the original task, not
+	// create a second one. The lock is held for the whole run; a crash
+	// releases it implicitly and the next run resumes the persisted snapshot.
+	scopeLock, err := lock.Acquire(filepath.Join(options.Store.Root(), "scheduler", ".active.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("download: seed %s already has an active download in this store: %w", options.SeedHash, err)
+	}
+	defer scopeLock.Release()
+	// Pinned runs (admin-started background jobs) resolved their target
+	// before releasing the admin seed guard; re-verify under this run's own
+	// guard before blocking on seller sessions, so a pointer move in between
+	// fails fast with an explicit refusal instead of driving (or waiting on)
+	// the wrong execution.
+	if options.PinExecID != "" {
+		current, exists, pinErr := host.CurrentExecID(options.Store, options.SeedHash)
+		if pinErr != nil {
+			return nil, pinErr
+		}
+		if !exists || current != options.PinExecID {
+			return nil, fmt.Errorf("download: pinned execution %s is not current (%q); refusing to drive the wrong execution", options.PinExecID, current)
+		}
+	}
 	logf := options.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -229,8 +257,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		manifestOnce    bool
 		votesMu         sync.Mutex
 		votes           = map[string]string{}
-		contentMu       sync.Mutex
-		contentBytes    = map[string]int64{}
 	)
 	quoteForSession := func(sessionID string) (host.Peer, error) {
 		peersMu.Lock()
@@ -330,20 +356,13 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		peersMu.Unlock()
 		return sellerID, sessionID, terms, nil
 	}
-	// feedQuote publishes a verified session quote to the kernel.
+	// feedQuote publishes a verified session quote to the kernel. The tail
+	// price is the seller-signed quote value, used directly without derivation.
 	feedQuote := func(sellerID, sessionID string, terms *content.FileQuoteTerms) error {
 		versionsMu.Lock()
 		versions[sellerID]++
 		version := versions[sellerID]
-		tail := scheduler.Sats("0")
-		blockCount := masterseed.BlockCountForSourceSize(terms.FileSizeBytes)
-		if blockCount > 0 {
-			if size, err := masterseed.ExpectedBlockSize(terms.FileSizeBytes, blockCount-1); err == nil {
-				if price, err := content.BlockPriceSatoshis(terms.FullBlockPriceSatoshis, size); err == nil {
-					tail = new(big.Int).SetUint64(price).String()
-				}
-			}
-		}
+		tail := scheduler.Sats(new(big.Int).SetUint64(terms.TailPriceSatoshis).String())
 		// Map the protocol remaining lifetime onto the scheduler clock. The
 		// protocol expiry is absolute Unix time and the scheduler clock may be
 		// advanced (restart, monotonic base); copying the absolute value would
@@ -362,7 +381,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			ExpiresAt:  now() + remainingSeconds*1000,
 			BlockPrice: new(big.Int).SetUint64(terms.FullBlockPriceSatoshis).String(),
 			SeedPrice:  new(big.Int).SetUint64(terms.SeedPriceSatoshis).String(),
-			BlockBytes: int64(masterseed.BlockSize),
 			TailPrice:  &tail,
 			MaxBlocks:  int64(terms.MaxBlocksPerBatch),
 			Fees: scheduler.Fees{Version: 1, Opening: feeOpening, Settlement: feeSettlement,
@@ -419,25 +437,51 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	create := scheduler.CreateTaskInput{TaskID: options.SeedHash, SeedHash: options.SeedHash}
+	create := scheduler.CreateTaskInput{SeedHash: options.SeedHash}
 	// 本地重验通过才复用；种子缺失/损坏（已安全隔离）按新购买处理。
 	// 隔离或存储操作失败则向上返回错误：损坏文件可能仍占据原路径，
 	// 继续采购只会在交付落盘时失败，不能静默开始。
-	info, ok, verifyErr := verifyLocalFile(options.Store, options.SeedHash, firstTerms.FileSizeBytes)
+	info, ok, verifyErr := verifyLocalFile(options.Store, options.SeedHash)
 	if verifyErr != nil {
 		return nil, verifyErr
 	}
 	if ok {
-		fileBytes := int64(info.FileBytes)
-		blockBytes := info.BlockBytes
-		create.FileBytes = &fileBytes
-		create.BlockBytes = &blockBytes
-		create.BlockHashes = info.BlockHashes
-		create.ReusedBlockHashes = info.ReusedBlockHashes
+		create.Resume = &scheduler.CreateResume{
+			BlockHashes:       info.BlockHashes,
+			ReusedBlockHashes: info.ReusedBlockHashes,
+		}
+	}
+	// Execution resolution: normal start/resume never creates a new execution.
+	// The pointer names the current execution; a missing pointer means the
+	// first execution. Redownload (Admin Web) creates e2, e3, ... and switches
+	// the pointer; the next Run picks the new execution up. A pinned run
+	// (admin-started background job) resolved its target before releasing the
+	// seed guard, so it must re-verify under this run's own guard and refuse
+	// when the pointer moved instead of driving the wrong execution.
+	execID, execExists, err := host.CurrentExecID(options.Store, options.SeedHash)
+	if err != nil {
+		return nil, err
+	}
+	if options.PinExecID != "" {
+		if !execExists {
+			return nil, fmt.Errorf("download: pinned execution %s has no pointer; refusing to drive an unknown execution", options.PinExecID)
+		}
+		if execID != options.PinExecID {
+			return nil, fmt.Errorf("download: current execution changed from %s to %s; refusing to drive the wrong execution", options.PinExecID, execID)
+		}
+	} else if !execExists {
+		execID, err = host.CreateExecution(options.Store, sched, options.SeedHash, create)
+		if err != nil {
+			return nil, err
+		}
+		if err := host.SwitchCurrent(options.Store, options.SeedHash, execID); err != nil {
+			return nil, err
+		}
 	}
 	adapter, err := host.OpenAdapter(options.Store, host.AdapterInit{
 		Scheduler: sched,
 		Create:    create,
+		ExecID:    execID,
 		Clock:     now,
 	})
 	if err != nil {
@@ -448,18 +492,6 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			monotonic.AdvanceTo(restored + 1)
 		}
 	}
-	// Seed the progress-size map from the kernel content the task already
-	// knows (creation with file info or a restored manifest). Seed bytes are
-	// unknown by design and stay absent: only the upper-bound clamp is
-	// skipped for them, progress itself is still reported.
-	contentMu.Lock()
-	state := adapter.State()
-	for _, item := range state.Content.Values() {
-		if item.Bytes != nil {
-			contentBytes[item.ID] = *item.Bytes
-		}
-	}
-	contentMu.Unlock()
 	ports := &host.BuyerPorts{
 		Task:        options.Task,
 		PeerFor:     quoteForSession,
@@ -467,23 +499,9 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		Discover:    options.RequestQuotes,
 		StateMu:     &sync.Mutex{},
 		SeedHashHex: options.SeedHash,
+		ExecID:      execID,
 		OutputDir:   options.OutputDir,
 		Now:         now,
-		ContentBytes: func(ids []string) int64 {
-			contentMu.Lock()
-			defer contentMu.Unlock()
-			var total int64
-			for _, id := range ids {
-				bytes, ok := contentBytes[id]
-				if !ok {
-					// Any unknown member (notably the seed) makes the whole
-					// request total unknown: report progress unclamped.
-					return 0
-				}
-				total += bytes
-			}
-			return total
-		},
 		OnCommandError: func(command scheduler.Command, cause error) {
 			logf("调度命令 %s 失败: %v", command.Type, cause)
 		},
@@ -504,23 +522,15 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 				if id != options.SeedHash {
 					continue
 				}
-				manifest, err := buildManifest(options.Store, options.SeedHash, firstTerms)
+				manifest, err := buildManifest(options.Store, options.SeedHash)
 				if err != nil {
 					logf("生成 manifest 失败: %v", err)
 					break
 				}
 				manifestOnce = true
-				contentMu.Lock()
-				for id, bytes := range manifest.bytesByID {
-					contentBytes[id] = bytes
-				}
-				contentMu.Unlock()
-				blockBytes := manifest.blockBytes
 				followUps = append(followUps, scheduler.Event{
 					EventID:           "manifest-" + options.SeedHash,
 					Type:              "manifest",
-					FileBytes:         &manifest.fileBytes,
-					BlockBytes:        &blockBytes,
 					BlockHashes:       manifest.hashes,
 					ReusedBlockHashes: manifest.reused,
 				})
@@ -647,7 +657,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 		}
 		committed := uint64(0)
 		for id, pool := range options.Task.Ledger.Pools() {
-			if strings.HasPrefix(id, options.SeedHash+"/") {
+			if strings.HasPrefix(id, host.ExecPoolPrefix(execID, options.SeedHash)) {
 				committed += pool.Committed
 			}
 		}
@@ -666,43 +676,24 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 }
 
 type manifestInfo struct {
-	fileBytes  int64
-	blockBytes int64
-	hashes     []string
-	bytesByID  map[string]int64
-	reused     []string
+	hashes []string
+	reused []string
 }
 
-// buildManifest 从本地已验证的 Seed 推导完整有序清单（含重复位置），并重验
+// buildManifest 从本地已验证的 Seed 读出完整有序清单（含重复位置），并重验
 // 本地块作为 reusedBlockHashes 提供。种子缺失或损坏时返回错误。
-func buildManifest(workStore *store.Store, seedHash string, terms *content.FileQuoteTerms) (*manifestInfo, error) {
-	if terms.FileSizeBytes > uint64(math.MaxInt64) || terms.FileSizeBytes > uint64(1<<53-1) {
-		return nil, fmt.Errorf("文件大小超出调度器安全整数范围")
-	}
-	info, ok, err := verifyLocalFile(workStore, seedHash, terms.FileSizeBytes)
+func buildManifest(workStore *store.Store, seedHash string) (*manifestInfo, error) {
+	info, ok, err := verifyLocalFile(workStore, seedHash)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, fmt.Errorf("本地 Seed 未通过验证")
 	}
-	out := &manifestInfo{
-		fileBytes:  int64(info.FileBytes),
-		blockBytes: info.BlockBytes,
-		hashes:     info.BlockHashes,
-		bytesByID:  make(map[string]int64, len(info.BlockHashes)),
-		reused:     info.ReusedBlockHashes,
-	}
-	for index := uint64(0); index < uint64(len(out.hashes)); index++ {
-		size, err := masterseed.ExpectedBlockSize(terms.FileSizeBytes, index)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := out.bytesByID[out.hashes[index]]; !ok {
-			out.bytesByID[out.hashes[index]] = int64(size)
-		}
-	}
-	return out, nil
+	return &manifestInfo{
+		hashes: info.BlockHashes,
+		reused: info.ReusedBlockHashes,
+	}, nil
 }
 
 func boolPointer(value bool) *bool { return &value }

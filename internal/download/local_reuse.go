@@ -3,11 +3,9 @@ package download
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"sync"
 
@@ -18,10 +16,9 @@ import (
 )
 
 // localFileInfo 携带一次本地重验证得到的文件结构；只用于创建新任务，
-// 历史付款记录不能替代字节级重验。
+// 历史付款记录不能替代字节级重验。清单与复用只看 Seed 字节与哈希，绝不
+// 使用卖方声明的文件长度。
 type localFileInfo struct {
-	FileBytes         uint64
-	BlockBytes        int64
 	BlockHashes       []string
 	ReusedBlockHashes []string
 }
@@ -69,15 +66,13 @@ func quarantineStaging(workStore *store.Store, name string, data []byte) error {
 }
 
 // verifyLocalFile 重新验证本地 staging 中的 Seed 与全部 Block，返回内核
-// 创建任务所需的完整文件信息。种子缺失或损坏时返回 ok=false（按新购买处理）；
-// 单个块损坏或缺失时仅从复用清单中剔除，不影响其余内容。损坏的暂存对象
-// 会被隔离（见 quarantineStaging），以免阻止重买内容的落盘。
-func verifyLocalFile(workStore *store.Store, seedHashHex string, fileSizeBytes uint64) (localFileInfo, bool, error) {
+// 创建任务所需的 Hash 清单与复用集合。Seed 只验哈希，清单按 Seed 字节长度
+// 逐项读出，块只验哈希；卖方声明长度缺失或不一致不影响本路径。种子缺失或
+// 损坏时返回 ok=false（按新购买处理）；单个块损坏或缺失时仅从复用清单中
+// 剔除，不影响其余内容。损坏的暂存对象会被隔离（见 quarantineStaging），
+// 以免阻止重买内容的落盘。
+func verifyLocalFile(workStore *store.Store, seedHashHex string) (localFileInfo, bool, error) {
 	if workStore == nil {
-		return localFileInfo{}, false, nil
-	}
-	if fileSizeBytes > uint64(math.MaxInt64) || fileSizeBytes > uint64(1<<53-1) {
-		// 超出调度器安全整数范围：不参与创建时复用。
 		return localFileInfo{}, false, nil
 	}
 	seed, err := workStore.Load("staging/seed")
@@ -88,19 +83,24 @@ func verifyLocalFile(workStore *store.Store, seedHashHex string, fileSizeBytes u
 	if err != nil {
 		return localFileInfo{}, false, fmt.Errorf("bitfs: 无效的 Seed Hash: %w", err)
 	}
-	if _, err := masterseed.VerifySeedForSourceSize(context.Background(), bytes.NewReader(seed), expected, fileSizeBytes); err != nil {
-		// 种子损坏或与报价不符：隔离后按新购买处理，否则重买的 Seed 无法落盘。
+	if _, err := masterseed.VerifySeed(context.Background(), bytes.NewReader(seed), expected); err != nil {
+		// 种子损坏或与目标不符：隔离后按新购买处理，否则重买的 Seed 无法落盘。
 		if qerr := quarantineStaging(workStore, "seed", seed); qerr != nil {
 			return localFileInfo{}, false, qerr
 		}
 		return localFileInfo{}, false, nil
 	}
-	blockCount := masterseed.BlockCountForSourceSize(fileSizeBytes)
+	if uint64(len(seed))%uint64(masterseed.DigestSize) != 0 {
+		if qerr := quarantineStaging(workStore, "seed", seed); qerr != nil {
+			return localFileInfo{}, false, qerr
+		}
+		return localFileInfo{}, false, nil
+	}
+	blockCount := uint64(len(seed)) / uint64(masterseed.DigestSize)
 	info := localFileInfo{
-		FileBytes:  fileSizeBytes,
-		BlockBytes: int64(masterseed.BlockSize),
 		BlockHashes: make([]string, 0, blockCount),
 	}
+	seenReuse := map[string]bool{}
 	for index := uint64(0); index < blockCount; index++ {
 		hash, err := masterseed.ReadBlockHash(context.Background(), bytes.NewReader(seed), uint64(len(seed)), index)
 		if err != nil {
@@ -108,36 +108,29 @@ func verifyLocalFile(workStore *store.Store, seedHashHex string, fileSizeBytes u
 		}
 		hashHex := hex.EncodeToString(hash.Bytes())
 		info.BlockHashes = append(info.BlockHashes, hashHex)
-		size, err := masterseed.ExpectedBlockSize(fileSizeBytes, index)
-		if err != nil {
-			return localFileInfo{}, false, fmt.Errorf("bitfs: 推导块大小失败: %w", err)
+		if seenReuse[hashHex] {
+			continue
 		}
 		block, err := workStore.Load("staging/" + hashHex)
 		if err != nil {
 			continue
 		}
-		if uint64(len(block)) != size {
+		if _, err := masterseed.VerifyBlock(context.Background(), block, hash); err != nil {
 			if qerr := quarantineStaging(workStore, hashHex, block); qerr != nil {
 				return localFileInfo{}, false, qerr
 			}
 			continue
 		}
-		sum := sha256.Sum256(block)
-		if hex.EncodeToString(sum[:]) != hashHex {
-			if qerr := quarantineStaging(workStore, hashHex, block); qerr != nil {
-				return localFileInfo{}, false, qerr
-			}
-			continue
-		}
+		seenReuse[hashHex] = true
 		info.ReusedBlockHashes = append(info.ReusedBlockHashes, hashHex)
 	}
 	return info, true, nil
 }
 
-// verifyLocalBlocks 在 Seed 已知后重新验证本地块（与创建时同一套字节级校验），
+// verifyLocalBlocks 在 Seed 已知后重新验证本地块（与创建时同一套哈希校验），
 // 供 manifest 事件携带 reusedBlockHashes 使用。
-func verifyLocalBlocks(workStore *store.Store, seedHashHex string, fileSizeBytes uint64) []string {
-	info, ok, err := verifyLocalFile(workStore, seedHashHex, fileSizeBytes)
+func verifyLocalBlocks(workStore *store.Store, seedHashHex string) []string {
+	info, ok, err := verifyLocalFile(workStore, seedHashHex)
 	if err != nil || !ok {
 		return nil
 	}

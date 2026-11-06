@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -188,7 +189,9 @@ func dispatch(ctx context.Context, cfg *config.Config, privateKey []byte, argCou
 	code := 0
 	switch {
 	case serverPath != "":
-		code = runServerScan(ctx, cfg, privateKey, serverPath, discover, adminAddr, configPath)
+		code = runServerScan(ctx, cfg, privateKey, serverPath, discover, adminAddr, configPath, listen)
+	case serverPath == "" && argCount == 0:
+		code = runClientAdmin(ctx, cfg, privateKey, adminAddr, configPath, listen)
 	case argCount == 1:
 		seedHash := arg(0)
 		resolvedOut := outDir
@@ -201,7 +204,7 @@ func dispatch(ctx context.Context, cfg *config.Config, privateKey []byte, argCou
 			resolvedOut = workingDirectory
 		}
 		fmt.Printf("下载目标: %s\n输出目录: %s\n", seedHash, resolvedOut)
-		code = runDownload(ctx, cfg, privateKey, seedHash, resolvedOut, listen, configPath, legacyDirect)
+		code = runDownload(ctx, cfg, privateKey, seedHash, resolvedOut, listen, adminAddr, configPath, "", legacyDirect, false)
 	default:
 		usage(os.Stderr)
 		return exitUsage
@@ -218,7 +221,7 @@ func dispatch(ctx context.Context, cfg *config.Config, privateKey []byte, argCou
 }
 
 // runServerScan 打开持久内容目录；Admin、发现和售卖共用同一个 Catalog。
-func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, directory string, discover bool, adminAddr, configPath string) int {
+func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, directory string, discover bool, adminAddr, configPath, listen string) int {
 	files, err := catalog.Open(ctx, directory, filepath.Join(filepath.Dir(configPath), "server", "catalog.sqlite"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -302,14 +305,14 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 		return exitError
 	}
 	go height.refresh(ctx, wocClient)
-	sellerWallet, err := wallet.New(wocClient, wallet.Options{
+	sellerWallet, releaseSellerWallet, err := wallet.Shared(wocClient, wallet.Options{
 		Network: string(cfg.BsvNetwork), PrivateKey: privateKey, FeeRateSatoshisPerKb: cfg.FeeRateSatoshisPerKb,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	defer sellerWallet.Close()
+	defer releaseSellerWallet()
 	service := &sell.Seller{
 		Sessions: sessions,
 		Signer:   signer,
@@ -364,6 +367,8 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 				WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
 				Catalog:       files,
 				Pricing:       table,
+				ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
+				StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
 				PersistDefaults: func(seedPrice, blockPrice string) error {
 					cfg.Server.DefaultSeedPriceSatoshis = seedPrice
 					cfg.Server.DefaultFullBlockPriceSatoshis = blockPrice
@@ -598,9 +603,56 @@ func (c *chainHeight) refresh(ctx context.Context, client *woc.Client) {
 	}
 }
 
+// runClientAdmin serves download execution management without a seller
+// directory. It is the buyer entry to Web Admin: configure admin.apiKey once,
+// run `km` (no args) to keep the admin up, open the printed URL, inspect each
+// seed's executions, then redownload or switch-and-start directly from the
+// page. The daemon holds no download lock itself; redownload/switch are
+// refused while a `km <seed>` run holds the seed lock.
+// startDownloadFunc returns the admin StartDownload hook: a headless background
+// run pinned to one execution in this process (no TUI, first recommended
+// name, plain stderr log). The wallet is already unlocked in this process,
+// so no second password entry is needed. The runner re-verifies the pin
+// under its own seed lock and refuses when the pointer moved.
+func startDownloadFunc(cfg *config.Config, privateKey []byte, listen, configPath string) func(context.Context, string, string, string) int {
+	return func(jobCtx context.Context, seed, execID, outDir string) int {
+		return runDownload(jobCtx, cfg, privateKey, seed, outDir, listen, "", configPath, execID, false, true)
+	}
+}
+
+func runClientAdmin(ctx context.Context, cfg *config.Config, privateKey []byte, adminAddr, configPath, listen string) int {
+	if adminAddr == "" {
+		fmt.Fprintln(os.Stderr, "km: \u5355\u72ec\u7ba1\u7406\u6a21\u5f0f\u9700\u8981 -admin \u5730\u5740\uff08\u7a7a\u5b57\u7b26\u4e32\u7981\u7528\uff09")
+		return exitUsage
+	}
+	if cfg.Admin.APIKey == "" {
+		fmt.Fprintln(os.Stderr, "km: admin.apiKey \u4e3a\u7a7a\uff0cWeb Admin \u672a\u542f\u52a8\uff08\u5148\u5728 config.json \u8bbe\u7f6e admin.apiKey\uff09")
+		return exitError
+	}
+	adminServer, err := admin.Start(ctx, admin.Options{
+		Address:       adminAddr,
+		APIKey:        cfg.Admin.APIKey,
+		Network:       string(cfg.BsvNetwork),
+		WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
+		ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
+		StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km: Web Admin \u542f\u52a8\u5931\u8d25:", err)
+		return exitError
+	}
+	defer adminServer.Close()
+	fmt.Printf("Web Admin: http://%s/\uff08\u4e0b\u8f7d\u6267\u884c\u7ba1\u7406\uff1bAPI Key \u89c1 %s \u7684 admin.apiKey\uff09\n", adminServer.Addr(), configPath)
+	fmt.Println("Ctrl-C \u7ed3\u675f\u3002")
+	<-ctx.Done()
+	fmt.Fprintln(os.Stderr, "\u9000\u51fa\u4e2d/\u6536\u5c3e\u4e2d\u2026\uff08\u7b49\u5f85\u540e\u53f0\u4efb\u52a1\u6709\u754c\u6536\u5c3e\uff09")
+	return exitCancelled
+}
+
 func usage(writer *os.File) {
 	fmt.Fprintln(writer, `用法:
   km <seed-hash>                     下载一个文件（默认输出到当前目录）
+  km                               纯买方 Web Admin（下载执行管理：列表/重新下载/切回旧执行）
   km -server <path>                  售卖指定目录（默认接入供应商并监听 Hash 需求）
   km -server <path> -discover=false  只扫描目录与定价，不启动售卖
 
@@ -742,7 +794,7 @@ func clearBytes(buffer []byte) {
 
 // runDownload publishes one Hash demand, waits for a seller session over the
 // BitFS transport and purchases the file.
-func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, seedHash, outputDir, listen, configPath string, legacyDirect bool) int {
+func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, seedHash, outputDir, listen, adminAddr, configPath, pinExec string, legacyDirect, headless bool) int {
 	clientRoot := filepath.Join(filepath.Dir(configPath), "client", seedHash)
 	if err := os.MkdirAll(clientRoot, 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -754,14 +806,17 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		fmt.Fprintln(os.Stderr, "km: 读取链高度失败:", err)
 		return exitError
 	}
-	w, err := wallet.New(wocClient, wallet.Options{
+	// The wallet (UTXO allocation pool) is shared process-wide per
+	// owner/network/fee rate: concurrent downloads for different seeds must
+	// allocate from one pool, never double-allocate the same outpoint.
+	w, releaseWallet, err := wallet.Shared(wocClient, wallet.Options{
 		Network: string(cfg.BsvNetwork), PrivateKey: privateKey, FeeRateSatoshisPerKb: cfg.FeeRateSatoshisPerKb,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	defer w.Close()
+	defer releaseWallet()
 	workStore, err := store.Open(clientRoot)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -775,7 +830,15 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 	if legacyDirect {
 		// The direct path must never run after the scheduler produced pool,
 		// authorization or payment evidence: switching would buy again.
-		hasSnapshot, _ := workStore.Exists("scheduler/tasks/" + seedHash + ".json")
+		hasSnapshot := false
+		if names, err := workStore.List("scheduler/tasks/"); err == nil {
+			for _, name := range names {
+				if strings.HasPrefix(name, "scheduler/tasks/"+seedHash+".") {
+					hasSnapshot = true
+					break
+				}
+			}
+		}
 		if hasSnapshot || len(l.Pools()) > 0 {
 			fmt.Fprintln(os.Stderr, "km: 存在调度器任务或在途资金证据，禁止切换到旧直购路径")
 			return exitError
@@ -794,6 +857,23 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		Wallet: w, Ledger: l, Store: workStore, Signer: signerInstance,
 		Facts: facts, MinerFeeRate: protocol.SatoshisPerKilobyte(cfg.FeeRateSatoshisPerKb),
 		Chain: wocClient, UnresolvedDir: config.ClientUnresolvedDir(configPath),
+	}
+	if adminAddr != "" {
+		if cfg.Admin.APIKey == "" {
+			fmt.Fprintln(os.Stderr, "km: admin.apiKey 为空，买方 Web Admin 未启动（重新下载需先在 config.json 设置 admin.apiKey）")
+		} else if adminServer, err := admin.Start(ctx, admin.Options{
+			Address:       adminAddr,
+			APIKey:        cfg.Admin.APIKey,
+			Network:       string(cfg.BsvNetwork),
+			WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
+			ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
+			StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "km: 买方 Web Admin 启动失败:", err)
+		} else {
+			defer adminServer.Close()
+			fmt.Printf("买方 Web Admin: http://%s/（下载执行管理；API Key 见 %s 的 admin.apiKey）\n", adminServer.Addr(), configPath)
+		}
 	}
 	localSigner, err := signer.NewLocalSigner(privateKey)
 	if err != nil {
@@ -869,7 +949,13 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 	}
 	var result *bitfs.PurchaseResult
 	var purchaseErr error
-	renderer := ui.New(os.Stdout, term.IsTerminal(int(os.Stdout.Fd())), true)
+	// Headless background runs (admin-started) render nowhere and never touch
+	// the terminal: plain stderr lines carry progress instead.
+	out := io.Writer(os.Stdout)
+	if headless {
+		out = io.Discard
+	}
+	renderer := ui.New(out, !headless && term.IsTerminal(int(os.Stdout.Fd())), !headless)
 	renderer.Render(ui.State{Stage: ui.StageUnlock, Address: addressFromPublicKeyOrEmpty(cfg, privateKey), SeedHash: seedHash})
 	renderer.Render(ui.State{Stage: ui.StageDiscovery, SeedHash: seedHash, Detail: "供应商: " + supplier.Name})
 	poolID := seedHash + "-pool"
@@ -957,7 +1043,7 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		result, purchaseErr = download.Run(runCtx, download.Options{
 			Arbitration: arbitrationClient,
 			Task:        task, SeedHash: seedHash, OutputDir: outputDir,
-			Wallet: w, Store: workStore,
+			Wallet: w, Store: workStore, PinExecID: pinExec,
 			RequestQuotes: func(requestCtx context.Context) error {
 				_, err := publisher.PublishDemand(requestCtx, seedHash, 10*time.Minute)
 				return err
@@ -1005,7 +1091,7 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 				recMu.Unlock()
 			},
 			Ready: func(feed func(scheduler.Event) error) func() {
-				if !term.IsTerminal(int(os.Stdin.Fd())) {
+				if headless || !term.IsTerminal(int(os.Stdin.Fd())) {
 					return func() {}
 				}
 				keyCtx, keyCancel := context.WithCancel(runCtx)
@@ -1043,7 +1129,7 @@ func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, see
 		if len(result.RecommendedNames) > 0 {
 			fmt.Printf("推荐名: %s\n", strings.Join(result.RecommendedNames, ", "))
 		}
-		if len(result.RecommendedNames) > 1 && term.IsTerminal(int(os.Stdin.Fd())) {
+		if len(result.RecommendedNames) > 1 && !headless && term.IsTerminal(int(os.Stdin.Fd())) {
 			fmt.Println("选择最终文件名:")
 			for index, name := range result.RecommendedNames {
 				fmt.Printf("  %d. %s\n", index+1, name)

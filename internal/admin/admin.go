@@ -43,8 +43,24 @@ type Options struct {
 	// Address_ is the wallet receiving address shown in the status view.
 	WalletAddress string
 	// Catalog 统一查询磁盘目录和持久内容映射，不持有扫描快照。
+	// 纯买方模式（ClientDir 已配置、Catalog 为空）下目录与定价接口不可用，
+	// 下载管理接口仍可用。
 	Catalog *catalog.Catalog
 	Pricing *pricing.Pricing
+	// ClientDir is the client data directory (~/.km/client) that owns one
+	// subdirectory per seed. When set, the admin serves download execution
+	// management (/api/downloads/*) alongside the seller surface. A pure
+	// buyer without a server directory sets only this field.
+	ClientDir string
+	// StartDownload drives one seed's pinned execution to completion in the
+	// background (headless: no TUI, auto filename, plain stderr log) and
+	// reports its process exit code. It is invoked by the redownload and
+	// switch handlers after the pointer is switched, so the Web action
+	// actually starts the pinned execution instead of only registering it.
+	// The runner must verify the pin after acquiring the seed lock and
+	// refuse when the pointer moved. A nil value leaves the start step
+	// unavailable (500).
+	StartDownload func(ctx context.Context, seedHash, execID, outDir string) int
 	// Status optionally contributes extra status fields.
 	Status func() map[string]any
 	// PersistDefaults saves new server default prices to the settings
@@ -59,6 +75,18 @@ type Server struct {
 	server     *http.Server
 	addr       string
 	defaultsMu sync.Mutex
+	// ctx is the server lifecycle: background download jobs derive from it
+	// so they stop when the server shuts down.
+	ctx context.Context
+	// downloadsMu serializes redownload/switch critical sections in this
+	// process; the file guard below covers other processes. It also guards
+	// the closing flag: once shutdown starts, no new background job starts.
+	downloadsMu  sync.Mutex
+	closing      bool
+	jobsMu       sync.Mutex
+	jobs         map[string]*downloadJob
+	jobsWg       sync.WaitGroup
+	shutdownOnce sync.Once
 }
 
 // Start validates options and serves in a goroutine.
@@ -77,10 +105,16 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 		return nil, fmt.Errorf("admin: listen address must be loopback, got %q", host)
 	}
 	if options.Catalog == nil || options.Pricing == nil {
-		return nil, errors.New("admin: index and pricing are required")
+		if options.ClientDir == "" {
+			return nil, errors.New("admin: index and pricing are required")
+		}
+		// Pure-buyer mode: no seller catalog, only download management.
+	} else if options.ClientDir == "" {
+		// Seller-only mode keeps the previous behaviour; downloads endpoints
+		// simply report that no client directory is configured.
 	}
 	mux := http.NewServeMux()
-	server := &Server{options: options}
+	server := &Server{options: options, ctx: ctx, jobs: map[string]*downloadJob{}}
 	mux.HandleFunc("/", server.handleUI)
 	mux.HandleFunc("/api/status", server.handleStatus)
 	mux.HandleFunc("/api/files", server.handleFiles)
@@ -88,6 +122,8 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 	mux.HandleFunc("/api/pricing/batch", server.handleBatch)
 	mux.HandleFunc("/api/pricing/defaults", server.handleDefaults)
 	mux.HandleFunc("/api/pricing/file", server.handleFile)
+	mux.HandleFunc("/api/downloads", server.handleDownloads)
+	mux.HandleFunc("/api/downloads/", server.handleDownloadRoute)
 	server.server = &http.Server{Addr: options.Address, Handler: server.guard(mux), ReadHeaderTimeout: 10 * time.Second}
 	listener, err := net.Listen("tcp", options.Address)
 	if err != nil {
@@ -96,6 +132,7 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 	server.addr = listener.Addr().String()
 	go func() {
 		<-ctx.Done()
+		server.stopJobs()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.server.Shutdown(shutdown)
@@ -114,12 +151,42 @@ func (s *Server) Addr() string {
 	return s.addr
 }
 
-// Close stops the server.
+// Close stops the server: it stops accepting new background jobs, cancels
+// the running ones and waits (bounded) for their persist-and-cleanup path
+// before closing the HTTP listener, so process exit cannot truncate a job
+// mid-write. It is idempotent and safe to defer alongside ctx shutdown.
 func (s *Server) Close() error {
+	s.stopJobs()
 	if s.server == nil {
 		return nil
 	}
 	return s.server.Close()
+}
+
+// stopJobs marks shutdown, cancels every background download and waits for
+// their bounded cleanup. New redownload/switch starts are refused afterwards.
+func (s *Server) stopJobs() {
+	s.shutdownOnce.Do(func() {
+		s.downloadsMu.Lock()
+		s.closing = true
+		s.downloadsMu.Unlock()
+		s.jobsMu.Lock()
+		for _, job := range s.jobs {
+			if job.cancel != nil {
+				job.cancel()
+			}
+		}
+		s.jobsMu.Unlock()
+		done := make(chan struct{})
+		go func() {
+			s.jobsWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(45 * time.Second):
+		}
+	})
 }
 
 // guard enforces API key, Host and Origin rules before any handler.
@@ -173,6 +240,21 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 		methodNotAllowed(writer)
 		return
 	}
+	status := map[string]any{
+		"network": s.options.Network,
+		"wallet":  s.options.WalletAddress,
+	}
+	if s.options.Catalog == nil {
+		status["catalog"] = "unavailable"
+		status["clientDir"] = s.options.ClientDir != ""
+		if s.options.Status != nil {
+			for key, value := range s.options.Status() {
+				status[key] = value
+			}
+		}
+		writeJSON(writer, status)
+		return
+	}
 	entries, err := s.options.Catalog.List(request.Context())
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
@@ -190,18 +272,14 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 		}
 	}
 	seedPrice, blockPrice := s.options.Pricing.Defaults()
-	status := map[string]any{
-		"network":        s.options.Network,
-		"wallet":         s.options.WalletAddress,
-		"files":          len(entries),
-		"seeds":          len(seeds),
-		"readyFiles":     ready,
-		"failedFiles":    failed,
-		"unindexedFiles": len(entries) - ready - failed,
-		"seedPrice":      seedPrice,
-		"blockPrice":     blockPrice,
-		"pricedFiles":    len(s.options.Pricing.Files()),
-	}
+	status["files"] = len(entries)
+	status["seeds"] = len(seeds)
+	status["readyFiles"] = ready
+	status["failedFiles"] = failed
+	status["unindexedFiles"] = len(entries) - ready - failed
+	status["seedPrice"] = seedPrice
+	status["blockPrice"] = blockPrice
+	status["pricedFiles"] = len(s.options.Pricing.Files())
 	if s.options.Status != nil {
 		for key, value := range s.options.Status() {
 			status[key] = value
@@ -226,6 +304,10 @@ type fileView struct {
 func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(writer)
+		return
+	}
+	if s.options.Catalog == nil || s.options.Pricing == nil {
+		http.Error(writer, "catalog is unavailable in pure-buyer mode", http.StatusNotFound)
 		return
 	}
 	entries, err := s.options.Catalog.List(request.Context())
@@ -261,6 +343,10 @@ func (s *Server) handleRefresh(writer http.ResponseWriter, request *http.Request
 		methodNotAllowed(writer)
 		return
 	}
+	if s.options.Catalog == nil {
+		http.Error(writer, "catalog is unavailable in pure-buyer mode", http.StatusNotFound)
+		return
+	}
 	var body struct {
 		Force bool `json:"force"`
 	}
@@ -289,6 +375,10 @@ type batchRequest struct {
 func (s *Server) handleBatch(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer)
+		return
+	}
+	if s.options.Catalog == nil || s.options.Pricing == nil {
+		http.Error(writer, "catalog is unavailable in pure-buyer mode", http.StatusNotFound)
 		return
 	}
 	var body batchRequest
@@ -344,6 +434,10 @@ func (s *Server) handleDefaults(writer http.ResponseWriter, request *http.Reques
 		methodNotAllowed(writer)
 		return
 	}
+	if s.options.Pricing == nil {
+		http.Error(writer, "pricing is unavailable in pure-buyer mode", http.StatusNotFound)
+		return
+	}
 	var body struct {
 		SeedPrice  string `json:"seedPrice"`
 		BlockPrice string `json:"blockPrice"`
@@ -376,6 +470,10 @@ type fileRequest struct {
 }
 
 func (s *Server) handleFile(writer http.ResponseWriter, request *http.Request) {
+	if s.options.Pricing == nil {
+		http.Error(writer, "pricing is unavailable in pure-buyer mode", http.StatusNotFound)
+		return
+	}
 	switch request.Method {
 	case http.MethodPut, http.MethodDelete:
 	default:

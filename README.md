@@ -21,7 +21,7 @@ go build -o km ./cmd/km
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
 ```
 
-协议 SDK 使用正式 `github.com/bsv8/BitFSProtocol v0.5.1`，
+协议 SDK 使用正式 `github.com/bsv8/BitFSProtocol v0.6.0`，
 包含买方本地付款证据 API（`BuyerPoolEvidence.latestBuyerPayment`、`buyer.InspectPool`）。
 网络层使用正式 `github.com/bsv8/bitcoin-libp2p v0.3.2`。
 两者均通过远端 module 下载及 go.sum 校验，不使用相邻 SDK replace；构建不要求相邻 SDK 源码。
@@ -30,6 +30,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
 
 ```sh
 km <seed-hash>                    # 下载一个文件（发布需求，等待卖方；默认输出到当前目录）
+km                               # 纯买方 Web Admin（下载执行管理：列表/重新下载/切回旧执行）
 km -out <dir> <seed>              # 指定下载输出目录
 km -listen /ip4/0.0.0.0/tcp/0 <seed>  # 向卖方公布的监听地址
 km -server <path>                 # 售卖目录：扫描 + 定价维护
@@ -38,11 +39,49 @@ km -server <path> -admin 127.0.0.1:8790  # Web Admin（缺省开启；空字符�
 km -config <file> ...             # 指定配置文件路径
 ```
 
+纯买方访问 Web Admin（无 `-server` 目录时）：先在 `config.json` 设置
+`admin.apiKey`（任意非空口令），解锁钱包后运行一次 `km`（无参数）保持常驻，
+打开终端打印的 `http://127.0.0.1:8790/`，用该 API Key 登录。
+该模式只服务 `~/.km/client` 下的下载执行管理（`/api/downloads/*`），不要求
+卖方目录；目录与定价接口返回 404。下载过程中 `km <seed>` 也会按同一
+`-admin` 地址在后台启动买方 Admin，退出即关闭；需要常驻管理页时用无参数
+`km` 模式。监听地址只允许回环（127.0.0.1/::1/localhost），API Key 经
+Authorization Bearer 或 X-API-Key 校验并附 Host/Origin 检查。
+
+## 下载执行与重新下载
+
+- 同一 Seed 的每次购买称为一个执行（`e1`、`e2`…），宿主侧池/账本/ journal 键
+  统一加前缀（`e1/<seed>/pool/1`…），内核事件仍用原始池 ID；无裸 ID 兼容分支。
+- 每个执行独立保存快照与 outbox（`scheduler/tasks/<seed>.<exec>.json`），当前
+  执行由指针文件（`scheduler/tasks/<seed>.current`）指向。创建先写新快照再原子
+  切换指针：崩溃时指针仍指向旧执行，中断产生的新鲜孤儿（revision 0）会被下次
+  创建复用，不堆积。
+- 正常 `km <seed>` 只解析指针并续跑当前执行，从不自动重建；新执行只能经
+  Admin Web 登记、切换指针并在后台启动（同一进程内 headless 运行，无 TUI、
+  自动取首个推荐名、日志走 stderr；后台任务状态见 `GET /api/downloads/{seed}/job`）。
+  后台任务绑定创建时的执行编号：启动器传入 pin，下载器持锁后复核，指针已移动
+  则明确拒绝，绝不悄悄启动其他执行。
+- 同一进程的并发下载（含卖方与买方）共享同一 Owner/网络/费率的钱包分配器，
+  不再为同一 UTXO 重复分配；Admin 关闭时取消后台任务并有界等待其收尾落盘，
+  之后才退出，进程退出不会截断收尾。
+- 重新下载门禁：仅当执行已停止（失败或正常停止均可，已完成除外）、无
+  pending/unresolved 购买授权、无 opening/open/problem/closing 池、资金非
+  problem 时允许；广播后的 `closing` 仍算未决（不代表链上确认），一律拒绝。
+- 旧责任保留实际处理入口：旧快照原地保留、账本与 journal 键不改名不搬移；
+  新旧池命名空间不同，迟到旧结果仍路由到旧执行。Admin 可将指针切回任一旧执行
+  并直接启动（switch 传 `start: true`），后台驱动该执行的交付、关池与退款，
+  而不只是审计查看或“再运行命令”的提示。
+- 同一 Seed 同时只允许一个下载持有者（`scheduler/.active.lock` 文件锁）；
+  重新下载与切换在持有锁时返回 409，必须先停掉在跑的 `km <seed>`。
+- 点击“重新下载”登记新执行、切换指针并在后台启动（返回 `execId` 与 job 状态），
+  而不是只归档返回编号；新执行的内核配置沿用当前执行，复用清单按
+  已验证 staging 重建（有序哈希全列，复用只收哈希验过的块）。
+
 钱包使用运行期内存 UTXO 分配池。分配即冻结；调用者成功提交交易（含 already-in-mempool）后立即注入自有找零；明确的节点交易拒绝主动释放，未知网络错误不释放。付款、买方出资、退款及卖方关池都经过同一成功注入出口。
 
 manager 无持久化、恢复、交易审批或冲突取证。实例销毁丢弃冻结及本地找零，不读旧 manager 文件或 unresolved 日志重建资金；跨重启 WoC 延迟风险已明确接受。业务台账仍记录自身交易结果，不作为 manager 补偿账本。
 
-正式依赖精确锁定已发布的 Go 根 module `github.com/bsv8/keymaster.cc-utxo-manager v0.4.0`，使用可用 P2PKH UTXO 注入接口，无组件本地替换。构建与业务 E2E 验收分别报告。
+正式依赖精确锁定已发布的 Go 根 module `github.com/bsv8/keymaster.cc-utxo-manager v0.7.0`，使用可用 P2PKH UTXO 注入接口，无组件本地替换。构建与业务 E2E 验收分别报告。
 
 systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
 `BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。
@@ -124,7 +163,7 @@ SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一
 UTXO manager 唯一 Go 源码位于 `../keymaster.cc-utxo-manager/utxo/`，导入路径为 `github.com/bsv8/keymaster.cc-utxo-manager/utxo`，只依赖标准库，不保留内部副本。
 `internal/wallet` 负责 WoC 初始建池、真实构建/签名/提交及三类回执判断。成功后筛选当前钱包非零 P2PKH 输出，有输出才调用 `InjectP2pkhUtxos([{TxID,Vout,Value}])`；manager 不检查脚本归属，不上报已花费输入；原分配继续锁定，成功或广播未知不得释放，可连续使用找零，不隐式刷新 WoC；显式 `Refresh` 获取新观察。
 
-正式依赖锁定 manager v0.4.0，使用产品原 go.mod 构建，不设置组件本地 replace。工程仓 `npm run parity:utxo-manager` 对照组件 TS／Go 源码，发布依赖验证与源码验证分开。无持久化或恢复测试契约。
+正式依赖锁定 manager v0.7.0，使用产品原 go.mod 构建，不设置组件本地 replace。工程仓 `npm run parity:utxo-manager` 对照组件 TS／Go 源码，发布依赖验证与源码验证分开。无持久化或恢复测试契约。
 `internal/woc` 提供 `listunspent`、`tx/raw`、`tx/<txid>/hex` 与 `chain/info`，Base URL 由
 `bsvNetwork` 推导。
 
@@ -132,8 +171,8 @@ UTXO manager 唯一 Go 源码位于 `../keymaster.cc-utxo-manager/utxo/`，导�
 
 调度器 TS 与 Go 统一在独立项目维护，Go 按最新 TS 规则同步，不允许业务分叉：
 
-- `../keymaster.cc-download-scheduler/src/`：唯一 TS 源码，包名 `keymaster-trade-scheduler`，钱包使用 npm `0.1.0`。
-- `../keymaster.cc-download-scheduler/scheduler/`：唯一 Go 源码，CLI 导入 `github.com/bsv8/keymaster.cc-download-scheduler/scheduler`；精确使用根 module `v0.1.1`，无组件本地 `replace`，构建不需要 Node.js。
+- `../keymaster.cc-download-scheduler/src/`：唯一 TS 源码，包名 `keymaster-trade-scheduler`，钱包当前使用 npm `0.2.0`（0.3.0 待 npm 发布后跟进）。
+- `../keymaster.cc-download-scheduler/scheduler/`：唯一 Go 源码，CLI 导入 `github.com/bsv8/keymaster.cc-download-scheduler/scheduler`；精确使用根 module `v0.3.0`，无组件本地 `replace`，构建不需要 Node.js。
 
 两端均为纯状态机（createTask/step/restoreTask），无时钟、网络、钱包或存储副作用。
 交叉测试在工程仓 `test/keymaster.cc-cli/scheduler/`（状态、命令、视图、唤醒、恢复及资金不变量）；
@@ -150,7 +189,7 @@ TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
 | `internal/pricing` | 文件定价：缺省回退、文件独立价格、批量「覆盖全部/仅未定价」、无目录继承 |
 | `internal/bitfs` | 买方协议执行层：开池（先验后付）→ 采购（Kind 5/6/7，本地付款日志）→ 关池（Kind 12/13 + 按 txid 观察） |
 | `internal/woc` | WhatsonChain 客户端：UTXO 查询、广播、按 txid 取回原文 |
-| `internal/host` | 调度器宿主：内核状态 + 命令 outbox 持久化、命令幂等执行、`open/download/drain/close` 与买方执行层接线、事实回灌 |
+| `internal/host` | 调度器宿主：按执行持久化内核状态 + 命令 outbox（`scheduler/tasks/<seed>.<exec>.json` + `.current` 指针）、命令幂等执行、`open/download/drain/close` 与买方执行层接线（宿主池键统一 `eN/` 前缀）、事实回灌 |
 | `internal/output` | 下载文件组装：以已验证 seed 为清单逐块校验、`<seed-hash>.km` 临时文件、安全唯一名原子改名与改名崩溃恢复 |
 | `internal/sell` | 卖方协议执行层：目录+定价报价、预签/验资/交付/收款/关池（卖方广播），exact 复用与先落盘后发送 |
 | `internal/arbitration` | 可信端点身份校验与仲裁 info v2 查询；新池预算使用实际条目费率，不提供完整提交/取回应用工作流 |
@@ -158,7 +197,7 @@ TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
 | `internal/discovery` | 需求发现：签名 Hash 请求发布（`bsv8.hash.request.v1`）与卖方验签监听 |
 | `internal/transport` | BitFS 传输：`/bitfs/wire/1.0.0` + uvarint 分帧（与浏览器同一协议），卖方拨号/买方接流 |
 | `internal/signal` | 浏览器 WebRTC 信令：`bsv8.webrtc.signal.v1` 收件箱消息 ↔ interconnect Envelope，会话 ID 与 PeerId 派生 |
-| `internal/admin` | Web Admin：解锁后启动的本地 HTTP API + 内嵌单页界面，API Key / Host / Origin 保护，文件与定价管理 |
+| `internal/admin` | Web Admin：解锁后启动的本地 HTTP API + 内嵌单页界面，API Key / Host / Origin 保护；卖方模式管文件与定价，常驻买方模式（`km` 无参数）与下载内嵌模式管下载执行（列表/重新下载/切回旧执行） |
 | `internal/ui` | 固定下载界面：阶段状态、进度条、地址二维码、TTY 原地刷新/非 TTY 普通日志 |
 
 `km -server <dir> -discover` 监听需求并按 locator 拨号买方；`-admin` 启动本地管理界面。

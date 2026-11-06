@@ -366,3 +366,78 @@ func (w *Wallet) Release(p *SpendResult) error {
 	w.revoked[p.preparedAllocation] = true
 	return nil
 }
+
+// Process-wide wallet sharing: at most one live Wallet per owner/network/fee
+// rate in this process. Separate instances would run independent FundingKernel
+// allocation pools, so two concurrent downloads (or a seller plus a buyer)
+// for the same key could allocate the same outpoint to two unbroadcast
+// transactions. A shared instance serializes all allocation through one pool
+// (every method already holds w.mu), so concurrent downloads can never
+// double-allocate. The first holder's chain client is kept; WoC clients are
+// stateless and equivalent per network.
+var (
+	sharedMu    sync.Mutex
+	sharedByKey = map[string]*sharedWallet{}
+)
+
+type sharedWallet struct {
+	wallet *Wallet
+	refs   int
+}
+
+// Shared returns the process-wide wallet for these options and a release
+// function. The caller must call release when done; the underlying wallet
+// closes when the last holder releases. Different fee rates get different
+// instances so one caller's rate never leaks into another's funding.
+func Shared(chain Chain, options Options) (*Wallet, func(), error) {
+	if len(options.PrivateKey) != 32 {
+		return nil, nil, errors.New("wallet: key is required")
+	}
+	key, _ := ec.PrivateKeyFromBytes(options.PrivateKey)
+	if key == nil {
+		return nil, nil, errors.New("wallet: invalid private key")
+	}
+	id := hex.EncodeToString(key.PubKey().Compressed()) + "|" + options.Network + "|" + strconv.FormatInt(options.FeeRateSatoshisPerKb, 10)
+	sharedMu.Lock()
+	if entry, ok := sharedByKey[id]; ok {
+		entry.refs++
+		w := entry.wallet
+		sharedMu.Unlock()
+		released := false
+		return w, func() {
+			sharedMu.Lock()
+			defer sharedMu.Unlock()
+			if released {
+				return
+			}
+			released = true
+			entry.refs--
+			if entry.refs <= 0 {
+				delete(sharedByKey, id)
+				_ = w.Close()
+			}
+		}, nil
+	}
+	w, err := New(chain, options)
+	if err != nil {
+		sharedMu.Unlock()
+		return nil, nil, err
+	}
+	entry := &sharedWallet{wallet: w, refs: 1}
+	sharedByKey[id] = entry
+	sharedMu.Unlock()
+	released := false
+	return w, func() {
+		sharedMu.Lock()
+		defer sharedMu.Unlock()
+		if released {
+			return
+		}
+		released = true
+		entry.refs--
+		if entry.refs <= 0 {
+			delete(sharedByKey, id)
+			_ = w.Close()
+		}
+	}, nil
+}

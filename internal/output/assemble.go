@@ -271,21 +271,21 @@ func (a *Assembler) loadSeed(seedHashHex string) ([]byte, error) {
 }
 
 // loadBlocks loads and verifies every block in seed order, returning the
-// payloads and the derived source size. The last staged block determines the
-// source size, exactly like the protocol's block-count rules.
+// payloads and the total size. Block boundaries come from the staged payloads
+// themselves: each payload must hash to its seed entry, and the total size is
+// their sum. Declared lengths are never consulted.
 func (a *Assembler) loadBlocks(ctx context.Context, seed []byte, info masterseed.SeedInfo, expected masterseed.Digest) ([][]byte, uint64, error) {
 	blockCount := info.BlockCount
 	if blockCount == 0 {
 		return nil, 0, nil
 	}
-	hashes := make([]masterseed.Digest, 0, blockCount)
 	payloads := make([][]byte, 0, blockCount)
+	var sourceSize uint64
 	for index := uint64(0); index < blockCount; index++ {
 		hash, err := masterseed.ReadBlockHash(ctx, bytes.NewReader(seed), info.SeedSize, index)
 		if err != nil {
 			return nil, 0, fmt.Errorf("output: read seed block %d: %w", index, err)
 		}
-		hashes = append(hashes, hash)
 		raw, err := a.store.Load("staging/" + hash.Hex())
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -293,50 +293,36 @@ func (a *Assembler) loadBlocks(ctx context.Context, seed []byte, info masterseed
 			}
 			return nil, 0, err
 		}
+		if len(raw) == 0 || uint64(len(raw)) > masterseed.BlockSize {
+			return nil, 0, fmt.Errorf("output: block %d has %d bytes, want 1..%d", index, len(raw), masterseed.BlockSize)
+		}
+		if _, err := masterseed.VerifyBlock(ctx, raw, hash); err != nil {
+			return nil, 0, fmt.Errorf("output: block %d does not hash to its seed entry: %w", index, err)
+		}
 		payloads = append(payloads, raw)
-	}
-	sourceSize := (blockCount-1)*masterseed.BlockSize + uint64(len(payloads[blockCount-1]))
-	for index := uint64(0); index < blockCount; index++ {
-		want, err := masterseed.ExpectedBlockSize(sourceSize, index)
-		if err != nil {
-			return nil, 0, fmt.Errorf("output: expected size for block %d: %w", index, err)
-		}
-		if uint64(len(payloads[index])) != want {
-			return nil, 0, fmt.Errorf("output: block %d has %d bytes, want %d", index, len(payloads[index]), want)
-		}
-		digest := masterseed.Sum256(payloads[index])
-		if !digest.Equal(hashes[index]) {
-			return nil, 0, fmt.Errorf("output: block %d does not hash to its seed entry", index)
-		}
-		if _, err := masterseed.VerifyBlockInSeed(ctx, bytes.NewReader(seed), expected, sourceSize, payloads[index]); err != nil {
-			return nil, 0, fmt.Errorf("output: block %d is not in the seed: %w", index, err)
-		}
+		sourceSize += uint64(len(raw))
 	}
 	return payloads, sourceSize, nil
 }
 
-// verifyFile re-verifies an already renamed file against the seed.
+// verifyFile re-verifies an already renamed file against the seed: the file
+// must equal the concatenation of the verified staged blocks in seed order,
+// with no trailing bytes. Block boundaries come from the staged blocks.
 func (a *Assembler) verifyFile(path string, seed []byte, info masterseed.SeedInfo, expected masterseed.Digest, sourceSize uint64) error {
-	file, err := os.Open(path)
+	payloads, total, err := a.loadBlocks(context.Background(), seed, info, expected)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	for index := uint64(0); index < info.BlockCount; index++ {
-		want, err := masterseed.ExpectedBlockSize(sourceSize, index)
-		if err != nil {
-			return err
-		}
-		buffer := make([]byte, want)
-		if _, err := io.ReadFull(file, buffer); err != nil {
-			return err
-		}
-		if _, err := masterseed.VerifyBlockInSeed(context.Background(), bytes.NewReader(seed), expected, sourceSize, buffer); err != nil {
-			return fmt.Errorf("output: renamed file block %d does not match the seed: %w", index, err)
-		}
+	if total != sourceSize {
+		return fmt.Errorf("output: staged content size %d does not match assembled size %d", total, sourceSize)
 	}
-	if _, err := file.Read(make([]byte, 1)); err != io.EOF {
-		return errors.New("output: renamed file has trailing bytes")
+	assembled := bytes.Join(payloads, nil)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(content, assembled) {
+		return errors.New("output: renamed file does not match the verified staged blocks")
 	}
 	return nil
 }

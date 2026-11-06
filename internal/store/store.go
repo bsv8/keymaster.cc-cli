@@ -212,3 +212,24 @@ func (s *Store) Remove(name string) error {
 	}
 	return nil
 }
+
+// Rename atomically moves one entry to another name within the same store.
+// It is used to retire a scheduler snapshot to its archived name; the move
+// either happens fully or not at all, so crash recovery stays unambiguous.
+func (s *Store) Rename(oldName, newName string) error {
+	oldPath, err := s.path(oldName)
+	if err != nil {
+		return err
+	}
+	newPath, err := s.path(newName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o700); err != nil {
+		return fmt.Errorf("store: create directory for rename: %w", err)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return fmt.Errorf("store: rename %s: %w", oldName, err)
+	}
+	return nil
+}

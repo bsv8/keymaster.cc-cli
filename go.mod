@@ -4,13 +4,13 @@ go 1.26.0
 
 require (
 	github.com/bsv-blockchain/go-sdk v1.7.2
-	github.com/bsv8/BitFSProtocol v0.5.1
+	github.com/bsv8/BitFSProtocol v0.6.0
 	github.com/bsv8/ChannelProtocol v0.6.0
 	github.com/bsv8/KeyHold/go/v2 v2.1.0
 	github.com/bsv8/MasterSeed v1.1.0
 	github.com/bsv8/SatSubscriptionProtocol v0.3.0
 	github.com/bsv8/bitcoin-libp2p v0.3.2
-	github.com/bsv8/keymaster.cc-download-scheduler v0.2.0
+	github.com/bsv8/keymaster.cc-download-scheduler v0.3.0
 	github.com/bsv8/keymaster.cc-utxo-manager v0.7.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/fxamacker/cbor/v2 v2.9.2

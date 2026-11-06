@@ -86,6 +86,12 @@ type BuyerPorts struct {
 	Now func() int64
 	// SeedHashHex is the task's seed identity.
 	SeedHashHex string
+	// ExecID scopes one purchase execution of the seed (e.g. "e1", "e2").
+	// Kernel pool/request/command IDs restart at zero per execution, so every
+	// host-side pool identity (ledger, journals, sessions) is namespaced with
+	// the execution id. Events fed back into the kernel always carry the raw
+	// kernel pool ID, never the namespaced form.
+	ExecID string
 	// RefundDelayBlocks overrides DefaultRefundDelayBlocks.
 	RefundDelayBlocks uint32
 	// OutputDir enables automatic file assembly once every block is staged.
@@ -121,6 +127,9 @@ func (p *BuyerPorts) validate() error {
 	}
 	if p.SeedHashHex == "" {
 		return errors.New("host: seed hash is required")
+	}
+	if !ValidateExecID(p.ExecID) {
+		return errors.New("host: valid exec id is required")
 	}
 	return nil
 }
@@ -207,6 +216,7 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	if err := p.validate(); err != nil {
 		return err
 	}
+	poolID := p.xpool(command.PoolID)
 	amount, err := positiveSats(command.Amount)
 	if err != nil {
 		return fmt.Errorf("host: open command amount: %w", err)
@@ -250,7 +260,7 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 	}
 	unlock := p.lockState()
 	preparation, err := p.Task.PreparePool(ctx, bitfs.PreparePoolInput{
-		PoolID:             command.PoolID,
+		PoolID:             poolID,
 		SellerID:           command.SellerID,
 		SessionID:          command.SessionID,
 		QuoteRaw:           record.QuoteRaw,
@@ -267,8 +277,8 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 		}
 		return p.openFailed(command, true, "prepare-failed")
 	}
-	p.bindPeer(command.PoolID, peer)
-	kind3, err := peer.Open(ctx, command.PoolID, preparation.Kind2)
+	p.bindPeer(poolID, peer)
+	kind3, err := peer.Open(ctx, poolID, preparation.Kind2)
 	if err != nil {
 		// The funding was never broadcast: release the prepared inputs so a
 		// retry can build a new funding transaction.
@@ -283,7 +293,7 @@ func (p *BuyerPorts) OpenPool(ctx context.Context, command scheduler.Command) er
 		// result instead of pretending it was released.
 		return p.unknown(command, command.PoolID)
 	}
-	if err := peer.Funding(ctx, command.PoolID, completion.Kind4); err != nil {
+	if err := peer.Funding(ctx, poolID, completion.Kind4); err != nil {
 		// The pool is open on chain but the seller did not acknowledge it;
 		// never silently continue as if the session existed.
 		return p.unknown(command, command.PoolID)
@@ -322,29 +332,30 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	if err := p.validate(); err != nil {
 		return err
 	}
-	peer, err := p.peerForPool(command.PoolID)
+	poolID := p.xpool(command.PoolID)
+	peer, err := p.peerForPool(poolID)
 	if err != nil {
 		return p.downloadRejected(command, err, false, "peer")
 	}
 	started := p.now()
 	unlock := p.lockState()
-	if err := bitfs.ReconcilePoolLedger(p.Task, command.PoolID); err != nil {
+	if err := bitfs.ReconcilePoolLedger(p.Task, poolID); err != nil {
 		unlock()
 		return p.downloadRejected(command, err, false, "ledger")
 	}
 	// Finish a pending round from its persisted verified bundle first: it may
 	// already contain the delivered bytes and its local payment.
-	if _, err := bitfs.CompletePendingRound(ctx, p.Task, command.PoolID, func(kind7 []byte) error {
+	if _, err := bitfs.CompletePendingRound(ctx, p.Task, poolID, func(kind7 []byte) error {
 		artifact, err := wire.ParseAs(wire.PaymentUpdate, kind7)
 		if err != nil {
 			return err
 		}
-		return peer.Payment(ctx, command.PoolID, artifact.Bytes())
+		return peer.Payment(ctx, poolID, artifact.Bytes())
 	}); err != nil {
 		unlock()
 		return p.downloadRejected(command, err, false, "pending-recovery")
 	}
-	purchased, err := bitfs.PurchasedHashes(p.Task.Store, command.PoolID)
+	purchased, err := bitfs.PurchasedHashes(p.Task.Store, poolID)
 	if err != nil {
 		unlock()
 		return p.downloadRejected(command, err, false, "journal")
@@ -359,14 +370,29 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 		}
 	}
 	if allPurchased {
+		// Idempotent re-emit: accepted bytes come from the staged verified
+		// bytes (purchased implies staged). Missing staged bytes mean storage
+		// loss; keep the funds-safe unresolved path instead of inventing a fact.
+		var acceptedBlockBytes int64
+		for _, id := range command.ContentIDs {
+			if id == p.SeedHashHex {
+				continue
+			}
+			staged, loadErr := p.Task.Store.Load("staging/" + id)
+			if loadErr != nil {
+				unlock()
+				return p.downloadRejected(command, loadErr, false, "staging")
+			}
+			acceptedBlockBytes += int64(len(staged))
+		}
 		unlock()
-		return p.emitDeliveryAndSettle(command, started)
+		return p.emitDeliveryAndSettle(command, started, acceptedBlockBytes)
 	}
 	if anyPurchased {
 		unlock()
 		return p.downloadRejected(command, errors.New("host: batch is only partially journaled"), false, "partial-journal")
 	}
-	pending, err := bitfs.PendingContentRequest(p.Task.Store, command.PoolID)
+	pending, err := bitfs.PendingContentRequest(p.Task.Store, poolID)
 	if err != nil {
 		unlock()
 		return p.downloadRejected(command, err, false, "pending")
@@ -374,7 +400,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	pendingAtStart := pending != nil
 
 	facts := p.Task.Facts()
-	meta, err := bitfs.LoadPoolMeta(p.Task.Store, command.PoolID)
+	meta, err := bitfs.LoadPoolMeta(p.Task.Store, poolID)
 	if err != nil {
 		unlock()
 		return p.downloadRejected(command, err, false, "pool")
@@ -401,7 +427,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	verified, err := buyer.AcceptQuote(facts, quoteRaw)
 	if err != nil {
 		if pendingAtStart {
-			delivered, resolveErr := bitfs.ResolveExpiredPending(p.Task, command.PoolID, "quote expired while a pending round existed")
+			delivered, resolveErr := bitfs.ResolveExpiredPending(p.Task, poolID, "quote expired while a pending round existed")
 			if resolveErr != nil {
 				unlock()
 				return p.downloadRejected(command, resolveErr, false, "pending-responsibility")
@@ -455,7 +481,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	if deadline <= nowUnix {
 		safeToRetry := !pendingAtStart
 		if pendingAtStart {
-			delivered, resolveErr := bitfs.ResolveExpiredPending(p.Task, command.PoolID, "delivery deadline passed while a pending round existed")
+			delivered, resolveErr := bitfs.ResolveExpiredPending(p.Task, poolID, "delivery deadline passed while a pending round existed")
 			if resolveErr != nil {
 				unlock()
 				return p.downloadRejected(command, resolveErr, false, "pending-responsibility")
@@ -471,7 +497,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	}
 	request, err := p.Task.PrepareContentRequest(ctx, bitfs.ContentRequestInput{
 		QuoteRaw:         quoteRaw,
-		PoolID:           command.PoolID,
+		PoolID:           poolID,
 		ContentHashes:    hashes,
 		DeliveryDeadline: content.UnixSeconds(deadline),
 		Seed:             seed,
@@ -489,7 +515,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 	}
 	if progressPeer, ok := peer.(ProgressPeer); ok {
 		var lastProgress int64
-		kind6, err = progressPeer.DeliverWithProgress(ctx, command.PoolID, request.Kind5, func(bytes int64) {
+		kind6, err = progressPeer.DeliverWithProgress(ctx, poolID, request.Kind5, func(bytes int64) {
 			// Unknown total only disables clamping, never progress itself:
 			// seed bytes are unknown, but stall detection still needs progress.
 			if totalBytes > 0 && bytes > totalBytes {
@@ -504,7 +530,7 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 			})
 		})
 	} else {
-		kind6, err = peer.Deliver(ctx, command.PoolID, request.Kind5)
+		kind6, err = peer.Deliver(ctx, poolID, request.Kind5)
 	}
 	if err != nil {
 		// The exact Kind 5 is already persisted; the seller may have delivered.
@@ -515,20 +541,28 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 
 	unlock = p.lockState()
 	result, err := p.Task.CompleteDelivery(ctx, bitfs.DeliveryInput{
-		PoolID: command.PoolID,
+		PoolID: poolID,
 		Kind5:  request.Kind5,
 		Kind6:  kind6,
 		Seed:   seed,
 	})
 	if err != nil {
 		authorizationID, idErr := bitfs.AuthorizationIDOfKind5(request.Kind5)
-		_, journaled, journalErr := bitfs.JournaledRound(p.Task.Store, command.PoolID, authorizationID)
+		_, journaled, journalErr := bitfs.JournaledRound(p.Task.Store, poolID, authorizationID)
 		if idErr == nil && journalErr == nil && journaled {
 			// The round is journaled: the local payment exists even though a
 			// later step failed. Never let the kernel buy the batch again.
+			// The persisted bundle carries the verified payloads for the
+			// accepted-bytes fact (journaled implies the bundle was saved).
+			bundle, bundleErr := bitfs.LoadDeliveryBundle(p.Task.Store, poolID, authorizationID)
+			if bundleErr != nil {
+				unlock()
+				p.noteError(command, bundleErr)
+				return p.downloadRejected(command, bundleErr, false, "delivery")
+			}
 			unlock()
 			p.noteError(command, err)
-			return p.emitDeliveryAndSettle(command, started)
+			return p.emitDeliveryAndSettle(command, started, p.acceptedBlockBytes(command, bundle.Payloads))
 		}
 		unlock()
 		return p.downloadRejected(command, err, false, "delivery")
@@ -552,15 +586,29 @@ func (p *BuyerPorts) DispatchDownload(ctx context.Context, command scheduler.Com
 		return p.downloadRejected(command, errors.New("host: kernel price and protocol payment disagree"), false, "price-mismatch")
 	}
 	unlock()
-	if err := peer.Payment(ctx, command.PoolID, result.Kind7); err != nil {
+	if err := peer.Payment(ctx, poolID, result.Kind7); err != nil {
 		// The payment update is local evidence and the round is journaled; the
 		// seller state can be re-established from the saved Kind 7 on reconnect.
 		p.noteError(command, err)
 	}
-	return p.emitDeliveryAndSettle(command, started)
+	return p.emitDeliveryAndSettle(command, started, p.acceptedBlockBytes(command, result.Payloads))
 }
 
-func (p *BuyerPorts) emitDeliveryAndSettle(command scheduler.Command, started int64) error {
+// acceptedBlockBytes sums verified block payload lengths for the accepted batch
+// (index-aligned with command.ContentIDs), excluding the seed and counting
+// each unique purchase once. Payloads are already hash-verified at this point.
+func (p *BuyerPorts) acceptedBlockBytes(command scheduler.Command, payloads [][]byte) int64 {
+	var total int64
+	for index, id := range command.ContentIDs {
+		if id == p.SeedHashHex || index >= len(payloads) {
+			continue
+		}
+		total += int64(len(payloads[index]))
+	}
+	return total
+}
+
+func (p *BuyerPorts) emitDeliveryAndSettle(command scheduler.Command, started int64, acceptedBlockBytes int64) error {
 	paid, err := paidForBatch(command, command.ContentIDs)
 	if err != nil {
 		return p.downloadRejected(command, err, false, "prices")
@@ -573,12 +621,13 @@ func (p *BuyerPorts) emitDeliveryAndSettle(command scheduler.Command, started in
 		started = 0
 	}
 	if err := p.emit("delivery-"+command.RequestID, scheduler.Event{
-		Type:      "delivery",
-		RequestID: command.RequestID,
-		Accepted:  append([]string(nil), command.ContentIDs...),
-		Paid:      paid.String(),
-		StartedAt: started,
-		EndedAt:   ended,
+		Type:               "delivery",
+		RequestID:          command.RequestID,
+		Accepted:           append([]string(nil), command.ContentIDs...),
+		Paid:               paid.String(),
+		AcceptedBlockBytes: &acceptedBlockBytes,
+		StartedAt:          started,
+		EndedAt:            ended,
 	}); err != nil {
 		return err
 	}
@@ -658,16 +707,17 @@ func (p *BuyerPorts) ClosePool(ctx context.Context, command scheduler.Command) e
 	if err := p.validate(); err != nil {
 		return err
 	}
-	peer, err := p.peerForPool(command.PoolID)
+	poolID := p.xpool(command.PoolID)
+	peer, err := p.peerForPool(poolID)
 	if err != nil {
 		return p.closeUnknown(command, err)
 	}
 	unlock := p.lockState()
-	if err := bitfs.ReconcilePoolLedger(p.Task, command.PoolID); err != nil {
+	if err := bitfs.ReconcilePoolLedger(p.Task, poolID); err != nil {
 		unlock()
 		return p.closeUnknown(command, err)
 	}
-	if poolRecord, ok := p.Task.Ledger.Pools()[command.PoolID]; ok && poolRecord.State == ledger.PoolClosed && poolRecord.RecoveryTxID != "" {
+	if poolRecord, ok := p.Task.Ledger.Pools()[poolID]; ok && poolRecord.State == ledger.PoolClosed && poolRecord.RecoveryTxID != "" {
 		// A previous attempt persisted the close but the closed fact did not
 		// reach the kernel: re-emit it instead of sending a second Kind 12.
 		unlock()
@@ -675,34 +725,34 @@ func (p *BuyerPorts) ClosePool(ctx context.Context, command scheduler.Command) e
 	}
 	// Never close over an accepted but unjournaled round: it may already be a
 	// seller delivery and an outstanding buyer obligation.
-	if _, err := bitfs.CompletePendingRound(ctx, p.Task, command.PoolID, func(kind7 []byte) error {
+	if _, err := bitfs.CompletePendingRound(ctx, p.Task, poolID, func(kind7 []byte) error {
 		artifact, err := wire.ParseAs(wire.PaymentUpdate, kind7)
 		if err != nil {
 			return err
 		}
-		return peer.Payment(ctx, command.PoolID, artifact.Bytes())
+		return peer.Payment(ctx, poolID, artifact.Bytes())
 	}); err != nil {
 		unlock()
 		return p.closeUnknown(command, err)
 	}
-	if pending, err := bitfs.PendingContentRequest(p.Task.Store, command.PoolID); err != nil {
+	if pending, err := bitfs.PendingContentRequest(p.Task.Store, poolID); err != nil {
 		unlock()
 		return p.closeUnknown(command, err)
 	} else if pending != nil {
 		unlock()
 		return errors.New("host: refusing to close with an accepted but unjournaled round")
 	}
-	preparation, err := p.Task.PrepareClose(ctx, command.PoolID)
+	preparation, err := p.Task.PrepareClose(ctx, poolID)
 	unlock()
 	if err != nil {
 		return p.closeUnknown(command, err)
 	}
-	kind13, err := peer.Close(ctx, command.PoolID, preparation.Kind12)
+	kind13, err := peer.Close(ctx, poolID, preparation.Kind12)
 	if err != nil {
 		return p.closeUnknown(command, err)
 	}
 	unlock = p.lockState()
-	completion, err := p.Task.CompleteClose(ctx, command.PoolID, kind13)
+	completion, err := p.Task.CompleteClose(ctx, poolID, kind13)
 	if err != nil {
 		unlock()
 		return p.closeUnknown(command, err)
@@ -711,7 +761,7 @@ func (p *BuyerPorts) ClosePool(ctx context.Context, command scheduler.Command) e
 		unlock()
 		return p.closeUnknown(command, err)
 	}
-	poolRecord, ok := p.Task.Ledger.Pools()[command.PoolID]
+	poolRecord, ok := p.Task.Ledger.Pools()[poolID]
 	if !ok {
 		unlock()
 		return p.closeUnknown(command, err)

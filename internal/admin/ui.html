@@ -60,6 +60,13 @@
     <thead><tr><th>文件</th><th>大小</th><th>Seed / 块价</th><th>来源</th><th></th></tr></thead>
     <tbody id="files"><tr><td colspan="5" class="muted">加载中</td></tr></tbody>
   </table>
+  <h2>下载执行</h2>
+  <p class="muted">每个 Seed 按执行隔离（e1、e2…）：快照与 outbox 独立保存，当前执行由指针指向。失败／停止且无未决责任的执行可经“重新下载”创建并启动新执行；旧执行保留快照，可切回并启动以继续处理交付、关池与退款。</p>
+  <div class="row">
+    <button id="refreshDownloads" type="button">刷新下载列表</button>
+    <span id="dlHint" class="muted"></span>
+  </div>
+  <div id="downloads"><p class="muted">加载中</p></div>
 </div>
 <script>
 const $ = id => document.getElementById(id);
@@ -83,21 +90,54 @@ function showAdmin() {
 async function refresh() {
   const status = await call('/api/status');
   $('network').textContent = '(' + status.network + ')';
-  $('defaultSeedPrice').value = status.seedPrice;
-  $('defaultBlockPrice').value = status.blockPrice;
+  $('defaultSeedPrice').value = status.seedPrice || '';
+  $('defaultBlockPrice').value = status.blockPrice || '';
   $('status').textContent = JSON.stringify(status, null, 2);
-  const { files } = await call('/api/files');
-  $('files').innerHTML = files.map(file => `
-    <tr>
-      <td><code>${escapeHtml(file.path)}</code><div class="muted">${escapeHtml(file.seedHash)}</div><div>${escapeHtml(({ready:'可供应',unindexed:'尚未索引',failed:'索引失败'})[file.state] || file.state)} ${escapeHtml(file.error || '')}</div></td>
-      <td>${file.size === null ? '大小未知' : file.size + ' B'}<div class="muted">${file.blocks === null ? '块数待索引' : file.blocks + ' 块'}</div></td>
-      <td>${file.seedPrice} / ${file.blockPrice}</td>
-      <td class="muted">${file.override ? '独立定价' : '缺省'}</td>
-      <td class="row">
-        <button data-edit="${escapeHtml(file.path)}">改价</button>
-        <button data-clear="${escapeHtml(file.path)}">恢复缺省</button>
-      </td>
-    </tr>`).join('');
+  try {
+    const { files } = await call('/api/files');
+    $('files').innerHTML = files.map(file => `
+      <tr>
+        <td><code>${escapeHtml(file.path)}</code><div class="muted">${escapeHtml(file.seedHash)}</div><div>${escapeHtml(({ready:'可供应',unindexed:'尚未索引',failed:'索引失败'})[file.state] || file.state)} ${escapeHtml(file.error || '')}</div></td>
+        <td>${file.size === null ? '大小未知' : file.size + ' B'}<div class="muted">${file.blocks === null ? '块数待索引' : file.blocks + ' 块'}</div></td>
+        <td>${file.seedPrice} / ${file.blockPrice}</td>
+        <td class="muted">${file.override ? '独立定价' : '缺省'}</td>
+        <td class="row">
+          <button data-edit="${escapeHtml(file.path)}">改价</button>
+          <button data-clear="${escapeHtml(file.path)}">恢复缺省</button>
+        </td>
+      </tr>`).join('');
+  } catch (error) {
+    $('files').innerHTML = '<tr><td colspan="5" class="muted">目录不可用（纯买方模式）</td></tr>';
+  }
+  await refreshDownloads();
+}
+async function refreshDownloads() {
+  try {
+    const { downloads } = await call('/api/downloads');
+    if (!downloads || downloads.length === 0) {
+      $('downloads').innerHTML = '<p class="muted">暂无下载执行；先运行一次 <code>km &lt;seed&gt;</code> 创建 e1。</p>';
+      return;
+    }
+    $('downloads').innerHTML = downloads.map(dl => `
+      <div style="margin:1rem 0;padding:.6rem;border:1px solid var(--line);border-radius:.4rem">
+        <div><code>${escapeHtml(dl.seedHash)}</code> <span class="muted">当前 ${escapeHtml(dl.current || '无')}</span></div>
+        ${(dl.execs || []).map(ex => `
+          <div class="row" style="margin-top:.4rem">
+            <code>${escapeHtml(ex.execId)}</code>
+            <span class="muted">${escapeHtml(ex.execution)}/${escapeHtml(ex.funds)} ${ex.completed}/${ex.total} 池${ex.pools} outbox${ex.outbox}${ex.current ? ' 当前' : ''}</span>
+            <span class="muted">${ex.failure ? '失败:' + escapeHtml(ex.failure) : ''}</span>
+            ${ex.current ? '' : `<button data-switch="${escapeHtml(dl.seedHash)}|${escapeHtml(ex.execId)}">切回并启动</button>`}
+          </div>`).join('')}
+        <div class="row" style="margin-top:.4rem">
+          <button data-redownload="${escapeHtml(dl.seedHash)}">重新下载</button>
+          <button data-detail="${escapeHtml(dl.seedHash)}">详情</button>
+          <button data-job="${escapeHtml(dl.seedHash)}">后台任务</button>
+          <span class="muted" id="dl-${escapeHtml(dl.seedHash)}"></span>
+        </div>
+      </div>`).join('');
+  } catch (error) {
+    $('downloads').innerHTML = '<p class="muted">下载列表不可用（' + escapeHtml(error.message || error) + '）</p>';
+  }
 }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function showError(error) { $('hint').textContent = String(error.message || error); }
@@ -167,6 +207,33 @@ $('files').onclick = async event => {
     } else return;
     await refresh();
   } catch (error) { showError(error); }
+};
+$('refreshDownloads').onclick = () => refreshDownloads();
+$('downloads').onclick = async event => {
+  const redownload = event.target.dataset.redownload;
+  const detail = event.target.dataset.detail;
+  const job = event.target.dataset.job;
+  const sw = event.target.dataset.switch;
+  try {
+    if (redownload) {
+      if (!confirm('为 ' + redownload + ' 创建新执行并在后台启动？旧执行保留，可切回。')) return;
+      const result = await call('/api/downloads/' + encodeURIComponent(redownload) + '/redownload', { method:'POST', body:'{}' });
+      $('dlHint').textContent = '已启动 ' + result.execId + '（后台任务进行中，可点“后台任务”查看）';
+      await refreshDownloads();
+    } else if (sw) {
+      const [seed, execId] = sw.split('|');
+      if (!confirm('将 ' + seed + ' 的当前执行切换到 ' + execId + ' 并在后台启动，以处理其交付/关池/退款？')) return;
+      const result = await call('/api/downloads/' + encodeURIComponent(seed) + '/switch', { method:'POST', body: JSON.stringify({ execId, start: true }) });
+      $('dlHint').textContent = result.started ? ('已启动 ' + execId + '（后台任务进行中）') : ('已切换到 ' + execId);
+      await refreshDownloads();
+    } else if (detail) {
+      const info = await call('/api/downloads/' + encodeURIComponent(detail));
+      alert(JSON.stringify(info, null, 2).slice(0, 2000));
+    } else if (job) {
+      const info = await call('/api/downloads/' + encodeURIComponent(job) + '/job');
+      alert(info.job ? JSON.stringify(info.job, null, 2) : '暂无后台任务');
+    } else return;
+  } catch (error) { $('dlHint').textContent = String(error.message || error); }
 };
 // Auto-login only when the stored key still verifies; otherwise stay locked.
 if (key) {

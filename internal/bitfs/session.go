@@ -111,9 +111,13 @@ func (t *BuyerTask) RunPurchase(ctx context.Context, session PurchaseSession, op
 		return nil, errors.New("bitfs: quote is bound to another buyer key")
 	}
 	if options.Progress != nil {
+		detail := "报价未声明文件大小（待 Seed 验证）"
+		if verified.Terms().FileSizeBytes > 0 {
+			detail = fmt.Sprintf("报价声明 %d 字节 / %d 块（待 Seed 验证）", verified.Terms().FileSizeBytes, masterseed.BlockCountForSourceSize(verified.Terms().FileSizeBytes))
+		}
 		options.Progress(PurchaseProgress{
 			Stage:  "quote",
-			Detail: fmt.Sprintf("%d 字节 / %d 块", verified.Terms().FileSizeBytes, masterseed.BlockCountForSourceSize(verified.Terms().FileSizeBytes)),
+			Detail: detail,
 		})
 	}
 	arbiters := verified.SupportedArbiterPublicKeys()
@@ -323,7 +327,12 @@ func (t *BuyerTask) RunPurchase(ctx context.Context, session PurchaseSession, op
 		if err != nil {
 			return nil, fmt.Errorf("bitfs: seed was not staged: %w", err)
 		}
-		blockCount := masterseed.BlockCountForSourceSize(verified.Terms().FileSizeBytes)
+		// Block list comes from the verified seed bytes only; the quoted size
+		// never decides which blocks exist.
+		if uint64(len(seed))%uint64(masterseed.DigestSize) != 0 {
+			return nil, fmt.Errorf("bitfs: staged seed length %d is not a multiple of %d", len(seed), masterseed.DigestSize)
+		}
+		blockCount := uint64(len(seed)) / uint64(masterseed.DigestSize)
 		blockHashes := make([][]byte, 0, blockCount)
 		for index := uint64(0); index < blockCount; index++ {
 			hash, err := masterseed.ReadBlockHash(ctx, bytes.NewReader(seed), uint64(len(seed)), index)
@@ -382,7 +391,11 @@ func (t *BuyerTask) RunPurchase(ctx context.Context, session PurchaseSession, op
 	}
 	seed, err := t.Store.Load("staging/seed")
 	if err == nil {
-		blockCount := masterseed.BlockCountForSourceSize(verified.Terms().FileSizeBytes)
+		// 清单以已验证 Seed 为准，绝不用报价声明长度。
+		if uint64(len(seed))%uint64(masterseed.DigestSize) != 0 {
+			return nil, fmt.Errorf("bitfs: staged seed length %d is not a multiple of %d", len(seed), masterseed.DigestSize)
+		}
+		blockCount := uint64(len(seed)) / uint64(masterseed.DigestSize)
 		for index := uint64(0); index < blockCount; index++ {
 			hash, err := masterseed.ReadBlockHash(ctx, bytes.NewReader(seed), uint64(len(seed)), index)
 			if err != nil {
@@ -586,21 +599,25 @@ func (t *BuyerTask) exchangeContent(ctx context.Context, session PurchaseSession
 	return nil
 }
 
-// purchasePoolAmount budgets a pool that covers every content price plus a
-// settlement miner fee and the queried fee for the largest delivery batch.
+// purchasePoolAmount budgets a legacy direct pool that covers seed plus a
+// size-hinted block set, settlement miner fee and the queried fee for the
+// largest delivery batch. It belongs to the dev-only --legacy-direct path
+// (default off); the product scheduler flow (download.Run) funds per content
+// from kernel commands and never uses the quoted size. Unknown size (0) funds
+// the seed only; further blocks then require the scheduler path.
+// Actual batches always price from the verified seed, so a wrong quoted size
+// can only over- or under-fund this dev pool, never misprice content.
 func purchasePoolAmount(terms *content.FileQuoteTerms, fee arbitration.Info) (uint64, error) {
 	total := new(big.Int).SetUint64(terms.SeedPriceSatoshis)
 	blockCount := masterseed.BlockCountForSourceSize(terms.FileSizeBytes)
-	for index := uint64(0); index < blockCount; index++ {
-		size, err := masterseed.ExpectedBlockSize(terms.FileSizeBytes, index)
-		if err != nil {
-			return 0, err
+	if blockCount > 0 {
+		total.Add(total, new(big.Int).SetUint64(terms.TailPriceSatoshis))
+		if blockCount > 1 {
+			total.Add(total, new(big.Int).Mul(
+				new(big.Int).SetUint64(terms.FullBlockPriceSatoshis),
+				new(big.Int).SetUint64(blockCount-1),
+			))
 		}
-		price, err := content.BlockPriceSatoshis(terms.FullBlockPriceSatoshis, size)
-		if err != nil {
-			return 0, err
-		}
-		total.Add(total, new(big.Int).SetUint64(price))
 	}
 	items := blockCount
 	if items > uint64(terms.MaxBlocksPerBatch) {

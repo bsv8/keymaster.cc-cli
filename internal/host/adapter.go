@@ -3,8 +3,10 @@
 // It owns three pieces:
 //
 //   - Adapter: the persisted kernel state plus the command outbox
-//     (scheduler/tasks/<taskId>.json). Facts enter through Handle, commands
-//     leave through the outbox and are only removed by Settle.
+//     (scheduler/tasks/<seed>.<exec>.json, one file per execution; the
+//     current pointer lives in scheduler/tasks/<seed>.current). Facts enter
+//     through Handle, commands leave through the outbox and are only removed
+//     by Settle.
 //   - Executor: commandId-idempotent dispatch to the execution ports.
 //   - BuyerPorts: the buyer execution layer (BitFSProtocol steps over the client
 //     store/fund ledger) behind an injected peer for protocol transport.
@@ -37,51 +39,73 @@ type OutboxEntry struct {
 }
 
 type snapshot struct {
-	Format   string          `json:"format"`
-	Version  int             `json:"version"`
-	TaskID   string          `json:"taskId"`
-	SeedHash string          `json:"seedHash"`
-	State    scheduler.State `json:"state"`
-	Outbox   []OutboxEntry   `json:"outbox"`
+	Format   string `json:"format"`
+	Version  int    `json:"version"`
+	SeedHash string `json:"seedHash"`
+	// ExecID scopes one purchase execution of the seed ("e1", "e2", ...).
+	// Every execution uses the same prefixed host keys
+	// ("e<N>/<seedHash>/pool/..."); there is no bare-ID branch.
+	ExecID string          `json:"execId"`
+	State  scheduler.State `json:"state"`
+	Outbox []OutboxEntry   `json:"outbox"`
 }
 
-// AdapterInit describes a fresh task; it is ignored when a snapshot exists.
-// The Scheduler instance carries the shared kernel configuration.
+// AdapterInit describes one execution's task; it is ignored when that
+// execution's snapshot already exists. The Scheduler instance carries the
+// shared kernel configuration.
 type AdapterInit struct {
 	// Scheduler is the shared download scheduler instance (owner/network lifecycle).
 	Scheduler *scheduler.Scheduler
 	// Create carries the task identity and (optionally) the verified local file info.
 	Create scheduler.CreateTaskInput
+	// ExecID scopes one purchase execution of the seed ("e1", "e2", ...).
+	// Every execution uses the same prefixed host keys. The per-execution
+	// snapshot lives in scheduler/tasks/<seed>.<exec>.json; the current
+	// pointer lives in scheduler/tasks/<seed>.current.
+	ExecID string
 	// Clock supplies ReceivedAt/OccurredAt defaults for events that do not
 	// carry them. It must be monotonic.
 	Clock func() int64
 }
 
-// Adapter is one task's scheduler host state.
+// Adapter is one execution's scheduler host state. The snapshot file holds
+// that execution's kernel state and outbox; the seed-level pointer decides
+// which execution is current.
 type Adapter struct {
 	store    *store.Store
 	path     string
-	taskID   string
 	seedHash string
+	execID   string
 	clock    func() int64
 	state    scheduler.State
 	outbox   []OutboxEntry
 }
 
-// OpenAdapter restores the snapshot for init.Create.TaskID or creates the task and
-// persists it immediately.
+// ExecID returns the execution this adapter drives.
+func (a *Adapter) ExecID() string { return a.execID }
+
+// SeedHash returns the seed this adapter drives.
+func (a *Adapter) SeedHash() string { return a.seedHash }
+
+// OpenAdapter restores the snapshot for init.Create.SeedHash + init.ExecID or
+// creates that execution's task and persists it immediately. Callers resolve
+// the current execution via CurrentExecID and create new executions via
+// CreateExecution + SwitchCurrent; this function never touches the pointer.
 func OpenAdapter(s *store.Store, init AdapterInit) (*Adapter, error) {
 	if s == nil {
 		return nil, errors.New("host: store is required")
 	}
-	if init.Create.TaskID == "" || init.Create.SeedHash == "" {
-		return nil, errors.New("host: taskId and seedHash are required")
+	if init.Create.SeedHash == "" {
+		return nil, errors.New("host: seedHash is required")
+	}
+	if !ValidateExecID(init.ExecID) {
+		return nil, errors.New("host: valid execID (e1, e2, ...) is required")
 	}
 	adapter := &Adapter{
 		store:    s,
-		path:     "scheduler/tasks/" + init.Create.TaskID + ".json",
-		taskID:   init.Create.TaskID,
+		path:     ExecSnapshotPath(init.Create.SeedHash, init.ExecID),
 		seedHash: init.Create.SeedHash,
+		execID:   init.ExecID,
 		clock:    init.Clock,
 	}
 	if adapter.clock == nil {
@@ -96,10 +120,13 @@ func OpenAdapter(s *store.Store, init AdapterInit) (*Adapter, error) {
 		if stored.Format != SnapshotFormat || stored.Version != SnapshotVersion {
 			return nil, errors.New("host: unsupported scheduler snapshot")
 		}
-		if stored.TaskID != init.Create.TaskID || stored.SeedHash != init.Create.SeedHash {
-			return nil, errors.New("host: scheduler snapshot belongs to another task")
+		if stored.SeedHash != init.Create.SeedHash {
+			return nil, errors.New("host: scheduler snapshot belongs to another download")
 		}
-		if stored.State.TaskID != init.Create.TaskID || stored.State.SeedHash != init.Create.SeedHash {
+		if stored.ExecID != init.ExecID {
+			return nil, errors.New("host: scheduler snapshot belongs to another execution")
+		}
+		if stored.State.SeedHash != init.Create.SeedHash {
 			return nil, errors.New("host: scheduler snapshot state does not match its header")
 		}
 		state, err := scheduler.RestoreTask(stored.State)
@@ -149,8 +176,8 @@ func (a *Adapter) save() error {
 	encoded, err := json.MarshalIndent(snapshot{
 		Format:   SnapshotFormat,
 		Version:  SnapshotVersion,
-		TaskID:   a.taskID,
 		SeedHash: a.seedHash,
+		ExecID:   a.execID,
 		State:    a.state,
 		Outbox:   a.outbox,
 	}, "", "  ")
@@ -163,20 +190,20 @@ func (a *Adapter) save() error {
 // Handle applies one fact, persists the new state with the extended outbox and
 // returns the step result. The caller executes the returned commands.
 func (a *Adapter) Handle(event scheduler.Event) (output *scheduler.Result, failure error) {
-	bitfsdebug.Log("keymaster.cc-cli", "scheduler.event.received", func() any { return map[string]any{"taskId": a.taskID, "seedHashHex": a.seedHash, "event": event} })
+	bitfsdebug.Log("keymaster.cc-cli", "scheduler.event.received", func() any { return map[string]any{"seedHashHex": a.seedHash, "event": event} })
 	defer func() {
 		bitfsdebug.Log("keymaster.cc-cli", "scheduler.decision", func() any {
-			return map[string]any{"taskId": a.taskID, "seedHashHex": a.seedHash, "result": output, "state": a.state, "error": failure}
+			return map[string]any{"seedHashHex": a.seedHash, "result": output, "state": a.state, "error": failure}
 		})
 	}()
 	if event.EventID == "" {
 		return nil, errors.New("host: eventId is required")
 	}
-	if event.TaskID == "" {
-		event.TaskID = a.taskID
+	if event.SeedHash == "" {
+		event.SeedHash = a.seedHash
 	}
-	if event.TaskID != a.taskID {
-		return nil, errors.New("host: event belongs to another task")
+	if event.SeedHash != a.seedHash {
+		return nil, errors.New("host: event belongs to another download")
 	}
 	if event.OccurredAt == 0 {
 		event.OccurredAt = a.clock()
