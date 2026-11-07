@@ -710,6 +710,12 @@ func mediaTypeFor(name string) string {
 	return mediaType
 }
 
+// MediaTypeForFileName 按文件名派生上报用 MIME，与报价条款一致。
+// 采集提交只携带当前值，MIME 变化本身不触发提交。
+func MediaTypeForFileName(name string) string {
+	return mediaTypeFor(name)
+}
+
 func sanitizeName(name string) string {
 	if index := strings.LastIndexAny(name, `/\`); index >= 0 {
 		name = name[index+1:]

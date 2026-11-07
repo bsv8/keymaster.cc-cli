@@ -35,6 +35,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
+	"github.com/bsv8/keymaster.cc-cli/internal/collector"
 	"github.com/bsv8/keymaster.cc-cli/internal/config"
 	"github.com/bsv8/keymaster.cc-cli/internal/discovery"
 	"github.com/bsv8/keymaster.cc-cli/internal/download"
@@ -263,6 +264,27 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 	seedPrice, blockPrice := table.Defaults()
 	fmt.Printf("缺省售价: Seed %s sats / 完整块 %s sats；文件独立价格: %d 个\n", seedPrice, blockPrice, len(table.Files()))
 
+	// 采集上报：提交状态单独持久化（server/collector.json），不混入
+	// 可重建的 Catalog 内容映射；目录路径不上报。
+	serverDir := filepath.Join(filepath.Dir(configPath), "server")
+	colSign, err := collector.HostPrivateKeySigner(privateKey)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	colSvc, err := collector.New(filepath.Join(serverDir, "collector.json"), collector.Options{
+		Endpoint: cfg.Server.Collector.Endpoint,
+		Enabled:  cfg.Server.Collector.Enabled,
+		Sign:     colSign,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	// Catalog 成功建立映射后把完整文件信息交给采集队列（同 Hash 取最小路径）。
+	collector.FeedEntries(colSvc, entries, sell.MediaTypeForFileName)
+	go colSvc.Run(ctx)
+
 	// The seller execution layer is ready; serving itself waits for the
 	// demand/discovery and transport layers.
 	key, _ := primitives.PrivateKeyFromBytes(privateKey)
@@ -350,6 +372,12 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 			if report.Indexed > 0 || report.Removed > 0 || len(report.Failures) > 0 {
 				fmt.Printf("目录核对: 新计算 %d，复用 %d，移除 %d，失败 %d\n", report.Indexed, report.Reused, report.Removed, len(report.Failures))
 			}
+			// 名称变化经目录核对发现：重映射后把最新信息交给采集队列。
+			if report.Indexed > 0 || report.Removed > 0 {
+				if listed, err := files.List(refreshCtx); err == nil {
+					collector.FeedEntries(colSvc, listed, sell.MediaTypeForFileName)
+				}
+			}
 		}
 	}()
 	defer func() { stopRefresh(); <-refreshDone }()
@@ -369,6 +397,16 @@ func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, d
 				Pricing:       table,
 				ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
 				StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
+				Collector:     colSvc,
+				Status: func() map[string]any {
+					return map[string]any{"collector": colSvc.Status()}
+				},
+				PersistCollector: func(endpoint string, enabled bool) error {
+					cfg.Server.Collector.Endpoint = endpoint
+					cfg.Server.Collector.Enabled = enabled
+					colSvc.SetTransport(endpoint, enabled)
+					return cfg.Save(configPath)
+				},
 				PersistDefaults: func(seedPrice, blockPrice string) error {
 					cfg.Server.DefaultSeedPriceSatoshis = seedPrice
 					cfg.Server.DefaultFullBlockPriceSatoshis = blockPrice

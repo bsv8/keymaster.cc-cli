@@ -76,6 +76,20 @@ type Server struct {
 	// offers in quotes. At least one is required to serve: every pool is
 	// 2-of-3 and the buyer must pick an arbiter from the quote.
 	ArbiterPublicKeys []string `json:"arbiterPublicKeys,omitempty"`
+	// Collector holds the collector submission settings: endpoint and
+	// enable flag. Submission state itself is persisted separately in
+	// ~/.km/server/collector.json, never inside the rebuildable catalog.
+	Collector Collector `json:"collector"`
+}
+
+// Collector holds the collector submission settings.
+type Collector struct {
+	// Enabled turns collection submissions on. Enabling with an empty
+	// endpoint is rejected by validation.
+	Enabled bool `json:"enabled"`
+	// Endpoint is the collector service address, for example
+	// https://collector.example.com.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // Admin holds the local Web Admin settings.
@@ -420,6 +434,9 @@ func (c *Config) validate() error {
 		if !satoshiPattern.MatchString(price) {
 			return errors.New("server 缺省售价无效")
 		}
+	}
+	if c.Server.Collector.Enabled && c.Server.Collector.Endpoint == "" {
+		return errors.New("启用采集上报需要 server.collector.endpoint")
 	}
 	for _, supplier := range c.Services.SatSuppliers {
 		if supplier.ID == "" || !regexp.MustCompile(`^(02|03)[0-9a-f]{64}$`).MatchString(supplier.PublicKeyHex) || len(supplier.Multiaddrs) == 0 {

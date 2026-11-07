@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
+	"github.com/bsv8/keymaster.cc-cli/internal/collector"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
+	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 )
 
 //go:embed ui.html
@@ -63,6 +65,13 @@ type Options struct {
 	StartDownload func(ctx context.Context, seedHash, execID, outDir string) int
 	// Status optionally contributes extra status fields.
 	Status func() map[string]any
+	// Collector is the collection submission service. A nil value leaves
+	// the /api/collector/* endpoints unavailable (pure-buyer mode).
+	Collector *collector.Service
+	// PersistCollector saves new collector settings to the settings
+	// file (config.json). A nil value leaves POST /api/collector/config
+	// unavailable.
+	PersistCollector func(endpoint string, enabled bool) error
 	// PersistDefaults saves new server default prices to the settings
 	// file (config.json). It runs after the in-memory/pricing.json update
 	// validates; a nil value leaves PUT /api/pricing/defaults unavailable.
@@ -124,6 +133,9 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 	mux.HandleFunc("/api/pricing/file", server.handleFile)
 	mux.HandleFunc("/api/downloads", server.handleDownloads)
 	mux.HandleFunc("/api/downloads/", server.handleDownloadRoute)
+	mux.HandleFunc("/api/collector/status", server.handleCollectorStatus)
+	mux.HandleFunc("/api/collector/description", server.handleCollectorDescription)
+	mux.HandleFunc("/api/collector/config", server.handleCollectorConfig)
 	server.server = &http.Server{Addr: options.Address, Handler: server.guard(mux), ReadHeaderTimeout: 10 * time.Second}
 	listener, err := net.Listen("tcp", options.Address)
 	if err != nil {
@@ -359,7 +371,80 @@ func (s *Server) handleRefresh(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if s.options.Collector != nil && (report.Indexed > 0 || report.Removed > 0) {
+		// 名称变化经目录核对发现：重映射后把最新信息交给采集队列。
+		if entries, err := s.options.Catalog.List(request.Context()); err == nil {
+			collector.FeedEntries(s.options.Collector, entries, sell.MediaTypeForFileName)
+		}
+	}
 	writeJSON(writer, report)
+}
+
+// handleCollectorStatus 展示待提交数量、最近成功时间及失败原因。
+func (s *Server) handleCollectorStatus(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.options.Collector == nil {
+		http.Error(writer, "collector is unavailable", http.StatusNotFound)
+		return
+	}
+	writeJSON(writer, s.options.Collector.Status())
+}
+
+// handleCollectorDescription 保存文件介绍（采集自有存储，不改动原始内容）。
+func (s *Server) handleCollectorDescription(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.options.Collector == nil {
+		http.Error(writer, "collector is unavailable", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		SeedHash    string `json:"seedHash"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(writer, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := s.options.Collector.SetDescription(body.SeedHash, body.Description); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(writer, map[string]any{"ok": true})
+}
+
+// handleCollectorConfig 更新采集地址与启用开关并持久化到配置文件。
+func (s *Server) handleCollectorConfig(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.options.Collector == nil || s.options.PersistCollector == nil {
+		http.Error(writer, "collector is unavailable", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		Endpoint string `json:"endpoint"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(writer, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if body.Enabled && body.Endpoint == "" {
+		http.Error(writer, "endpoint is required when enabled", http.StatusBadRequest)
+		return
+	}
+	if err := s.options.PersistCollector(body.Endpoint, body.Enabled); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, map[string]any{"ok": true})
 }
 
 type batchRequest struct {
