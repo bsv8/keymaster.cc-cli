@@ -29,8 +29,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	keyhold "github.com/bsv8/KeyHold/go/v2"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"golang.org/x/term"
 
 	"github.com/bsv8/keymaster.cc-cli/internal/apiclient"
@@ -50,6 +50,7 @@ const (
 )
 
 func main() {
+	configureDebug()
 	os.Exit(run(os.Args[1:]))
 }
 

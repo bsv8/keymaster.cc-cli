@@ -759,7 +759,27 @@ func (p *BuyerPorts) ClosePool(ctx context.Context, command scheduler.Command) e
 	}
 	if !completion.Closed {
 		unlock()
-		return p.closeUnknown(command, err)
+		// Kind 13 is already verified and saved. The seller's broadcast can
+		// precede WoC indexing; only observe that exact txid, never re-sign
+		// or re-broadcast. Do not hold state while waiting between reads.
+		observeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		for !completion.Closed {
+			timer := time.NewTimer(500 * time.Millisecond)
+			select {
+			case <-observeCtx.Done():
+				timer.Stop()
+				return p.closeUnknown(command, fmt.Errorf("host: close transaction observation: %w", observeCtx.Err()))
+			case <-timer.C:
+			}
+			release := p.lockState()
+			completion.Closed, err = p.Task.ReconcileClose(observeCtx, poolID)
+			release()
+			if err != nil {
+				return p.closeUnknown(command, err)
+			}
+		}
+		unlock = p.lockState()
 	}
 	poolRecord, ok := p.Task.Ledger.Pools()[poolID]
 	if !ok {

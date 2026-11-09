@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	"path/filepath"
 	"strings"
 	"time"
@@ -247,11 +248,11 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 	if supplier == nil || len(supplier.Multiaddrs) == 0 {
 		return fmt.Errorf("下载需要至少一个启用的供应商")
 	}
-	sspClient, err := dialSSP(ctx, supplier.Multiaddrs[0], localSigner)
+	sspClient, releaseSupplier, err := d.acquireSupplier(ctx, supplier.Multiaddrs[0])
 	if err != nil {
 		return fmt.Errorf("连接供应商失败: %w", err)
 	}
-	defer sspClient.Close()
+	defer releaseSupplier()
 	channelKey, err := channels.ParsePrivateKey(privateKey)
 	if err != nil {
 		return err
@@ -306,7 +307,9 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 				return nil, acceptCtx.Err()
 			}
 		},
-		Logf: func(format string, args ...any) {},
+		Logf: func(format string, args ...any) {
+			bitfsdebug.Log("keymaster.cc-cli", "download.diagnostic", func() any { return map[string]any{"seedHash": seed, "message": fmt.Sprintf(format, args...)} })
+		},
 		OnView: func(view scheduler.View) {
 			d.updateTask(seed, func(cur *Task) {
 				cur.BlocksDone = uint64(view.Completed)

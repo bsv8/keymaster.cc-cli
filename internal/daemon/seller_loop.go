@@ -31,7 +31,6 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
 	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 	websignal "github.com/bsv8/keymaster.cc-cli/internal/signal"
-	"github.com/bsv8/keymaster.cc-cli/internal/ssp"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
 	"github.com/bsv8/keymaster.cc-cli/internal/transport"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
@@ -195,12 +194,12 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 		fmt.Fprintln(os.Stderr, "km: 创建发现身份失败:", err)
 		return
 	}
-	sspClient, err := ssp.Dial(ctx, ssp.Options{Gateway: firstSupplier(services), Signer: localSigner})
+	sspClient, releaseSupplier, err := d.acquireSupplier(ctx, firstSupplier(services))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 连接供应商失败:", err)
 		return
 	}
-	defer sspClient.Close()
+	defer releaseSupplier()
 	channelKey, err := channels.ParsePrivateKey(privateKey)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -335,6 +334,9 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 		},
 		Deliveries: func(handler func(string, []byte)) { sspClient.AddPublishHandler(handler) },
 		OnDemand: func(demand discovery.Demand) {
+			if ctx.Err() != nil {
+				return
+			}
 			bitfsdebug.Log("keymaster.cc-cli", "demand.received", func() any { return map[string]any{"messageId": demand.MessageID, "seedHashHex": demand.SeedHashHex} })
 			// Check all roots for the content.
 			found := false

@@ -35,13 +35,6 @@ import (
 
 var errAcceptSource = errors.New("download: quote connection source unavailable")
 
-const (
-	// feeOpening is the wallet-funded opening miner fee estimate.
-	feeOpening = "2000"
-	// feeSettlement is the pool-funded close miner fee estimate.
-	feeSettlement = "2000"
-)
-
 // Options configures one scheduler-driven download.
 type Options struct {
 	Arbitration arbitration.Resolver
@@ -373,6 +366,16 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			versionsMu.Unlock()
 			return errors.New("download: quote has no remaining protocol lifetime")
 		}
+		record, err := quotes.Quote(ctx, sellerID, sessionID)
+		if err != nil {
+			versionsMu.Unlock()
+			return err
+		}
+		minerFee, err := bitfs.PoolSettlementFee(options.Task.Signer.PublicKey(), record.SellerPublicKey, record.ArbiterPublicKey, options.Task.MinerFeeRate)
+		if err != nil {
+			versionsMu.Unlock()
+			return fmt.Errorf("download: estimate quote fees: %w", err)
+		}
 		quote := scheduler.Quote{
 			ID:         sessionID,
 			Version:    version,
@@ -383,7 +386,7 @@ func Run(ctx context.Context, options Options) (*bitfs.PurchaseResult, error) {
 			SeedPrice:  new(big.Int).SetUint64(terms.SeedPriceSatoshis).String(),
 			TailPrice:  &tail,
 			MaxBlocks:  int64(terms.MaxBlocksPerBatch),
-			Fees: scheduler.Fees{Version: 1, Opening: feeOpening, Settlement: feeSettlement,
+			Fees: scheduler.Fees{Version: 1, Opening: fmt.Sprint(minerFee), Settlement: fmt.Sprint(minerFee),
 				ArbitrationBase: fmt.Sprint(arbitrationFees[sessionID].BaseSat), ArbitrationPerItem: fmt.Sprint(arbitrationFees[sessionID].PerItemSat)},
 		}
 		versionsMu.Unlock()

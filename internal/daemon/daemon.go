@@ -26,10 +26,10 @@ import (
 	"sync"
 	"time"
 
+	keyhold "github.com/bsv8/KeyHold/go/v2"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
-	keyhold "github.com/bsv8/KeyHold/go/v2"
 )
 
 // State is the daemon lifecycle state.
@@ -51,20 +51,22 @@ type Options struct {
 
 // Daemon is the background owner.
 type Daemon struct {
-	layout datadir.Layout
-	store  *appconfig.Store
+	supplierMu sync.Mutex
+	suppliers  map[string]*supplierConnection
+	layout     datadir.Layout
+	store      *appconfig.Store
 
-	mu          sync.Mutex
-	state       State
-	privateKey  []byte
-	publicKey   string
-	address     string
-	unlockMu    sync.Mutex
-	balanceMu   sync.Mutex
+	mu           sync.Mutex
+	state        State
+	privateKey   []byte
+	publicKey    string
+	address      string
+	unlockMu     sync.Mutex
+	balanceMu    sync.Mutex
 	balanceCache *balanceSnapshot
 
-	tasks   *taskManager
-	roots   *rootsManager
+	tasks *taskManager
+	roots *rootsManager
 
 	collectors *collectorsManager
 
