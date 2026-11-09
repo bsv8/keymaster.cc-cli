@@ -97,9 +97,14 @@ type Options struct {
 	// Sign 钱包签名函数。Client 提交 HTTP 客户端。
 	Sign   SignFunc
 	Client *http.Client
-	// Now 注入时钟，便于测试。RetryBase 注入退避基线。
-	Now       func() time.Time
-	RetryBase time.Duration
+	// Now 注入时钟，便于测试。RetryBase 注入退避基线，
+	// RetryCap 注入退避上限；EarlyTriggerCount 与 SubmitInterval
+	// 注入任务间隔参数（零值用生产缺省）。
+	Now               func() time.Time
+	RetryBase         time.Duration
+	RetryCap          time.Duration
+	EarlyTriggerCount int
+	SubmitInterval    time.Duration
 }
 
 // Service 是 CLI 采集服务：同一时刻只发送一个批次，失败复用原字节重试。
@@ -188,15 +193,24 @@ func (s *Service) SetTransport(endpoint string, enabled bool) {
 	s.opts.Enabled = enabled
 }
 
-// Status 返回展示用状态：待提交数、最近成功/失败。
+// Status 返回展示用状态：待提交数、确认数、操作历史、最近成功/失败。
 func (s *Service) Status() map[string]any {
 	doc := s.store.Snapshot()
+	history := doc.History
+	if history == nil {
+		history = []Submission{}
+	}
+	if len(history) > 20 {
+		history = history[len(history)-20:]
+	}
 	out := map[string]any{
-		"enabled":      s.opts.Enabled,
-		"endpoint":     s.opts.Endpoint,
-		"pendingCount": len(doc.Pending),
-		"inflight":     doc.Inflight != nil,
-		"lastError":    doc.Meta.LastError,
+		"enabled":        s.opts.Enabled,
+		"endpoint":       s.opts.Endpoint,
+		"pendingCount":   len(doc.Pending),
+		"confirmedCount": len(doc.Confirmed),
+		"inflight":       doc.Inflight != nil,
+		"lastError":      doc.Meta.LastError,
+		"history":        history,
 	}
 	if doc.Meta.LastSuccessAt != nil {
 		out["lastSuccessAt"] = *doc.Meta.LastSuccessAt
@@ -206,12 +220,36 @@ func (s *Service) Status() map[string]any {
 	return out
 }
 
+// earlyTriggerCount 返回生效的提前触发阈值。
+func (s *Service) earlyTriggerCount() int {
+	if s.opts.EarlyTriggerCount > 0 {
+		return s.opts.EarlyTriggerCount
+	}
+	return EarlyTriggerCount
+}
+
+// submitInterval 返回生效的周期提交间隔。
+func (s *Service) submitInterval() time.Duration {
+	if s.opts.SubmitInterval > 0 {
+		return s.opts.SubmitInterval
+	}
+	return HourlyInterval
+}
+
+// retryCap 返回生效的退避上限。
+func (s *Service) retryCap() time.Duration {
+	if s.opts.RetryCap > 0 {
+		return s.opts.RetryCap
+	}
+	return retryCap
+}
+
 // shouldTrigger 判定 early/hourly。
 func (s *Service) shouldTrigger(doc *State, now time.Time) string {
-	if len(doc.Pending) >= EarlyTriggerCount {
+	if len(doc.Pending) >= s.earlyTriggerCount() {
 		return "early"
 	}
-	if now.Sub(time.UnixMilli(doc.Meta.LastAttemptAt)) >= HourlyInterval {
+	if now.Sub(time.UnixMilli(doc.Meta.LastAttemptAt)) >= s.submitInterval() {
 		return "hourly"
 	}
 	return ""
@@ -390,6 +428,11 @@ func (s *Service) sendInflight(ctx context.Context) {
 	}
 	now := s.opts.Now().UnixMilli()
 	_ = s.store.Update(func(doc *State) error {
+		trigger, count, archive := "", 0, ""
+		if doc.Inflight != nil {
+			trigger = doc.Inflight.Trigger
+			count = len(doc.Inflight.Records)
+		}
 		if doc.Inflight == nil {
 			return nil
 		}
@@ -403,9 +446,15 @@ func (s *Service) sendInflight(ctx context.Context) {
 				doc.Confirmed[hash] = sent
 			}
 		}
+		archive = receipt.ArchiveID
 		doc.Inflight = nil
 		doc.Meta.LastSuccessAt = &now
 		doc.Meta.LastError = ""
+		doc.History = append(doc.History, Submission{ArchiveID: archive, At: now, Trigger: trigger, Count: count})
+		if len(doc.History) > 50 {
+			doc.History = doc.History[len(doc.History)-50:]
+		}
+		_ = archive
 		return nil
 	})
 	s.mu.Lock()
@@ -421,8 +470,8 @@ func (s *Service) fail(reason string) {
 	s.mu.Lock()
 	s.retryAt = s.opts.Now().Add(s.retryIn)
 	s.retryIn *= 2
-	if s.retryIn > retryCap {
-		s.retryIn = retryCap
+	if s.retryIn > s.retryCap() {
+		s.retryIn = s.retryCap()
 	}
 	s.mu.Unlock()
 }

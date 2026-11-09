@@ -1,20 +1,14 @@
-// Package admin serves the local Web Admin API and its embedded single-page
-// UI.
-//
-// It only starts after the CLI has unlocked the wallet; it can read and change
-// catalog pricing but can never unlock the wallet or sign anything. Requests
-// must present the configured API key, a localhost Host header and a
-// same-origin (or absent) Origin header.
+// Package admin is the legacy Web Admin (token based). It is retired: new
+// binaries serve the daemon HTTP API (no token) and the embedded React UI in
+// web/dist. This package remains only for reference and returns 410.
 package admin
 
 import (
 	"context"
 	"crypto/subtle"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,11 +22,6 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
 	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 )
-
-//go:embed ui.html
-var uiFS embed.FS
-
-var uiTemplate = template.Must(template.ParseFS(uiFS, "ui.html"))
 
 // Options configures the admin server.
 type Options struct {
@@ -244,7 +233,8 @@ func (s *Server) handleUI(writer http.ResponseWriter, request *http.Request) {
 	// The page is a login shell: it carries no network, wallet or file
 	// data. Everything sensitive loads after the key verifies against
 	// /api/status.
-	_ = uiTemplate.Execute(writer, nil)
+	_ = writer
+		http.Error(writer, "legacy admin retired, use daemon Web UI", http.StatusGone)
 }
 
 func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request) {

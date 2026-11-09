@@ -27,8 +27,16 @@ type Meta struct {
 	LastError     string `json:"lastError"`
 }
 
-// State 是采集持久化文档：确认态、待提交队列、发送中批次、介绍。
-// 与 Catalog 内容映射分开存放（~/.km/server/collector.json）。
+// Submission 是一次提交成功的操作历史：回执、时间、触发原因与条数。
+type Submission struct {
+	ArchiveID string `json:"archiveId"`
+	At        int64  `json:"at"`
+	Trigger   string `json:"trigger"`
+	Count     int    `json:"count"`
+}
+
+// State 是采集持久化文档：确认态、待提交队列、发送中批次、介绍与操作历史。
+// 与 Catalog 内容映射分开存放（per-collector state 文件）。
 type State struct {
 	Version      int               `json:"version"`
 	Descriptions map[string]string `json:"descriptions"`
@@ -36,6 +44,7 @@ type State struct {
 	Pending      map[string]Record `json:"pending"`
 	Inflight     *Inflight         `json:"inflight"`
 	Meta         Meta              `json:"meta"`
+	History      []Submission      `json:"history"`
 }
 
 func freshState() *State {
@@ -82,6 +91,9 @@ func Open(path string) (*Store, error) {
 	}
 	if doc.Inflight != nil && (len(doc.Inflight.Gzip) == 0 || len(doc.Inflight.Signature) == 0) {
 		doc.Inflight = nil
+	}
+	if doc.History == nil {
+		doc.History = []Submission{}
 	}
 	s.doc = &doc
 	return s, nil

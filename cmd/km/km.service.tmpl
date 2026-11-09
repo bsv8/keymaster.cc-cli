@@ -1,0 +1,28 @@
+[Unit]
+Description=Keymaster CLI daemon (km daemon, locked start)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=km
+Group=km
+ExecStart=@KM_BIN@ daemon --data-dir @DATA_DIR@
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+# ProtectSystem=full (not strict): sale and download roots are user-configured
+# anywhere on the filesystem, so the sandbox must allow writes outside the
+# data directory. /usr, /boot and /etc stay read-only; the service user and
+# Unix permissions still confine file access.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

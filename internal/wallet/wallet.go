@@ -161,6 +161,13 @@ func (w *Wallet) Available(ctx context.Context) (uint64, error) {
 	return manager.ParseAmount(w.pool.Funds().AvailableSats)
 }
 func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, error) {
+	return w.BuildWithFeeRate(ctx, outputs, 0)
+}
+
+// BuildWithFeeRate funds like Build but uses an explicit per-build fee rate
+// when positive, so concurrent tasks snapshotting different settings cannot
+// change each other's next transaction through the shared pool instance.
+func (w *Wallet) BuildWithFeeRate(ctx context.Context, outputs []Output, feeRateSatoshisPerKb int64) (*SpendResult, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.live(); err != nil {
@@ -188,7 +195,11 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 		return nil, errors.New("wallet: positive output amount required")
 	}
 	id := newAllocationID()
-	material, err := w.pool.Request(manager.RequestInput{RequestID: id, BusinessAmount: strconv.FormatUint(target, 10), FeeRate: strconv.FormatInt(w.feeRate, 10), OutputScriptLengths: declared})
+	rate := feeRateSatoshisPerKb
+	if rate <= 0 {
+		rate = w.feeRate
+	}
+	material, err := w.pool.Request(manager.RequestInput{RequestID: id, BusinessAmount: strconv.FormatUint(target, 10), FeeRate: strconv.FormatInt(rate, 10), OutputScriptLengths: declared})
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +408,11 @@ func Shared(chain Chain, options Options) (*Wallet, func(), error) {
 	if key == nil {
 		return nil, nil, errors.New("wallet: invalid private key")
 	}
-	id := hex.EncodeToString(key.PubKey().Compressed()) + "|" + options.Network + "|" + strconv.FormatInt(options.FeeRateSatoshisPerKb, 10)
+	// The pool is shared by wallet identity and network only. The fee rate is
+	// a per-spend policy, not pool identity: forking pools per rate would let
+	// concurrent tasks allocate the same outpoint twice and would make
+	// balance queries read the wrong pool.
+	id := hex.EncodeToString(key.PubKey().Compressed()) + "|" + options.Network
 	sharedMu.Lock()
 	if entry, ok := sharedByKey[id]; ok {
 		entry.refs++

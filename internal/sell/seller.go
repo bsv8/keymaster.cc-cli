@@ -91,6 +91,9 @@ type Seller struct {
 	Facts    func() protocol.Facts
 	Catalog  *catalog.Catalog
 	Pricing  *pricing.Pricing
+	// RootID binds quotes/sessions to one shared root. Empty means legacy
+	// single-root mode; multi-root daemons always set it.
+	RootID string
 	// Arbiters are the arbiter public keys this server offers in quotes.
 	Arbiters []protocol.PublicKey
 	// Arbitration 查询池指定仲裁方的真实认证费率；不可缺省为零。
@@ -119,6 +122,11 @@ type sessionMeta struct {
 	SellerID          string `json:"sellerId"`
 	SeedHashHex       string `json:"seedHash"`
 	FilePath          string `json:"filePath"`
+	// RootID + RelativePath bind the session to the exact shared root file.
+	// In-flight fulfillment must use this binding and never switch to a
+	// same-named file in another root, even if the original root was deleted.
+	RootID            string `json:"rootId,omitempty"`
+	RelativePath      string `json:"relativePath,omitempty"`
 	ExpiresAt         int64  `json:"expiresAt"`
 	MaxBlocksPerBatch uint64 `json:"maxBlocksPerBatch"`
 }
@@ -237,7 +245,8 @@ func (s *Seller) CreateQuote(ctx context.Context, request QuoteRequest) (*QuoteR
 	}
 	meta := sessionMeta{
 		SessionID: request.SessionID, SellerID: request.SellerID, SeedHashHex: entry.SeedHashHex,
-		FilePath: entry.Path, ExpiresAt: expiresAt, MaxBlocksPerBatch: maxBlocks,
+		FilePath: entry.Path, RootID: s.RootID, RelativePath: entry.RelativePath,
+		ExpiresAt: expiresAt, MaxBlocksPerBatch: maxBlocks,
 	}
 	if err := s.saveMeta(meta); err != nil {
 		return nil, err
@@ -385,7 +394,7 @@ func (s *Seller) PrepareDelivery(ctx context.Context, sessionID string, kind5 []
 	if err != nil {
 		return nil, err
 	}
-	payloads, seed, err := s.servePayloads(ctx, hex.EncodeToString(terms.SeedHash), kind5)
+	payloads, seed, err := s.servePayloads(ctx, sessionID, hex.EncodeToString(terms.SeedHash), kind5)
 	if err != nil {
 		return nil, err
 	}
@@ -609,7 +618,10 @@ func (s *Seller) CompleteClose(ctx context.Context, sessionID string, kind12 []b
 
 // servePayloads resolves the requested hashes from the catalog: the seed hash
 // serves the seed bytes, block hashes serve their block from the file.
-func (s *Seller) servePayloads(ctx context.Context, seedHashHex string, kind5 []byte) ([][]byte, []byte, error) {
+// The session binding (RootID/FilePath) is enforced: a deleted or replaced
+// root never causes an in-flight session to switch to another root's
+// same-named file. Delivery still verifies the requested block hash.
+func (s *Seller) servePayloads(ctx context.Context, sessionID, seedHashHex string, kind5 []byte) ([][]byte, []byte, error) {
 	hashes, err := contentHashesOf(kind5)
 	if err != nil {
 		return nil, nil, err
@@ -620,6 +632,14 @@ func (s *Seller) servePayloads(ctx context.Context, seedHashHex string, kind5 []
 	}
 	if entry == nil {
 		return nil, nil, fmt.Errorf("sell: catalog file for seed %s disappeared", seedHashHex)
+	}
+	if meta, merr := s.loadMeta(sessionID); merr == nil && meta.FilePath != "" {
+		if entry.Path != meta.FilePath {
+			return nil, nil, fmt.Errorf("sell: bound file %s 不可用，拒绝改用其他目录的同名文件", meta.FilePath)
+		}
+		if meta.RootID != "" && s.RootID != "" && meta.RootID != s.RootID {
+			return nil, nil, fmt.Errorf("sell: 会话根绑定不一致，拒绝交付")
+		}
 	}
 	payloads := make([][]byte, 0, len(hashes))
 	needSeed := false

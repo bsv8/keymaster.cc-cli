@@ -744,14 +744,17 @@ func AdjustPrice(effective, minimum, maximum string, delta int) (string, error) 
 
 // RankRecommendations counts one vote per seller (the latest recommendation of
 // each seller replaces its previous vote) and returns the top five names by
-// vote count, ties broken by name.
+// vote count, ties broken by name. Names are sanitized before counting so
+// different raw spellings of the same safe name add up; empty results are
+// dropped and the caller falls back to the seed hash.
 func RankRecommendations(votes map[string]string) []string {
 	counts := map[string]int{}
 	for _, name := range votes {
-		if name == "" {
+		safe := sanitizeForVote(name)
+		if safe == "" {
 			continue
 		}
-		counts[name]++
+		counts[safe]++
 	}
 	names := make([]string, 0, len(counts))
 	for name := range counts {
@@ -767,6 +770,18 @@ func RankRecommendations(votes map[string]string) []string {
 		names = names[:5]
 	}
 	return names
+}
+
+// sanitizeForVote applies the same safe-name rules as final landing so that
+// different raw spellings of one safe name accumulate. Empty means no valid
+// name (caller falls back to the seed hash).
+func sanitizeForVote(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	safe := output.SanitizeFilename(name, "")
+	// SanitizeFilename returns the fallback ("") for invalid names.
+	return safe
 }
 
 // MonotonicClock supplies scheduler milliseconds from a monotonic elapsed

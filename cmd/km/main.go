@@ -1,69 +1,46 @@
-// Command km is the Keymaster CLI. This increment covers first-run
-// initialization (network choice, KeyHold creation, config defaults), unlock
-// with interactive or systemd credentials, identity display, signal handling
-// with bounded exit codes. Download and server execution are wired in the next
-// phases.
+// Command km is the single Keymaster binary: installer, background daemon,
+// CLI and embedded Web UI.
+//
+// New model:
+//
+//	km install [--data-dir DIR]     install binary + systemd unit (repeatable)
+//	km init [--data-dir DIR]        initialize wallet + settings (network last)
+//	km daemon [--data-dir DIR]      run background, locked start, serves HTTP
+//	km unlock [--api URL]           hidden TTY password, shared unlock flow
+//	km info [--api URL]             network, lock, address, QR, balance
+//	km get <seed> [--api URL]       submit task, stream progress, disconnect safe
+//
+// The daemon is the sole owner. CLI/Web never write persistent files directly
+// and never read private keys. Old -server/-out/-admin/-config entry points
+// are retired: they exit with usage guidance instead of starting a second
+// execution mode.
 package main
 
 import (
 	"bufio"
 	"context"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	primitives "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	"github.com/bsv-blockchain/go-sdk/script"
-	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
-	"github.com/bsv8/BitFSProtocol/protocol"
-	channels "github.com/bsv8/ChannelProtocol"
-	"github.com/bsv8/ChannelProtocol/hashrequest"
-	"github.com/bsv8/bitcoin-libp2p/golibp2p"
-	"github.com/bsv8/bitcoin-libp2p/signer"
-	"github.com/bsv8/bitcoin-libp2p/webrtcinterconnect"
-	"github.com/bsv8/keymaster.cc-cli/internal/admin"
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
-	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
-	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
-	"github.com/bsv8/keymaster.cc-cli/internal/collector"
-	"github.com/bsv8/keymaster.cc-cli/internal/config"
-	"github.com/bsv8/keymaster.cc-cli/internal/discovery"
-	"github.com/bsv8/keymaster.cc-cli/internal/download"
-	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
-	"github.com/bsv8/keymaster.cc-cli/internal/output"
-	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
-	"github.com/bsv8/keymaster.cc-cli/internal/sell"
-	websignal "github.com/bsv8/keymaster.cc-cli/internal/signal"
-	"github.com/bsv8/keymaster.cc-cli/internal/ssp"
-	"github.com/bsv8/keymaster.cc-cli/internal/state"
-	"github.com/bsv8/keymaster.cc-cli/internal/store"
-	"github.com/bsv8/keymaster.cc-cli/internal/transport"
-	"github.com/bsv8/keymaster.cc-cli/internal/tui"
-	"github.com/bsv8/keymaster.cc-cli/internal/ui"
-	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
-	"github.com/bsv8/keymaster.cc-cli/internal/woc"
-	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
-	libp2p "github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
-	"github.com/libp2p/go-libp2p/core/peer"
-	tpt "github.com/libp2p/go-libp2p/core/transport"
-	"github.com/libp2p/go-libp2p/p2p/transport/websocket"
-	ma "github.com/multiformats/go-multiaddr"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	keyhold "github.com/bsv8/KeyHold/go/v2"
 	"golang.org/x/term"
+
+	"github.com/bsv8/keymaster.cc-cli/internal/apiclient"
+	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
+	"github.com/bsv8/keymaster.cc-cli/internal/daemon"
+	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
+	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
+	"github.com/bsv8/keymaster.cc-cli/internal/migrate"
 )
 
-// Exit codes are part of the CLI contract.
 const (
 	exitOK              = 0
 	exitError           = 1
@@ -76,1226 +53,811 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-func run(args []string) int {
-	configureDebug()
-	bitfsdebug.Log("keymaster.cc-cli", "process.start", func() any {
-		return map[string]any{"mode": os.Getenv("KEYMASTER_ENV"), "components": componentDebugStatus()}
-	})
-	flags := flag.NewFlagSet("km", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	serverPath := flags.String("server", "", "售卖指定目录及子目录内的文件")
-	discover := flags.Bool("discover", true, "售卖目录并接入供应商监听 Hash 需求（false 只扫描）")
-	listen := flags.String("listen", "/ip4/0.0.0.0/tcp/0", "下载时向卖方公布的监听 multiaddr")
-	adminAddr := flags.String("admin", "127.0.0.1:8790", "Web Admin 监听地址；空字符串禁用")
-	outDir := flags.String("out", "", "下载输出目录（默认当前目录）")
-	legacyDirect := flags.Bool("legacy-direct", false, "显式使用旧的单卖方直购路径（仅开发对照，禁止自动回退）")
-	maxBlockPrice := flags.String("max-block-price", "", "买方价格上限（sats/块；空=使用 config.scheduler.maxBlockPriceSatoshis，0=自动）")
-	configPath := flags.String("config", "", "配置文件路径（默认 ~/.km/config.json）")
-	flags.Usage = func() { usage(os.Stderr) }
-	if err := flags.Parse(args); err != nil {
-		return exitUsage
-	}
-
-	path := *configPath
-	if path == "" {
-		resolved, err := config.DefaultPath()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		path = resolved
-	}
-
-	var (
-		cfg         *config.Config
-		keyDocument *wallet.NetworkKeyHold
-		err         error
-	)
-	var password string
-	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
-		cfg, password, err = initialize(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 初始化失败:", err)
-			return exitError
-		}
-		keyDocument, err = config.LoadKey(config.KeyPath(path))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 读取钱包失败:", err)
-			return exitError
-		}
-	} else {
-		if migrated, err := config.MigrateEmbeddedWallet(path); err != nil {
-			fmt.Fprintln(os.Stderr, "km: 钱包迁移失败:", err)
-			return exitError
-		} else if migrated {
-			fmt.Printf("已迁移钱包到 %s（原配置已备份）\n", config.KeyPath(path))
-		}
-		cfg, err = config.Load(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 读取配置失败:", err)
-			return exitError
-		}
-		keyDocument, err = config.LoadKey(config.KeyPath(path))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 读取钱包失败:", err)
-			return exitError
-		}
-		if err := config.VerifyPair(cfg, keyDocument); err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		password, err = readPassword("钱包密码: ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-	}
-	if *maxBlockPrice != "" {
-		cfg.Scheduler.MaxBlockPriceSatoshis = *maxBlockPrice
-	}
-
-	privateKey, publicKeyHex, err := keyDocument.Unlock(password)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	defer clearBytes(privateKey)
-
-	address, err := addressFromPublicKey(publicKeyHex, cfg.BsvNetwork.Mainnet())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 派生地址失败:", err)
-		return exitError
-	}
-	fmt.Printf("网络: %s\n收款地址: %s\n", cfg.BsvNetwork, address)
-
-	// The signal context covers the execution phase; prompts above keep the
-	// default terminal behaviour (with the password prompt restoring state).
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	return dispatch(ctx, cfg, privateKey, flags.NArg(), flags.Arg, *serverPath, *discover, *outDir, *listen, *adminAddr, path, *legacyDirect)
+type globalFlags struct {
+	dataDir string
+	api     string
 }
 
-// dispatch runs the selected mode. Both modes are stubs until the execution
-// layer lands; cancellation is still reported with the contract exit code.
-func dispatch(ctx context.Context, cfg *config.Config, privateKey []byte, argCount int, arg func(int) string, serverPath string, discover bool, outDir, listen, adminAddr, configPath string, legacyDirect bool) int {
-	select {
-	case <-ctx.Done():
-		fmt.Fprintln(os.Stderr, "退出中/收尾中…")
-		fmt.Fprintln(os.Stderr, "km: 已取消")
-		return exitCancelled
-	default:
-	}
-
-	code := 0
-	switch {
-	case serverPath != "":
-		code = runServerScan(ctx, cfg, privateKey, serverPath, discover, adminAddr, configPath, listen)
-	case serverPath == "" && argCount == 0:
-		code = runClientAdmin(ctx, cfg, privateKey, adminAddr, configPath, listen)
-	case argCount == 1:
-		seedHash := arg(0)
-		resolvedOut := outDir
-		if resolvedOut == "" {
-			workingDirectory, err := os.Getwd()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "km:", err)
-				return exitError
-			}
-			resolvedOut = workingDirectory
+func parseGlobal(args []string) (globalFlags, []string, error) {
+	var g globalFlags
+	rest := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--data-dir" && i+1 < len(args) {
+			g.dataDir = args[i+1]
+			i++
+			continue
 		}
-		fmt.Printf("下载目标: %s\n输出目录: %s\n", seedHash, resolvedOut)
-		code = runDownload(ctx, cfg, privateKey, seedHash, resolvedOut, listen, adminAddr, configPath, "", legacyDirect, false)
-	default:
+		if strings.HasPrefix(a, "--data-dir=") {
+			g.dataDir = strings.TrimPrefix(a, "--data-dir=")
+			continue
+		}
+		if a == "--api" && i+1 < len(args) {
+			g.api = args[i+1]
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--api=") {
+			g.api = strings.TrimPrefix(a, "--api=")
+			continue
+		}
+		if a == "--help" || a == "-h" {
+			return g, []string{"help"}, nil
+		}
+		rest = append(rest, a)
+	}
+	return g, rest, nil
+}
+
+func run(args []string) int {
+	// Retire old execution modes explicitly.
+	for _, a := range args {
+		switch {
+		case a == "-server" || strings.HasPrefix(a, "-server=") ||
+			a == "-out" || strings.HasPrefix(a, "-out=") ||
+			a == "-admin" || strings.HasPrefix(a, "-admin=") ||
+			a == "-config" || strings.HasPrefix(a, "-config=") ||
+			a == "-listen" || strings.HasPrefix(a, "-listen=") ||
+			a == "-discover" || strings.HasPrefix(a, "-discover=") ||
+			a == "-legacy-direct" || a == "-discover=false":
+			fmt.Fprintln(os.Stderr, "km: 旧入口已退役，请使用新命令：km install | init | daemon | unlock | info | get <seed>")
+			usage(os.Stderr)
+			return exitUsage
+		case a == "-h" || a == "--help":
+			// handled below
+		}
+	}
+	g, rest, err := parseGlobal(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitUsage
+	}
+	if len(rest) == 0 {
 		usage(os.Stderr)
 		return exitUsage
 	}
-	// Exit 3 marks money that is still unresolved, even if the command itself
-	// succeeded; the records live in the client-level history.
-	if code == exitOK {
-		if records, err := state.List(filepath.Join(filepath.Dir(configPath), "client", "unresolved")); err == nil && len(records) > 0 {
-			fmt.Fprintf(os.Stderr, "km: 存在 %d 条未决资金记录，退出码 3\n", len(records))
-			return exitIncompleteFunds
+	cmd, cmdArgs := rest[0], rest[1:]
+	switch cmd {
+	case "help":
+		usage(os.Stdout)
+		return exitOK
+	case "install":
+		return cmdInstall(g, cmdArgs)
+	case "init":
+		return cmdInit(g, cmdArgs)
+	case "daemon":
+		return cmdDaemon(g, cmdArgs)
+	case "unlock":
+		return cmdUnlock(g, cmdArgs)
+	case "info":
+		return cmdInfo(g, cmdArgs)
+	case "get":
+		return cmdGet(g, cmdArgs)
+	case "service":
+		return cmdService(g, cmdArgs)
+	default:
+		// A bare seed hash without subcommand is the old download mode.
+		if isSeedHash(cmd) && len(cmdArgs) == 0 {
+			fmt.Fprintln(os.Stderr, "km: 旧下载入口已退役，请先启动后台再使用：km daemon / km get <seed>")
+			usage(os.Stderr)
+			return exitUsage
 		}
+		fmt.Fprintf(os.Stderr, "km: 未知命令 %q\n", cmd)
+		usage(os.Stderr)
+		return exitUsage
 	}
-	return code
 }
 
-// runServerScan 打开持久内容目录；Admin、发现和售卖共用同一个 Catalog。
-func runServerScan(ctx context.Context, cfg *config.Config, privateKey []byte, directory string, discover bool, adminAddr, configPath, listen string) int {
-	files, err := catalog.Open(ctx, directory, filepath.Join(filepath.Dir(configPath), "server", "catalog.sqlite"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	defer files.Close()
-	report, err := files.Refresh(ctx, false)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	entries, err := files.List(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	if ctx.Err() != nil {
-		fmt.Fprintln(os.Stderr, "退出中/收尾中…")
-		return exitCancelled
-	}
-	fmt.Printf("索引目录: %s\n文件: %d 个，新计算: %d 个，复用: %d 个\n", files.Root, len(entries), report.Indexed, report.Reused)
-	if len(report.Failures) > 0 {
-		fmt.Printf("索引失败: %d 个（例如 %s: %s）\n", len(report.Failures), report.Failures[0].Path, report.Failures[0].Reason)
-	}
-	pricingPath := filepath.Join(filepath.Dir(configPath), "server", "pricing.json")
-	table, err := pricing.Open(pricingPath, cfg.Server.DefaultSeedPriceSatoshis, cfg.Server.DefaultFullBlockPriceSatoshis)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		paths = append(paths, entry.RelativePath)
-	}
-	if err := table.Prune(paths); err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	seedPrice, blockPrice := table.Defaults()
-	fmt.Printf("缺省售价: Seed %s sats / 完整块 %s sats；文件独立价格: %d 个\n", seedPrice, blockPrice, len(table.Files()))
+func usage(w io.Writer) {
+	fmt.Fprintln(w, `用法:
+  km install [--data-dir DIR]   安装程序、检查初始化状态、生成系统服务
+  km init [--data-dir DIR]      独立初始化钱包和设置，不启动长期业务
+  km daemon [--data-dir DIR]    运行后台，已有钱包时以锁定状态启动
+  km unlock [--api URL] [--data-dir DIR]
+  km info [--api URL] [--data-dir DIR]
+  km get <seedhashhex> [--api URL] [--data-dir DIR]
+  km service <install|uninstall|status|start|stop|restart> [--data-dir DIR]
 
-	// 采集上报：提交状态单独持久化（server/collector.json），不混入
-	// 可重建的 Catalog 内容映射；目录路径不上报。
-	serverDir := filepath.Join(filepath.Dir(configPath), "server")
-	colSign, err := collector.HostPrivateKeySigner(privateKey)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	colSvc, err := collector.New(filepath.Join(serverDir, "collector.json"), collector.Options{
-		Endpoint: cfg.Server.Collector.Endpoint,
-		Enabled:  cfg.Server.Collector.Enabled,
-		Sign:     colSign,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	// Catalog 成功建立映射后把完整文件信息交给采集队列（同 Hash 取最小路径）。
-	collector.FeedEntries(colSvc, entries, sell.MediaTypeForFileName)
-	go colSvc.Run(ctx)
+全局选项:
+  --data-dir DIR   数据目录（默认 ~/.km；系统服务建议 /var/lib/km）
+  --api URL        后台 HTTP 地址，如 http://127.0.0.1:8790（默认读本机 settings.json，无后台时本地命令内嵌启动）
 
-	// The seller execution layer is ready; serving itself waits for the
-	// demand/discovery and transport layers.
-	key, _ := primitives.PrivateKeyFromBytes(privateKey)
-	signer, err := protocol.NewPrivateKeySigner(key)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
+说明:
+  后台仅监听 127.0.0.1，无 token；远程访问由用户反向代理与认证负责，远程解锁请用 HTTPS。
+  缺少初始化数据时 daemon 提示执行 init，不在服务进程中等待交互。
+  本地 info/get 无外部后台时内嵌启动（需密码+独占锁），退出即关闭；unlock 仅用于外部后台。`)
+}
+
+func isSeedHash(s string) bool {
+	if len(s) != 64 {
+		return false
 	}
-	arbiterKeys, err := cfg.RuntimeArbiterPublicKeys()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	arbiters := make([]protocol.PublicKey, 0, len(arbiterKeys))
-	for _, encoded := range arbiterKeys {
-		raw, decodeErr := hex.DecodeString(encoded)
-		if decodeErr != nil {
-			fmt.Fprintf(os.Stderr, "km: 仲裁公钥 %s 不是 hex\n", encoded)
-			return exitError
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
 		}
-		publicKey, keyErr := protocol.PublicKeyFromBytes(raw)
-		if keyErr != nil {
-			fmt.Fprintf(os.Stderr, "km: 仲裁公钥 %s 无效: %v\n", encoded, keyErr)
-			return exitError
-		}
-		arbiters = append(arbiters, publicKey)
 	}
-	sessionsRoot := filepath.Join(filepath.Dir(configPath), "server", "sessions")
-	sessions, err := store.Open(sessionsRoot)
+	return true
+}
+
+func resolveLayout(dataDir string) (datadir.Layout, error) {
+	return datadir.Resolve(dataDir)
+}
+
+// ttyReader returns a reader for interactive prompts: /dev/tty when stdin is
+// piped (e.g. curl | sh install), otherwise stdin. Without a terminal it
+// returns an error instead of silently using empty passwords.
+func ttyReader() (*os.File, func(), error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return os.Stdin, func() {}, nil
+	}
+	f, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
+		return nil, nil, errors.New("没有交互终端，结束引导（请在终端中运行）")
 	}
-	wocClient := woc.New(cfg.BsvNetwork.WOCBaseURL(), cfg.WOCAPIKey)
-	height := &chainHeight{}
-	if fetched, err := wocClient.ChainHeight(ctx); err == nil {
-		height.set(fetched)
+	return f, func() { f.Close() }, nil
+}
+
+func promptLine(prompt string) (string, error) {
+	tty, closeTTY, err := ttyReader()
+	if err != nil {
+		return "", err
+	}
+	defer closeTTY()
+	fmt.Fprint(os.Stderr, prompt)
+	reader := bufio.NewReader(tty)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func readHiddenPassword(prompt string) (string, error) {
+	return readHiddenPasswordWithContext(context.Background(), prompt)
+}
+
+// readHiddenPasswordWithContext reads a hidden password from the terminal
+// (stdin when it is a TTY, else /dev/tty) and honors ctx cancellation
+// (Ctrl-C): on cancel it restores the terminal state, moves to a new line
+// and returns ctx.Err() so the caller can close any just-opened daemon and
+// release the data directory lock instead of hanging on input.
+func readHiddenPasswordWithContext(ctx context.Context, prompt string) (string, error) {
+	// Never read from args, env, config or systemd credentials.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+	fd := int(os.Stdin.Fd())
+	var tty *os.File
+	if term.IsTerminal(fd) {
+		tty = nil
 	} else {
-		fmt.Fprintln(os.Stderr, "km: 读取链高度失败（报价与卖方检查将不可用）:", err)
-		return exitError
+		var err error
+		tty, err = os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+		if err != nil {
+			return "", errors.New("没有交互终端，无法读取密码")
+		}
+		defer tty.Close()
+		fd = int(tty.Fd())
 	}
-	go height.refresh(ctx, wocClient)
-	sellerWallet, releaseSellerWallet, err := wallet.Shared(wocClient, wallet.Options{
-		Network: string(cfg.BsvNetwork), PrivateKey: privateKey, FeeRateSatoshisPerKb: cfg.FeeRateSatoshisPerKb,
-	})
+	// Best-effort terminal state for restoration on cancellation. The
+	// blocked ReadPassword below restores it on return; when we give up
+	// early we restore it ourselves so the shell is not left in raw mode.
+	oldState, stateErr := term.GetState(fd)
+	fmt.Fprint(os.Stderr, prompt)
+	type result struct {
+		value string
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		value, err := term.ReadPassword(fd)
+		if err != nil {
+			ch <- result{"", err}
+			return
+		}
+		ch <- result{strings.TrimRight(string(value), "\r\n"), nil}
+	}()
+	select {
+	case <-ctx.Done():
+		if stateErr == nil {
+			_ = term.Restore(fd, oldState)
+		}
+		fmt.Fprintln(os.Stderr)
+		// The reader goroutine stays blocked until the next Enter and
+		// then exits (buffered channel, process is leaving anyway).
+		return "", ctx.Err()
+	case res := <-ch:
+		fmt.Fprintln(os.Stderr)
+		if res.err != nil {
+			return "", res.err
+		}
+		return res.value, nil
+	}
+}
+
+func cmdInit(g globalFlags, args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "km init 不接受参数")
+		return exitUsage
+	}
+	layout, err := resolveLayout(g.dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	defer releaseSellerWallet()
-	service := &sell.Seller{
-		Sessions: sessions,
-		Signer:   signer,
-		Facts:    func() protocol.Facts { return protocol.Facts{Now: time.Now(), BlockHeight: height.get()} },
-		Catalog:  files,
-		Pricing:  table,
-		Arbiters: arbiters,
-		Wallet:   sellerWallet,
+	guard, err := dlock.Acquire(layout.Dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km: 数据目录已有后台在运行，init 与后台互斥")
+		return exitError
 	}
-	fmt.Printf("会话目录: %s\n仲裁方: %d 个\n", sessionsRoot, len(arbiters))
-	// 周期核对和 SIGHUP 复用同一刷新入口，只重算新增或长度变化的文件。
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
-	refreshCtx, stopRefresh := context.WithCancel(ctx)
-	refreshDone := make(chan struct{})
-	go func() {
-		defer close(refreshDone)
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-refreshCtx.Done():
-				return
-			case <-hup:
-			case <-ticker.C:
-			}
-			report, err := files.Refresh(refreshCtx, false)
-			if err != nil {
-				if refreshCtx.Err() == nil {
-					fmt.Fprintln(os.Stderr, "km: 目录核对失败:", err)
-				}
-				continue
-			}
-			if report.Indexed > 0 || report.Removed > 0 || len(report.Failures) > 0 {
-				fmt.Printf("目录核对: 新计算 %d，复用 %d，移除 %d，失败 %d\n", report.Indexed, report.Reused, report.Removed, len(report.Failures))
-			}
-			// 名称变化经目录核对发现：重映射后把最新信息交给采集队列。
-			if report.Indexed > 0 || report.Removed > 0 {
-				if listed, err := files.List(refreshCtx); err == nil {
-					collector.FeedEntries(colSvc, listed, sell.MediaTypeForFileName)
-				}
-			}
-		}
-	}()
-	defer func() { stopRefresh(); <-refreshDone }()
-	if len(arbiters) == 0 {
-		fmt.Fprintln(os.Stderr, "km: 警告: 未配置 server.arbiterPublicKeys，买方无法开池（每个池是 2-of-3）。")
+	defer guard.Release()
+	if err := layout.EnsureDirs(); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
 	}
-	if adminAddr != "" {
-		if cfg.Admin.APIKey == "" {
-			fmt.Fprintln(os.Stderr, "km: admin.apiKey 为空，Web Admin 未启动")
+	if layout.HasInitMarkers() && !migrate.HasPending(layout) {
+		fmt.Fprintln(os.Stderr, "km: 已经初始化（存在 key.json/info.json/settings.json），不覆盖")
+		return exitError
+	}
+	if migrate.NeedsMigration(layout) {
+		// Legacy migration path (also resumes an interrupted migration).
+		if migrate.HasPending(layout) {
+			fmt.Fprintln(os.Stderr, "检测到未完成的迁移，继续恢复（验证后原样保留密文，不重加密）。")
+		} else if _, err := os.Stat(layout.LegacyConfig); err == nil {
+			fmt.Fprintln(os.Stderr, "检测到旧版数据（config.json），开始迁移（验证后原样保留密文，不重加密）。")
 		} else {
-			adminServer, err := admin.Start(ctx, admin.Options{
-				Address:       adminAddr,
-				APIKey:        cfg.Admin.APIKey,
-				Network:       string(cfg.BsvNetwork),
-				WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
-				Catalog:       files,
-				Pricing:       table,
-				ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
-				StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
-				Collector:     colSvc,
-				Status: func() map[string]any {
-					return map[string]any{"collector": colSvc.Status()}
-				},
-				PersistCollector: func(endpoint string, enabled bool) error {
-					cfg.Server.Collector.Endpoint = endpoint
-					cfg.Server.Collector.Enabled = enabled
-					colSvc.SetTransport(endpoint, enabled)
-					return cfg.Save(configPath)
-				},
-				PersistDefaults: func(seedPrice, blockPrice string) error {
-					cfg.Server.DefaultSeedPriceSatoshis = seedPrice
-					cfg.Server.DefaultFullBlockPriceSatoshis = blockPrice
-					return cfg.Save(configPath)
-				},
-			})
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "km: Web Admin 启动失败:", err)
-				return exitError
-			}
-			defer adminServer.Close()
-			fmt.Printf("Web Admin: http://%s/（API Key 见 %s 的 admin.apiKey）\n", adminServer.Addr(), configPath)
+			fmt.Fprintln(os.Stderr, "检测到旧钱包外壳，开始迁移。")
 		}
-	}
-	if !discover {
-		fmt.Fprintln(os.Stderr, "km: 仅扫描模式（-discover=false）；未启动售卖。")
+		password, err := readHiddenPassword("钱包密码: ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		if password == "" {
+			fmt.Fprintln(os.Stderr, "km: 密码不能为空")
+			return exitError
+		}
+		if err := migrate.MigrateLegacy(layout, password); err != nil {
+			fmt.Fprintln(os.Stderr, "km: 迁移失败:", err)
+			return exitError
+		}
+		fmt.Println("迁移完成：key.json 已为纯 KeyHold，网络绑定移入 info.json")
 		return exitOK
 	}
-	return runDiscoverLoop(ctx, cfg, privateKey, service)
+	if layout.HasAnyWallet() {
+		fmt.Fprintln(os.Stderr, "km: 数据目录存在半套或损坏文件，不能当成首次安装；请从备份恢复后重试")
+		return exitError
+	}
+	// Fresh init: new key or import, password, other settings (defaults), network last.
+	fmt.Fprintln(os.Stderr, "初始化新钱包（网络最后选择）。")
+	choice, err := promptLine("新建 key 还是导入 KeyHold？输入 new/import: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	var importedRaw []byte
+	var privateKey []byte
+	var publicKeyHex string
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "new", "n", "":
+		first, err := readHiddenPassword("设置钱包密码: ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		if first == "" {
+			fmt.Fprintln(os.Stderr, "km: 密码不能为空")
+			return exitError
+		}
+		second, err := readHiddenPassword("再次输入密码: ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		if first != second {
+			fmt.Fprintln(os.Stderr, "km: 两次密码不一致")
+			return exitError
+		}
+		key, err := secp256k1.GeneratePrivateKey()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 生成私钥失败:", err)
+			return exitError
+		}
+		serialized := key.Serialize()
+		// Export pure KeyHold now; network binding comes after network choice.
+		raw, err := keyhold.ExportPrivateKey(keyhold.PrivateKeyExportInput{
+			PrivateKey: serialized,
+			Password:   first,
+			Label:      "km wallet",
+			Parameters: keyhold.RecommendedParameters(),
+		})
+		for i := range serialized {
+			serialized[i] = 0
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 创建 KeyHold 失败:", err)
+			return exitError
+		}
+		doc, err := keyhold.Parse(raw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 解析 KeyHold 失败:", err)
+			return exitError
+		}
+		importedRaw = raw
+		publicKeyHex = doc.PublicKeyHex
+		// Verify password immediately so typos are caught before network choice.
+		if _, err := keyhold.Unlock(doc, first); err != nil {
+			fmt.Fprintln(os.Stderr, "km: 验证密码失败:", err)
+			return exitError
+		}
+		privateKey = nil // new key: private only in KeyHold; unlock later via password
+		_ = privateKey
+	case "import", "i":
+		path, err := promptLine("纯 KeyHold 文件路径: ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 读取导入文件失败:", err)
+			return exitError
+		}
+		doc, err := keyhold.Parse(raw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 导入文件不是有效的纯 KeyHold:", err)
+			return exitError
+		}
+		password, err := readHiddenPassword("导入 KeyHold 解密密码: ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		result, err := keyhold.Unlock(doc, password)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "km: 解密失败（密码错误或文件损坏）")
+			return exitError
+		}
+		for i := range result.PrivateKey {
+			result.PrivateKey[i] = 0
+		}
+		importedRaw = raw
+		publicKeyHex = doc.PublicKeyHex
+	default:
+		fmt.Fprintln(os.Stderr, "km: 请输入 new 或 import")
+		return exitUsage
+	}
+	// Other settings use defaults in this step; network is last.
+	network, err := promptLine("选择网络 test | main（最后一步）: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	network = strings.ToLower(strings.TrimSpace(network))
+	if network != "test" && network != "main" {
+		fmt.Fprintln(os.Stderr, "km: 网络必须是 test 或 main")
+		return exitError
+	}
+	// Full validation before persisting: KeyHold valid, pubkey known, network chosen.
+	doc, err := keyhold.Parse(importedRaw)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km: 内部 KeyHold 无效:", err)
+		return exitError
+	}
+	if doc.PublicKeyHex != publicKeyHex {
+		fmt.Fprintln(os.Stderr, "km: 钱包公钥不一致")
+		return exitError
+	}
+	authHex := computeInitAuth(importedRaw, network, publicKeyHex)
+	_ = authHex
+	// Persist: info+settings first (recoverable marker), then key.json.
+	// We need the private key to compute the HMAC binding; for a new key we
+	// no longer have it in memory (only KeyHold). Re-derive via password?
+	// For "new" we still have the password in scope? No (first/second out of
+	// scope). Rework: retain password for binding computation.
+	fmt.Fprintln(os.Stderr, "km: 初始化需要重新验证密码以生成网络绑定。")
+	bindPassword, err := readHiddenPassword("再次输入钱包密码（生成网络绑定）: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	unlocked, err := keyhold.Unlock(doc, bindPassword)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km: 密码错误，初始化取消（未写入半套数据）")
+		return exitError
+	}
+	auth := computeHMAC(unlocked.PrivateKey, network, unlocked.PublicKeyHex)
+	for i := range unlocked.PrivateKey {
+		unlocked.PrivateKey[i] = 0
+	}
+	if unlocked.PublicKeyHex != publicKeyHex {
+		fmt.Fprintln(os.Stderr, "km: 钱包公钥不一致")
+		return exitError
+	}
+	store := appconfig.New(layout.Dir)
+	if err := store.Init(network, publicKeyHex, auth); err != nil {
+		fmt.Fprintln(os.Stderr, "km: 初始化失败:", err)
+		return exitError
+	}
+	// Write pure KeyHold verbatim (pretty) last; HasInitMarkers requires all three.
+	var pretty []byte
+	{
+		var v any
+		if err := json.Unmarshal(importedRaw, &v); err != nil {
+			_ = os.Remove(layout.InfoPath)
+			_ = os.Remove(layout.SettingsPath)
+			fmt.Fprintln(os.Stderr, "km: 导入文件无效")
+			return exitError
+		}
+		pretty, err = json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			_ = os.Remove(layout.InfoPath)
+			_ = os.Remove(layout.SettingsPath)
+			fmt.Fprintln(os.Stderr, "km:", err)
+			return exitError
+		}
+		pretty = append(pretty, '\n')
+	}
+	if err := write0600(layout.KeyPath, pretty); err != nil {
+		_ = os.Remove(layout.InfoPath)
+		_ = os.Remove(layout.SettingsPath)
+		fmt.Fprintln(os.Stderr, "km: 写入钱包失败:", err)
+		return exitError
+	}
+	fmt.Printf("已创建钱包: %s（网络 %s）\n", layout.Dir, network)
+	return exitOK
 }
 
-// runDiscoverLoop connects to the first enabled supplier, subscribes to the
-// hash-request channel and reports verified demands until cancellation.
-func runDiscoverLoop(ctx context.Context, cfg *config.Config, privateKey []byte, service *sell.Seller) int {
-	services, err := cfg.RuntimeServices()
+func cmdDaemon(g globalFlags, args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "km daemon 不接受参数")
+		return exitUsage
+	}
+	layout, err := resolveLayout(g.dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	var supplier *config.Supplier
-	for candidate := range services.SatSuppliers {
-		if services.SatSuppliers[candidate].Enabled {
-			supplier = &services.SatSuppliers[candidate]
-			break
+	// Windows: when launched by SCM, run under the service host so Stop
+	// maps to the same daemon Close with bounded cleanup.
+	if handled, code := runAsWindowsServiceIfNeeded(layout.Dir); handled {
+		return code
+	}
+	// Missing data prompts init; never wait for input in the service process.
+	if !layout.HasInitMarkers() {
+		if layout.HasAnyWallet() {
+			fmt.Fprintln(os.Stderr, "km: 数据不完整或为旧版，请先运行 km init（迁移或修复）")
+		} else {
+			fmt.Fprintln(os.Stderr, "km: 尚未初始化，请先运行 km init")
 		}
-	}
-	if supplier == nil || len(supplier.Multiaddrs) == 0 {
-		fmt.Fprintln(os.Stderr, "km: 启用 -discover 需要至少一个启用的 SatSubscription 供应商")
 		return exitError
 	}
-	localSigner, err := signer.NewLocalSigner(privateKey)
+	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 创建发现身份失败:", err)
+		if errors.Is(err, dlock.ErrActive) {
+			fmt.Fprintln(os.Stderr, "km: 数据目录已有后台在运行")
+			return exitError
+		}
+		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	client, err := ssp.Dial(ctx, ssp.Options{Gateway: supplier.Multiaddrs[0], Signer: localSigner})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 连接供应商失败:", err)
+	defer d.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := d.Start(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	defer client.Close()
-	channelKey, err := channels.ParsePrivateKey(privateKey)
+	addr, err := d.ServeHTTP(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	signaling, err := websignal.NewInbox(client, channelKey)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	if err := signaling.Start(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "km: 启动 WebRTC 信令失败:", err)
-		return exitError
-	}
-	var webrtcTransport *webrtcinterconnect.Transport
-	webrtcOptions := webrtcinterconnect.Options{Signaling: signaling}
-	// Loopback ICE candidates are only useful for same-host tests and are
-	// disabled in production. The e2e harness opts in explicitly.
-	if os.Getenv("KM_WEBRTC_LOOPBACK_CANDIDATES") == "1" {
-		webrtcOptions.IncludeLoopbackCandidates = true
-	}
-	baseFactory := webrtcinterconnect.Factory(webrtcOptions)
-	factory := func(upgrader tpt.Upgrader, rcmgr network.ResourceManager, self peer.ID) (tpt.Transport, error) {
-		transport, err := baseFactory(upgrader, rcmgr, self)
-		if err != nil {
-			return nil, err
-		}
-		webrtcTransport = transport.(*webrtcinterconnect.Transport)
-		return transport, nil
-	}
-	sellerHost, err := golibp2p.NewHost(golibp2p.HostConfig{
-		Signer:           localSigner,
-		TransportOptions: []libp2p.Option{libp2p.Transport(factory), libp2p.Transport(websocket.New)},
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 创建传输身份失败:", err)
-		return exitError
-	}
-	defer sellerHost.Close()
-	service.Arbitration = &arbitration.Client{Host: sellerHost, Endpoints: services.ArbitrationServices}
-	publicKey := localSigner.PublicKey()
-	sellerID := hex.EncodeToString(publicKey)
-	admission := bitfs.OpenAdmission()
-	handleDemand := func(demand discovery.Demand) {
-		locator := ""
-		for _, candidate := range demand.Locators {
-			if candidate.Kind == hashrequest.LocatorMultiaddr && candidate.Address != "" {
-				locator = candidate.Address
-				break
-			}
-		}
-		webrtcLocator := false
-		for _, candidate := range demand.Locators {
-			if candidate.Kind == hashrequest.LocatorWebRTCSDP {
-				webrtcLocator = true
-				break
-			}
-		}
-		buyerKeyRaw, err := hex.DecodeString(demand.FromPublicKey)
-		if err != nil {
-			return
-		}
-		buyerKey, err := protocol.PublicKeyFromBytes(buyerKeyRaw)
-		if err != nil {
-			return
-		}
-		sessionID := "d-" + demand.MessageID
-		// 新需求总是提供新报价；旧池按报文退款模板/授权引用续接，不冒充新报价。
-		if _, err := service.CreateQuote(ctx, sell.QuoteRequest{
-			SessionID:      sessionID,
-			SellerID:       sellerID,
-			BuyerPublicKey: buyerKey,
-			SeedHashHex:    demand.SeedHashHex,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "km: 报价失败 %s: %v\n", demand.MessageID, err)
-			return
-		}
-		if webrtcLocator {
-			if webrtcTransport == nil {
-				fmt.Fprintf(os.Stderr, "km: 需求 %s 需要 WebRTC 传输但未就绪\n", demand.MessageID)
-				return
-			}
-			// The WebRTC dial waits for the buyer's SDP answer, which
-			// arrives through the same SSP read loop that invoked this
-			// callback: never block it.
-			serveWebRTC(ctx, demand, sessionID, sellerID, service, signaling, webrtcTransport, sellerHost)
-			return
-		}
-		if locator == "" {
-			fmt.Fprintf(os.Stderr, "km: 需求 %s 没有可用 locator\n", demand.MessageID)
-			return
-		}
-		session, err := transport.Dial(ctx, sellerHost, locator)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "km: 连接买方失败 %s: %v\n", demand.MessageID, err)
-			return
-		}
-		fmt.Printf("已报价并连接买方 session=%s seed=%s\n", sessionID, demand.SeedHashHex)
-		go func() { <-ctx.Done(); _ = session.Close() }()
-		if err := service.Serve(ctx, sessionID, session); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "km: 售卖会话结束 session=%s: %v\n", sessionID, err)
-		}
-	}
-
-	listener := &discovery.Listener{
-		Subscribe: func(ctx context.Context, channel string) error {
-			_, err := client.Subscribe(ctx, channel)
-			return err
-		},
-		Deliveries: func(handler func(string, []byte)) { client.AddPublishHandler(handler) },
-		OnDemand: func(demand discovery.Demand) {
-			bitfsdebug.Log("keymaster.cc-cli", "demand.received", func() any { return map[string]any{"messageId": demand.MessageID, "seedHashHex": demand.SeedHashHex} })
-			entry, err := service.Catalog.Preferred(ctx, demand.SeedHashHex)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "km: 查询供应内容失败:", err)
-				return
-			}
-			if entry == nil {
-				return
-			}
-			// Admission covers the whole unit, including connection setup:
-			// either the sale is registered before shutdown closes admission,
-			// or it is refused and never started.
-			if !admission.Try() {
-				return
-			}
-			go func() {
-				defer admission.Done()
-				handleDemand(demand)
-			}()
-		},
-	}
-
-	if err := listener.Start(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "km: 订阅 Hash 需求失败:", err)
-		return exitError
-	}
-	fmt.Printf("已接入供应商 %s（%s），监听 Hash 需求；Ctrl-C 结束。\n", supplier.Name, supplier.Multiaddrs[0])
+	fmt.Printf("km 后台已启动（锁定状态）: http://%s/ 数据目录: %s\n", addr, layout.Dir)
+	fmt.Fprintln(os.Stderr, "Ctrl-C 结束（有界收尾）。")
 	<-ctx.Done()
 	fmt.Fprintln(os.Stderr, "退出中/收尾中…")
-	// Stop new sessions (the watchers close their streams) and wait for the
-	// in-flight seller sessions to reach a persisted step, bounded.
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer waitCancel()
-	if err := admission.Wait(waitCtx); err != nil {
-		fmt.Fprintln(os.Stderr, "km: 收尾超时，会话已持久化最近安全点")
-	}
 	return exitCancelled
 }
 
-// chainHeight caches the current chain height and refreshes it periodically.
-type chainHeight struct {
-	mu    sync.RWMutex
-	value protocol.BlockHeight
+func cmdUnlock(g globalFlags, args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "km unlock 不接受参数")
+		return exitUsage
+	}
+	// Unlock is for an external daemon. Never create an embedded daemon
+	// that would exit immediately just to run unlock.
+	base, err := apiclient.ResolveBaseURL(g.api, g.dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		fmt.Fprintln(os.Stderr, "km: 本地命令（info/get）启动时会自行询问密码并解锁，无需单独 unlock")
+		return exitError
+	}
+	if err := validateAPIURL(base); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	probe := apiclient.NewExternal(base)
+	ctx, cancel := context.WithTimeout(context.Background(), apiclient.ProbeTimeout)
+	defer cancel()
+	st, err := probe.Status(ctx)
+	if err != nil {
+		if isConnectionFailure(err) {
+			fmt.Fprintln(os.Stderr, "km:", err)
+			fmt.Fprintln(os.Stderr, "km: 没有外部后台；本地命令（info/get）启动时会自行询问密码，不创建随即退出的内嵌后台")
+			return exitError
+		}
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	if err := checkDaemonIdentity(st); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	password, err := readHiddenPasswordWithContext(sigCtx, "钱包密码: ")
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			fmt.Fprintln(os.Stderr, "km: 已取消")
+			return exitCancelled
+		}
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	if password == "" {
+		fmt.Fprintln(os.Stderr, "km: 密码不能为空")
+		return exitError
+	}
+	unlockCtx, unlockCancel := context.WithTimeout(context.Background(), apiclient.LongTimeout)
+	defer unlockCancel()
+	if err := probe.Unlock(unlockCtx, password); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	fmt.Println("已解锁")
+	return exitOK
 }
 
-func (c *chainHeight) set(value uint32) {
-	c.mu.Lock()
-	c.value = protocol.BlockHeight(value)
-	c.mu.Unlock()
+func cmdInfo(g globalFlags, args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "km info 不接受参数")
+		return exitUsage
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	sess, warning, err := OpenSession(ctx, g.api, g.dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	defer sess.Close()
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, "km: 提示:", warning)
+	}
+	info, err := sess.Client.Info(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	// Render: mode, network, lock, address, QR, balance with time/cache/error.
+	network, _ := info["network"].(string)
+	locked, _ := info["locked"].(bool)
+	address, _ := info["address"].(string)
+	if sess.Mode == "embedded" {
+		fmt.Printf("模式: 内嵌后台（当前进程，退出即关闭）\n")
+	} else {
+		fmt.Printf("模式: 外部后台（CLI 退出后台继续）\n")
+	}
+	fmt.Printf("后台: %s\n", sess.APIURL)
+	fmt.Printf("数据目录: %s\n", sess.DataDir)
+	if network != "" {
+		fmt.Printf("网络: %s\n", network)
+	}
+	if _, ok := info["locked"]; ok {
+		if locked {
+			fmt.Println("状态: 已锁定")
+		} else {
+			fmt.Println("状态: 已解锁")
+		}
+	}
+	if address != "" {
+		fmt.Printf("收款地址: %s\n", address)
+		printQR(address)
+	}
+	if errStr, ok := info["error"].(string); ok && errStr != "" {
+		fmt.Printf("余额查询失败: %s\n", errStr)
+		if cached, _ := info["cached"].(bool); cached {
+			fmt.Println("（显示缓存，已标明时间，非实时）")
+		}
+	} else {
+		if total, ok := info["totalSats"]; ok {
+			fmt.Printf("余额: %v sats", total)
+			if avail, ok := info["availableSats"]; ok {
+				fmt.Printf("（可用 %v", avail)
+				if alloc, ok := info["allocatedSats"]; ok {
+					fmt.Printf("，占用 %v", alloc)
+				}
+				fmt.Print("）")
+			}
+			fmt.Println()
+		}
+		if qt, ok := info["queryTime"].(string); ok && qt != "" {
+			if cached, _ := info["cached"].(bool); cached {
+				fmt.Printf("查询时间: %s（缓存）\n", qt)
+			} else {
+				fmt.Printf("查询时间: %s\n", qt)
+			}
+		}
+	}
+	if connected, _ := info["connected"].(bool); !connected {
+		fmt.Fprintln(os.Stderr, "km: 后台未连接")
+		return exitError
+	}
+	return exitOK
 }
 
-func (c *chainHeight) get() protocol.BlockHeight {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.value
-}
-
-func (c *chainHeight) refresh(ctx context.Context, client *woc.Client) {
-	ticker := time.NewTicker(60 * time.Second)
+func cmdGet(g globalFlags, args []string) int {
+	cancel := false
+	rest := []string{}
+	for _, a := range args {
+		if a == "--cancel" {
+			cancel = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "用法: km get <seedhashhex> [--cancel]")
+		return exitUsage
+	}
+	seed := strings.ToLower(strings.TrimSpace(rest[0]))
+	if !isSeedHash(seed) {
+		fmt.Fprintln(os.Stderr, "km: seedhashhex 无效（64 hex）")
+		return exitUsage
+	}
+	if cancel {
+		return cmdGetCancel(g, seed)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	sess, warning, err := OpenSession(ctx, g.api, g.dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	defer sess.Close()
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, "km: 提示:", warning)
+	}
+	client := sess.Client
+	if sess.Mode == "embedded" {
+		fmt.Fprintln(os.Stderr, "模式: 内嵌后台（Ctrl-C 将取消在途工作并有界收尾）")
+	} else {
+		fmt.Fprintln(os.Stderr, "模式: 外部后台（Ctrl-C 只停显示，后台继续）")
+	}
+	if _, err := client.CreateTask(ctx, seed); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	if sess.Mode == "embedded" {
+		fmt.Printf("已提交下载任务: %s（内嵌后台；完成并收尾后退出）\n", seed)
+	} else {
+		fmt.Printf("已提交下载任务: %s（后台落入默认下载根；断开只停显示，后台继续）\n", seed)
+	}
+	// Poll progress. Request cancellation never cancels the task itself;
+	// only explicit cancel or (embedded) session close does.
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if value, err := client.ChainHeight(ctx); err == nil {
-				c.set(value)
+			if sess.Mode == "embedded" {
+				fmt.Fprintln(os.Stderr, "已取消在途工作，有界收尾中…")
+				// Session.Close (deferred) drains with bounds; report
+				// cancelled, not success. The task returns to pending
+				// for resume when stopped by shutdown.
+				return exitCancelled
 			}
-		}
-	}
-}
-
-// runClientAdmin serves download execution management without a seller
-// directory. It is the buyer entry to Web Admin: configure admin.apiKey once,
-// run `km` (no args) to keep the admin up, open the printed URL, inspect each
-// seed's executions, then redownload or switch-and-start directly from the
-// page. The daemon holds no download lock itself; redownload/switch are
-// refused while a `km <seed>` run holds the seed lock.
-// startDownloadFunc returns the admin StartDownload hook: a headless background
-// run pinned to one execution in this process (no TUI, first recommended
-// name, plain stderr log). The wallet is already unlocked in this process,
-// so no second password entry is needed. The runner re-verifies the pin
-// under its own seed lock and refuses when the pointer moved.
-func startDownloadFunc(cfg *config.Config, privateKey []byte, listen, configPath string) func(context.Context, string, string, string) int {
-	return func(jobCtx context.Context, seed, execID, outDir string) int {
-		return runDownload(jobCtx, cfg, privateKey, seed, outDir, listen, "", configPath, execID, false, true)
-	}
-}
-
-func runClientAdmin(ctx context.Context, cfg *config.Config, privateKey []byte, adminAddr, configPath, listen string) int {
-	if adminAddr == "" {
-		fmt.Fprintln(os.Stderr, "km: \u5355\u72ec\u7ba1\u7406\u6a21\u5f0f\u9700\u8981 -admin \u5730\u5740\uff08\u7a7a\u5b57\u7b26\u4e32\u7981\u7528\uff09")
-		return exitUsage
-	}
-	if cfg.Admin.APIKey == "" {
-		fmt.Fprintln(os.Stderr, "km: admin.apiKey \u4e3a\u7a7a\uff0cWeb Admin \u672a\u542f\u52a8\uff08\u5148\u5728 config.json \u8bbe\u7f6e admin.apiKey\uff09")
-		return exitError
-	}
-	adminServer, err := admin.Start(ctx, admin.Options{
-		Address:       adminAddr,
-		APIKey:        cfg.Admin.APIKey,
-		Network:       string(cfg.BsvNetwork),
-		WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
-		ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
-		StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: Web Admin \u542f\u52a8\u5931\u8d25:", err)
-		return exitError
-	}
-	defer adminServer.Close()
-	fmt.Printf("Web Admin: http://%s/\uff08\u4e0b\u8f7d\u6267\u884c\u7ba1\u7406\uff1bAPI Key \u89c1 %s \u7684 admin.apiKey\uff09\n", adminServer.Addr(), configPath)
-	fmt.Println("Ctrl-C \u7ed3\u675f\u3002")
-	<-ctx.Done()
-	fmt.Fprintln(os.Stderr, "\u9000\u51fa\u4e2d/\u6536\u5c3e\u4e2d\u2026\uff08\u7b49\u5f85\u540e\u53f0\u4efb\u52a1\u6709\u754c\u6536\u5c3e\uff09")
-	return exitCancelled
-}
-
-func usage(writer *os.File) {
-	fmt.Fprintln(writer, `用法:
-  km <seed-hash>                     下载一个文件（默认输出到当前目录）
-  km                               纯买方 Web Admin（下载执行管理：列表/重新下载/切回旧执行）
-  km -server <path>                  售卖指定目录（默认接入供应商并监听 Hash 需求）
-  km -server <path> -discover=false  只扫描目录与定价，不启动售卖
-
-选项:
-  -out <dir>              下载输出目录
-  -listen <multiaddr>     下载时向卖方公布的监听地址（缺省 /ip4/0.0.0.0/tcp/0）
-  -admin <addr>           Web Admin 监听地址（缺省 127.0.0.1:8790；空字符串禁用）
-  -config <file>          配置文件路径（默认 ~/.km/config.json）
-
-首次运行没有配置文件时，会在交互式终端中询问网络（main/test）并创建钱包。
-非交互环境通过 systemd 凭据提供密码（CREDENTIALS_DIRECTORY/wallet-password）。`)
-}
-
-// initialize runs the first-run flow: network choice, password twice, key
-// creation and network-scoped defaults written to config.
-func initialize(path string) (*config.Config, string, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, "", errors.New("没有配置文件时首次运行需要交互式终端；非交互环境请先在终端完成初始化")
-	}
-	network, err := promptNetwork()
-	if err != nil {
-		return nil, "", err
-	}
-	password, err := promptNewPassword()
-	if err != nil {
-		return nil, "", err
-	}
-	cfg, err := config.Init(path, network, password)
-	if err != nil {
-		return nil, "", err
-	}
-	fmt.Printf("已创建配置: %s\n", path)
-	return cfg, password, nil
-}
-
-func promptNetwork() (config.Network, error) {
-	reader := bufio.NewReader(os.Stdin)
-	for attempt := 0; attempt < 3; attempt++ {
-		fmt.Fprint(os.Stderr, "选择网络 main/test: ")
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		switch strings.TrimSpace(line) {
-		case "main":
-			return config.NetworkMain, nil
-		case "test":
-			return config.NetworkTest, nil
-		default:
-			fmt.Fprintln(os.Stderr, "请输入 main 或 test。")
-		}
-	}
-	return "", errors.New("网络选择失败")
-}
-
-func promptNewPassword() (string, error) {
-	for attempt := 0; attempt < 3; attempt++ {
-		first, err := readPassword("设置钱包密码: ")
-		if err != nil {
-			return "", err
-		}
-		if first == "" {
-			fmt.Fprintln(os.Stderr, "密码不能为空。")
-			continue
-		}
-		second, err := readPassword("再次输入密码: ")
-		if err != nil {
-			return "", err
-		}
-		if first != second {
-			fmt.Fprintln(os.Stderr, "两次密码不一致，请重试。")
-			continue
-		}
-		return first, nil
-	}
-	return "", errors.New("密码设置失败")
-}
-
-// readPassword prefers the systemd credential directory; it never reads the
-// password from command line arguments, environment variables or config.
-// While the hidden prompt is active, SIGINT/SIGTERM restore the terminal state
-// before exiting so the shell is not left without echo.
-func readPassword(prompt string) (string, error) {
-	if directory := os.Getenv("CREDENTIALS_DIRECTORY"); directory != "" {
-		data, err := os.ReadFile(filepath.Join(directory, "wallet-password"))
-		if err != nil {
-			return "", fmt.Errorf("systemd 凭据 wallet-password 缺失: %w", err)
-		}
-		return strings.TrimRight(string(data), "\r\n"), nil
-	}
-	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) {
-		return "", errors.New("非交互环境需要 systemd 凭据 wallet-password")
-	}
-	terminalState, err := term.GetState(fd)
-	if err != nil {
-		return "", fmt.Errorf("读取终端状态失败: %w", err)
-	}
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-		defer signal.Stop(signals)
-		select {
-		case <-signals:
-			_ = term.Restore(fd, terminalState)
-			fmt.Fprintln(os.Stderr, "\n已取消")
-			os.Exit(exitCancelled)
-		case <-done:
-		}
-	}()
-	fmt.Fprint(os.Stderr, prompt)
-	value, err := term.ReadPassword(fd)
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimRight(string(value), "\r\n"), nil
-}
-
-func addressFromPublicKey(publicKeyHex string, mainnet bool) (string, error) {
-	publicKey, err := primitives.PublicKeyFromString(publicKeyHex)
-	if err != nil {
-		return "", err
-	}
-	address, err := script.NewAddressFromPublicKey(publicKey, mainnet)
-	if err != nil {
-		return "", err
-	}
-	return address.AddressString, nil
-}
-
-func clearBytes(buffer []byte) {
-	for index := range buffer {
-		buffer[index] = 0
-	}
-}
-
-// runDownload publishes one Hash demand, waits for a seller session over the
-// BitFS transport and purchases the file.
-func runDownload(ctx context.Context, cfg *config.Config, privateKey []byte, seedHash, outputDir, listen, adminAddr, configPath, pinExec string, legacyDirect, headless bool) int {
-	clientRoot := filepath.Join(filepath.Dir(configPath), "client", seedHash)
-	if err := os.MkdirAll(clientRoot, 0o700); err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	wocClient := woc.New(cfg.BsvNetwork.WOCBaseURL(), cfg.WOCAPIKey)
-	height, err := wocClient.ChainHeight(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 读取链高度失败:", err)
-		return exitError
-	}
-	// The wallet (UTXO allocation pool) is shared process-wide per
-	// owner/network/fee rate: concurrent downloads for different seeds must
-	// allocate from one pool, never double-allocate the same outpoint.
-	w, releaseWallet, err := wallet.Shared(wocClient, wallet.Options{
-		Network: string(cfg.BsvNetwork), PrivateKey: privateKey, FeeRateSatoshisPerKb: cfg.FeeRateSatoshisPerKb,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	defer releaseWallet()
-	workStore, err := store.Open(clientRoot)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	l, err := ledger.Open(filepath.Join(clientRoot, "ledger.json"), seedHash, string(cfg.BsvNetwork), seedHash)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	if legacyDirect {
-		// The direct path must never run after the scheduler produced pool,
-		// authorization or payment evidence: switching would buy again.
-		hasSnapshot := false
-		if names, err := workStore.List("scheduler/tasks/"); err == nil {
-			for _, name := range names {
-				if strings.HasPrefix(name, "scheduler/tasks/"+seedHash+".") {
-					hasSnapshot = true
-					break
-				}
-			}
-		}
-		if hasSnapshot || len(l.Pools()) > 0 {
-			fmt.Fprintln(os.Stderr, "km: 存在调度器任务或在途资金证据，禁止切换到旧直购路径")
-			return exitError
-		}
-	}
-	key, _ := primitives.PrivateKeyFromBytes(privateKey)
-	signerInstance, err := protocol.NewPrivateKeySigner(key)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	facts := func() protocol.Facts {
-		return protocol.Facts{Now: time.Now(), BlockHeight: protocol.BlockHeight(height)}
-	}
-	task := &bitfs.BuyerTask{
-		Wallet: w, Ledger: l, Store: workStore, Signer: signerInstance,
-		Facts: facts, MinerFeeRate: protocol.SatoshisPerKilobyte(cfg.FeeRateSatoshisPerKb),
-		Chain: wocClient, UnresolvedDir: config.ClientUnresolvedDir(configPath),
-	}
-	if adminAddr != "" {
-		if cfg.Admin.APIKey == "" {
-			fmt.Fprintln(os.Stderr, "km: admin.apiKey 为空，买方 Web Admin 未启动（重新下载需先在 config.json 设置 admin.apiKey）")
-		} else if adminServer, err := admin.Start(ctx, admin.Options{
-			Address:       adminAddr,
-			APIKey:        cfg.Admin.APIKey,
-			Network:       string(cfg.BsvNetwork),
-			WalletAddress: addressFromPublicKeyOrEmpty(cfg, privateKey),
-			ClientDir:     filepath.Join(filepath.Dir(configPath), "client"),
-			StartDownload: startDownloadFunc(cfg, privateKey, listen, configPath),
-		}); err != nil {
-			fmt.Fprintln(os.Stderr, "km: 买方 Web Admin 启动失败:", err)
-		} else {
-			defer adminServer.Close()
-			fmt.Printf("买方 Web Admin: http://%s/（下载执行管理；API Key 见 %s 的 admin.apiKey）\n", adminServer.Addr(), configPath)
-		}
-	}
-	localSigner, err := signer.NewLocalSigner(privateKey)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	listenAddr, err := ma.NewMultiaddr(listen)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 监听地址无效:", err)
-		return exitError
-	}
-	services, err := cfg.RuntimeServices()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	buyerHost, err := golibp2p.NewHost(golibp2p.HostConfig{
-		Signer:           localSigner,
-		ListenAddrs:      []ma.Multiaddr{listenAddr},
-		TransportOptions: []libp2p.Option{libp2p.Transport(websocket.New)},
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 创建监听失败:", err)
-		return exitError
-	}
-	defer buyerHost.Close()
-	addresses := buyerHost.Addrs()
-	if len(addresses) == 0 {
-		fmt.Fprintln(os.Stderr, "km: 没有可用监听地址")
-		return exitError
-	}
-	locator, err := hashrequest.NewMultiaddrLocator(addresses[0].Encapsulate(ma.StringCast("/p2p/" + buyerHost.ID().String())).String())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	arbitrationClient := &arbitration.Client{Host: buyerHost, Endpoints: services.ArbitrationServices}
-	var supplier *config.Supplier
-	for index := range services.SatSuppliers {
-		if services.SatSuppliers[index].Enabled {
-			supplier = &services.SatSuppliers[index]
-			break
-		}
-	}
-	if supplier == nil || len(supplier.Multiaddrs) == 0 {
-		fmt.Fprintln(os.Stderr, "km: 下载需要至少一个启用的 SatSubscription 供应商")
-		return exitError
-	}
-	client, err := ssp.Dial(ctx, ssp.Options{Gateway: supplier.Multiaddrs[0], Signer: localSigner})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 连接供应商失败:", err)
-		return exitError
-	}
-	defer client.Close()
-	channelKey, err := channels.ParsePrivateKey(privateKey)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	channelPublic, err := channels.PublicKeyFromPrivate(channelKey)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	publisher := &discovery.Publisher{
-		Publish: func(ctx context.Context, channel string, contentJSON []byte) error {
-			_, err := client.Publish(ctx, channel, contentJSON)
-			return err
-		},
-		PrivateKey: channelKey,
-		PublicKey:  channelPublic,
-		Locators:   []hashrequest.Locator{locator},
-	}
-	var result *bitfs.PurchaseResult
-	var purchaseErr error
-	// Headless background runs (admin-started) render nowhere and never touch
-	// the terminal: plain stderr lines carry progress instead.
-	out := io.Writer(os.Stdout)
-	if headless {
-		out = io.Discard
-	}
-	renderer := ui.New(out, !headless && term.IsTerminal(int(os.Stdout.Fd())), !headless)
-	renderer.Render(ui.State{Stage: ui.StageUnlock, Address: addressFromPublicKeyOrEmpty(cfg, privateKey), SeedHash: seedHash})
-	renderer.Render(ui.State{Stage: ui.StageDiscovery, SeedHash: seedHash, Detail: "供应商: " + supplier.Name})
-	poolID := seedHash + "-pool"
-	resume := false
-	if assembler, err := output.New(workStore, outputDir); err == nil {
-		if final, err := assembler.Final(); err == nil && final != nil {
-			renderer.Render(ui.State{Stage: ui.StageDone, SeedHash: seedHash, Path: final.Path, FileSize: uint64(final.Bytes)})
+			fmt.Fprintln(os.Stderr, "已断开显示，后台继续（重新 km get 可查询；取消用 km get --cancel）")
 			return exitOK
+		case <-ticker.C:
+			task, err := client.GetTask(ctx, seed)
+			if err != nil {
+				// Already submitted: query the original task on retry,
+				// never repurchase here.
+				fmt.Fprintln(os.Stderr, "km:", err)
+				fmt.Fprintln(os.Stderr, "km: 已提交任务，查询失败不重复采购；请重新 km get 查询原任务")
+				return exitError
+			}
+			state, _ := task["state"].(string)
+			detail, _ := task["detail"].(string)
+			done, _ := task["blocksDone"].(float64)
+			total, _ := task["blocksTotal"].(float64)
+			fmt.Printf("任务 %s: %s %.0f/%.0f %s\n", seed, state, done, total, detail)
+			if recs, ok := task["recommended"].([]any); ok && len(recs) > 0 {
+				names := make([]string, 0, len(recs))
+				for _, r := range recs {
+					if s, ok := r.(string); ok {
+						names = append(names, s)
+					}
+				}
+				if len(names) > 0 {
+					fmt.Printf("推荐名: %s\n", strings.Join(names, ", "))
+				}
+			}
+			switch state {
+			case "done":
+				if path, ok := task["finalPath"].(string); ok && path != "" {
+					fmt.Printf("完成: %s\n", path)
+				}
+				// Session.Close waits for the execution goroutine and
+				// index/refresh收尾, not just the state string.
+				return exitOK
+			case "failed":
+				if msg, ok := task["error"].(string); ok {
+					fmt.Fprintln(os.Stderr, "km: 下载失败:", msg)
+				}
+				return exitError
+			case "cancelled":
+				fmt.Println("已取消")
+				return exitCancelled
+			}
 		}
 	}
-	if poolRecord, ok := l.Pools()[poolID]; ok && poolRecord.State != ledger.PoolClosed {
-		if _, err := bitfs.LoadPoolState(workStore, poolID); err == nil {
-			resume = true
-			renderer.Render(ui.State{Stage: ui.StageQuote, SeedHash: seedHash, Detail: "续接上次未完成的采购"})
-		}
-	}
-	sessionCh := make(chan *transport.Session, 8)
-	var (
-		claimed  bitfs.Claim
-		doneOnce sync.Once
-		activeMu sync.Mutex
-		active   *transport.Session
-	)
-	done := make(chan struct{})
-	finish := func() { doneOnce.Do(func() { close(done) }) }
-	var listenErr error
-	if legacyDirect {
-		listenErr = transport.Listen(buyerHost, func(session *transport.Session) {
-			// One direct purchase owns one pool and one ledger: a second
-			// concurrent seller session must never run over the same state.
-			if !claimed.Try() {
-				_ = session.Close()
-				return
-			}
-			activeMu.Lock()
-			active = session
-			activeMu.Unlock()
-			defer finish()
-			defer session.Close()
-			renderer.Render(ui.State{Stage: ui.StageWaiting, SeedHash: seedHash, Detail: locator.Address})
-			result, purchaseErr = task.RunPurchase(ctx, session, bitfs.PurchaseOptions{
-				Arbitration:       arbitrationClient,
-				PoolID:            poolID,
-				SeedHashHex:       seedHash,
-				OutputDir:         outputDir,
-				RefundDelayBlocks: 5,
-				Resume:            resume,
-				Progress: func(progress bitfs.PurchaseProgress) {
-					renderer.Render(ui.State{
-						Stage:      ui.Stage(progress.Stage),
-						SeedHash:   seedHash,
-						Detail:     progress.Detail,
-						BlocksDone: progress.BlocksDone,
-						Blocks:     progress.BlocksTotal,
-					})
-				},
-			})
-		})
-	} else {
-		listenErr = transport.Listen(buyerHost, func(session *transport.Session) {
-			select {
-			case sessionCh <- session:
-			default:
-				_ = session.Close()
-			}
-		})
-	}
-	if listenErr != nil {
-		fmt.Fprintln(os.Stderr, "km: 监听 BitFS 会话失败:", listenErr)
+}
+
+// cmdGetCancel only acts on an external daemon. Without one it never starts
+// an embedded daemon just to cancel, never steals the data directory lock,
+// and never adds an implicit cross-process cancel channel.
+func cmdGetCancel(g globalFlags, seed string) int {
+	base, err := apiclient.ResolveBaseURL(g.api, g.dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		fmt.Fprintln(os.Stderr, "km: 没有外部后台时不抢占数据目录锁；本地执行者通过自身 Ctrl-C 取消")
 		return exitError
 	}
-	if !legacyDirect {
-		lastViewRender := time.Now()
-		var viewMu sync.Mutex
-		var latestView scheduler.View
-		var recMu sync.Mutex
-		var recommendations []string
-		runCtx, runCancel := context.WithCancel(ctx)
-		defer runCancel()
-		renderer.Render(ui.State{Stage: ui.StageWaiting, SeedHash: seedHash, Detail: "调度器下载（" + locator.Address + "）"})
-		if _, err := publisher.PublishDemand(runCtx, seedHash, 10*time.Minute); err != nil {
-			fmt.Fprintln(os.Stderr, "km: 发布需求失败:", err)
+	if err := validateAPIURL(base); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	probe := apiclient.NewExternal(base)
+	ctx, cancel := context.WithTimeout(context.Background(), apiclient.ProbeTimeout)
+	defer cancel()
+	st, err := probe.Status(ctx)
+	if err != nil {
+		if isConnectionFailure(err) {
+			// No daemon to cancel against. Distinguish lock-held from idle.
+			layout, lerr := resolveLayout(g.dataDir)
+			if lerr == nil {
+				if guardErr := tryLockHeld(layout.Dir); guardErr {
+					fmt.Fprintln(os.Stderr, "km: 数据目录已有本地进程占用，不抢占，不新增跨进程取消通道；请用该进程的 Ctrl-C 取消")
+				} else {
+					fmt.Fprintln(os.Stderr, "km: 没有运行中的后台可取消（外部不可达，本地无占用）")
+				}
+			}
+			fmt.Fprintln(os.Stderr, "km:", err)
 			return exitError
 		}
-		result, purchaseErr = download.Run(runCtx, download.Options{
-			Arbitration: arbitrationClient,
-			Task:        task, SeedHash: seedHash, OutputDir: outputDir,
-			Wallet: w, Store: workStore, PinExecID: pinExec,
-			RequestQuotes: func(requestCtx context.Context) error {
-				_, err := publisher.PublishDemand(requestCtx, seedHash, 10*time.Minute)
-				return err
-			},
-			Accept: func(acceptCtx context.Context) (*transport.Session, error) {
-				select {
-				case session := <-sessionCh:
-					return session, nil
-				case <-acceptCtx.Done():
-					return nil, acceptCtx.Err()
-				}
-			},
-			Logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "km: "+format+"\n", args...) },
-			OnView: func(view scheduler.View) {
-				viewMu.Lock()
-				latestView = view
-				viewMu.Unlock()
-				if time.Since(lastViewRender) < time.Second {
-					return
-				}
-				lastViewRender = time.Now()
-				recMu.Lock()
-				recommended := append([]string(nil), recommendations...)
-				recMu.Unlock()
-				detail := "调度器: " + view.Execution + "，已完成 " + fmt.Sprint(view.Completed) + "/" + fmt.Sprint(view.Total)
-				if len(recommended) > 0 {
-					detail += "，推荐: " + strings.Join(recommended, ", ")
-				}
-				state := ui.State{
-					Stage: ui.StageWaiting, SeedHash: seedHash,
-					Address:    addressFromPublicKeyOrEmpty(cfg, privateKey),
-					Detail:     detail,
-					BlocksDone: view.Completed, Blocks: view.Total,
-					PriceMode: view.Price.Mode, PriceEffective: view.Price.Effective,
-				}
-				if view.Price.Range != nil {
-					state.PriceMin = view.Price.Range.Min
-					state.PriceMax = view.Price.Range.Max
-				}
-				renderer.Render(state)
-			},
-			OnRecommendations: func(names []string) {
-				recMu.Lock()
-				recommendations = append([]string(nil), names...)
-				recMu.Unlock()
-			},
-			Ready: func(feed func(scheduler.Event) error) func() {
-				if headless || !term.IsTerminal(int(os.Stdin.Fd())) {
-					return func() {}
-				}
-				keyCtx, keyCancel := context.WithCancel(runCtx)
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					tui.RunPriceKeys(keyCtx, feed, func() scheduler.View {
-						viewMu.Lock()
-						defer viewMu.Unlock()
-						return latestView
-					}, runCancel)
-				}()
-				return func() {
-					keyCancel()
-					<-done
-				}
-			},
-			Config: scheduler.Config{
-				MaxBlockPrice:    cfg.Scheduler.MaxBlockPriceSatoshis,
-				BaseSeats:        int64(cfg.Scheduler.TotalSeats - cfg.Scheduler.FloatingSeats),
-				FloatingSeats:    int64(cfg.Scheduler.FloatingSeats),
-				PoolBlocks:       int64(cfg.Scheduler.PoolBlocks),
-				RequestTimeoutMs: int64(max(1, cfg.Scheduler.RequestTimeoutMs)),
-			},
-		})
-		if runCtx.Err() != nil || ctx.Err() != nil {
-			fmt.Fprintln(os.Stderr, "退出中/收尾中…")
-			return exitCancelled
-		}
-		if purchaseErr != nil {
-			renderer.Render(ui.State{Stage: ui.StageFailed, SeedHash: seedHash, Error: purchaseErr.Error()})
-			fmt.Fprintln(os.Stderr, "km: 下载失败:", purchaseErr)
-			return exitError
-		}
-		if len(result.RecommendedNames) > 0 {
-			fmt.Printf("推荐名: %s\n", strings.Join(result.RecommendedNames, ", "))
-		}
-		if len(result.RecommendedNames) > 1 && !headless && term.IsTerminal(int(os.Stdin.Fd())) {
-			fmt.Println("选择最终文件名:")
-			for index, name := range result.RecommendedNames {
-				fmt.Printf("  %d. %s\n", index+1, name)
-			}
-			fmt.Printf("输入 [1-%d]，回车使用 1: ", len(result.RecommendedNames))
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			choice := 1
-			if value := strings.TrimSpace(line); value != "" {
-				if parsed, err := strconv.Atoi(value); err == nil && parsed >= 1 && parsed <= len(result.RecommendedNames) {
-					choice = parsed
-				}
-			}
-			if assembler, err := output.New(workStore, outputDir); err == nil {
-				if renamed, err := assembler.RenameFinal(result.RecommendedNames[choice-1]); err == nil {
-					result.Path = renamed.Path
-				}
-			}
-		}
-		renderer.Render(ui.State{Stage: ui.StageDone, SeedHash: seedHash, Path: result.Path, FileSize: uint64(result.Bytes), Paid: result.Committed})
-		return exitOK
-	}
-	// Register the inbound handler before publishing the demand: a seller can
-	// react immediately and must never find the stream handler missing.
-	if _, err := publisher.PublishDemand(ctx, seedHash, 10*time.Minute); err != nil {
-		fmt.Fprintln(os.Stderr, "km: 发布需求失败:", err)
+		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	fmt.Printf("已发布需求，等待卖方连接（%s）…\n", locator.Address)
-	select {
-	case <-done:
-	case <-ctx.Done():
-		// Bounded shutdown: stop new work, unblock the in-flight session so the
-		// purchase can persist its last safe point, then exit.
-		fmt.Fprintln(os.Stderr, "退出中/收尾中…")
-		activeMu.Lock()
-		if active != nil {
-			_ = active.Close()
-		}
-		activeMu.Unlock()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			fmt.Fprintln(os.Stderr, "km: 收尾超时，已持久化最近安全点")
-		}
-		return exitCancelled
-	}
-	if purchaseErr != nil {
-		renderer.Render(ui.State{Stage: ui.StageFailed, SeedHash: seedHash, Error: purchaseErr.Error()})
-		fmt.Fprintln(os.Stderr, "km: 下载失败:", purchaseErr)
+	if err := checkDaemonIdentity(st); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	renderer.Render(ui.State{Stage: ui.StageDone, SeedHash: seedHash, Path: result.Path, FileSize: uint64(result.Bytes), Paid: result.Committed})
+	cctx, ccancel := context.WithTimeout(context.Background(), apiclient.ShortTimeout)
+	defer ccancel()
+	if err := probe.CancelTask(cctx, seed); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	fmt.Println("已取消（停止新增采购，有界收尾；资金证据保留）")
 	return exitOK
-}
-
-// serveWebRTC dials a browser buyer over WebRTC: the signal exchange goes
-// through the buyer's inbox and the interconnect connection uses the
-// ChannelProtocol session id, exactly like the browser expects.
-func serveWebRTC(ctx context.Context, demand discovery.Demand, sessionID, sellerID string, service *sell.Seller, signaling *websignal.Inbox, webrtcTransport *webrtcinterconnect.Transport, sellerHost host.Host) {
-	// The BitFS session id names the seller session on disk; the interconnect
-	// connection id must be a ChannelProtocol WebRTC session id (32-byte
-	// base64url), which the browser also uses as its routing key.
-	webrtcSessionID, err := websignal.NewSessionID()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "km: 生成 WebRTC 会话编号失败 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	attemptID := webrtcSessionID
-	requestMessageID, err := channels.ParseMessageID(demand.MessageID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "km: 需求编号无效 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	buyerPublic, err := channels.ParsePublicKey(demand.FromPublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "km: 买方公钥无效 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	if err := signaling.OpenSession(webrtcSessionID, attemptID, requestMessageID, buyerPublic); err != nil {
-		fmt.Fprintf(os.Stderr, "km: 打开信令会话失败 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	buyerPeer, err := websignal.BuyerPeerID(demand.FromPublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "km: 派生买方 PeerId 失败 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	peerID, err := peer.Decode(buyerPeer)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "km: 买方 PeerId 无效 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	if err := webrtcTransport.QueueSessionIDs(webrtcSessionID, attemptID); err != nil {
-		fmt.Fprintf(os.Stderr, "km: 绑定 WebRTC 会话失败: %v\n", err)
-		return
-	}
-	address := webrtcinterconnect.BuildAddress(peerID)
-	if err := sellerHost.Connect(ctx, peer.AddrInfo{ID: peerID, Addrs: []ma.Multiaddr{address}}); err != nil {
-		signaling.CloseSession(webrtcSessionID)
-		fmt.Fprintf(os.Stderr, "km: WebRTC 连接买方失败 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	stream, err := sellerHost.NewStream(ctx, peerID, transport.ProtocolID)
-	if err != nil {
-		signaling.CloseSession(webrtcSessionID)
-		fmt.Fprintf(os.Stderr, "km: 打开 BitFS 流失败 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	session, err := transport.NewSession(stream)
-	if err != nil {
-		signaling.CloseSession(webrtcSessionID)
-		fmt.Fprintf(os.Stderr, "km: 包装 BitFS 流失败 %s: %v\n", demand.MessageID, err)
-		return
-	}
-	fmt.Printf("已报价并经 WebRTC 连接买方 session=%s seed=%s\n", sessionID, demand.SeedHashHex)
-	go func() { <-ctx.Done(); _ = session.Close() }()
-	defer signaling.CloseSession(webrtcSessionID)
-	if err := service.Serve(ctx, sessionID, session); err != nil && ctx.Err() == nil {
-		fmt.Fprintf(os.Stderr, "km: 售卖会话结束 session=%s: %v\n", sessionID, err)
-	}
-}
-
-// addressFromPublicKeyOrEmpty derives the wallet address for display.
-func addressFromPublicKeyOrEmpty(cfg *config.Config, privateKey []byte) string {
-	key, _ := primitives.PrivateKeyFromBytes(privateKey)
-	address, err := script.NewAddressFromPublicKey(key.PubKey(), cfg.BsvNetwork.Mainnet())
-	if err != nil {
-		return ""
-	}
-	return address.AddressString
 }

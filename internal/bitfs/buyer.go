@@ -33,6 +33,11 @@ type BuyerTask struct {
 	Signer       protocol.Signer
 	Facts        func() protocol.Facts
 	MinerFeeRate protocol.SatoshisPerKilobyte
+	// WalletFeeRateSatoshisPerKb is the wallet funding fee policy snapshotted
+	// for this task at creation. Non-positive falls back to the shared
+	// wallet default. It travels with the task so a later settings change
+	// cannot alter this run's next transaction through the shared pool.
+	WalletFeeRateSatoshisPerKb int64
 	// Chain is the optional read-only chain port used to observe a
 	// seller-broadcast close transaction. Nil keeps pools recovery-pending.
 	Chain CloseChain
@@ -102,10 +107,10 @@ func (t *BuyerTask) PreparePool(ctx context.Context, input PreparePoolInput) (*P
 	if err != nil {
 		return nil, fmt.Errorf("bitfs: build pool script: %w", err)
 	}
-	funding, err := t.Wallet.Build(ctx, []wallet.Output{{
+	funding, err := t.Wallet.BuildWithFeeRate(ctx, []wallet.Output{{
 		Satoshis:      input.PoolAmountSatoshis,
 		LockingScript: script.NewFromBytes(lockingScript),
-	}})
+	}}, t.WalletFeeRateSatoshisPerKb)
 	if err != nil {
 		return nil, fmt.Errorf("bitfs: build funding transaction: %w", err)
 	}

@@ -17,7 +17,6 @@ import (
 	"sync"
 
 	masterseed "github.com/bsv8/MasterSeed"
-	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -116,15 +115,15 @@ func Open(ctx context.Context, root, database string) (*Catalog, error) {
 		c.rootLock.Close()
 		return nil, err
 	}
-	if err := unix.Flock(int(c.rootLock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return fail(fmt.Errorf("catalog: sale directory is already managed: %w", err))
+	if err := lockExclusiveNB(c.rootLock, "sale directory"); err != nil {
+		return fail(err)
 	}
 	c.dbLock, err = os.OpenFile(database+".lock", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return fail(err)
 	}
-	if err := unix.Flock(int(c.dbLock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return fail(fmt.Errorf("catalog: database is already managed: %w", err))
+	if err := lockExclusiveNB(c.dbLock, "database"); err != nil {
+		return fail(err)
 	}
 	// 先限制主库权限；WAL/SHM 继承 SQLite 主文件的权限。
 	file, err := os.OpenFile(database, os.O_CREATE|os.O_RDWR, 0600)

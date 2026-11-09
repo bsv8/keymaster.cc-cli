@@ -26,27 +26,18 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
 网络层使用正式 `github.com/bsv8/bitcoin-libp2p v0.3.2`。
 两者均通过远端 module 下载及 go.sum 校验，不使用相邻 SDK replace；构建不要求相邻 SDK 源码。
 
-## 使用
+## 使用（新模型）
 
 ```sh
-km <seed-hash>                    # 下载一个文件（发布需求，等待卖方；默认输出到当前目录）
-km                               # 纯买方 Web Admin（下载执行管理：列表/重新下载/切回旧执行）
-km -out <dir> <seed>              # 指定下载输出目录
-km -listen /ip4/0.0.0.0/tcp/0 <seed>  # 向卖方公布的监听地址
-km -server <path>                 # 售卖目录：扫描 + 定价维护
-km -server <path> -discover       # 接入供应商，监听 Hash 需求并售卖
-km -server <path> -admin 127.0.0.1:8790  # Web Admin（缺省开启；空字符串禁用）
-km -config <file> ...             # 指定配置文件路径
+km install [--data-dir DIR]   # 安装程序、检查初始化状态、生成 systemd 服务（可重复，保留钱包与业务数据）
+km init [--data-dir DIR]      # 独立初始化钱包和设置（网络最后选择），不支持覆盖已有钱包
+km daemon [--data-dir DIR]    # 运行后台，已有钱包时以锁定状态启动，仅监听 127.0.0.1
+km unlock [--api URL]          # 隐藏输入密码，提交给后台解锁（与 Web 共用流程）
+km info [--api URL]            # 网络、锁定、地址/二维码、余额（可用/占用口径、时间/缓存/错误）
+km get <seedhashhex> [--api URL]  # 提交任务并显示进度；断开只停显示，后台继续；取消用 km get --cancel <seed>
 ```
 
-纯买方访问 Web Admin（无 `-server` 目录时）：先在 `config.json` 设置
-`admin.apiKey`（任意非空口令），解锁钱包后运行一次 `km`（无参数）保持常驻，
-打开终端打印的 `http://127.0.0.1:8790/`，用该 API Key 登录。
-该模式只服务 `~/.km/client` 下的下载执行管理（`/api/downloads/*`），不要求
-卖方目录；目录与定价接口返回 404。下载过程中 `km <seed>` 也会按同一
-`-admin` 地址在后台启动买方 Admin，退出即关闭；需要常驻管理页时用无参数
-`km` 模式。监听地址只允许回环（127.0.0.1/::1/localhost），API Key 经
-Authorization Bearer 或 X-API-Key 校验并附 Host/Origin 检查。
+旧入口（`km <seed>`、`-server`、`-out`、`-admin`、`-config` 等）已退役，统一走后台 HTTP API（`--api`，默认读本机 `settings.json` 端口连 `127.0.0.1`）。后台不可连接时明确退出，不隐启第二个后台。远程访问由用户反向代理与认证负责，远程解锁请用 HTTPS。本轮不内置额外远程认证协议。
 
 ## 下载执行与重新下载
 
@@ -86,31 +77,23 @@ manager 无持久化、恢复、交易审批或冲突取证。实例销毁丢弃
 systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
 `BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。
 
-首次运行（`~/.km/config.json` 不存在）需要在交互式终端中选择网络
-（`main` / `test`）并两次输入钱包密码；随后生成 secp256k1 私钥、加密
-KeyHold 文档写入同目录的 `~/.km/key.json`、按网络区分的缺省配置写入
-`~/.km/config.json`。
+首次运行（数据目录无 `key.json`/`info.json`/`settings.json`）用 `km init` 在交互式终端完成：新建 key 或导入纯 KeyHold → 两次密码 → 其他设置 → 最后选择网络（`test`/`main`）→ 完整校验后持久化；管道安装交互从 `/dev/tty` 读取，无终端明确结束。systemd 只启动 `km daemon`（锁定状态），密码只经 `km unlock`（终端隐藏输入）或 Web 解锁页提交，不存参数/环境/配置/systemd 凭据。
 
-无人值守运行使用 systemd credentials：
+## 配置（新布局）
 
-```ini
-LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
-```
+| 文件 | 内容 | 恢复出厂 |
+|---|---|---|
+| `key.json` | 官方纯 KeyHold 文档（0600） | 保留 |
+| `info.json` | 网络、公钥、网络绑定、售卖根列表、默认下载根 ID（`version`+`revision`，网络身份禁普通改） | 保留 |
+| `settings.json` | 端口、主题、语言、缺省价格、调度等普通参数（`version`+`revision`） | 重置 |
+| 业务数据 | 任务、账本、会话、恢复证据、索引 | 不受影响 |
 
-进程从 `$CREDENTIALS_DIRECTORY/wallet-password` 读取密码；凭据缺失或非交互
-环境无凭据时明确报错退出，绝不等待终端输入。
-
-## 配置
-
-- 路径：`~/.km/config.json`（设置，0600）与同目录 `~/.km/key.json`（纯 KeyHold 钱包文档，0600），目录 0700。
-- config.json 可覆盖保存（如 Web Admin 改缺省价会写回）；key.json 只在初始化/迁移时写入，启动时输密码解锁。
-- 不保存明文私钥或密码。
-- 网络（`bsvNetwork`）在初始化时固定；WOC 端点由网络推导，不写入配置。
-- `wocApiKey` 缺省为空，可填写自己的 WhatsonChain API Key。
-- `feeRateSatoshisPerKb` 缺省 1000，用于钱包交易手续费估算（v1 无最高费率阈值）。
-- `server.arbiterPublicKeys`：额外接受的仲裁公钥（压缩 hex）；代码内置/当前 dev 目录公钥自动加入卖方报价。
-- `services.arbitrationServices`：可追加的自定义可信完整端点 `{name?, publicKeyHex, address}`。买方只选择报价与可信目录的交集，并从认证仲裁服务的 info v2 获取条目费率；查询失败不以假定费用开池。
-- main/test 的仲裁和默认 SatSubscription 网关由代码内置；运行时重新注入 `bsv8` 的代码值，同时保留原配置首个启用自定义网关的发布选择，不能用持久配置改写内置身份。调度器和售价初始值随网络写入。
+- 目录默认 `~/.km`（0600/0700），系统服务建议 `/var/lib/km`，支持 `--data-dir` 显式指定。
+- `info.json`/`settings.json` 统一经模块读写：读取最新→改字段→补缺省→完整校验→原子持久化→发布；后台串行更新，版本号拒绝旧页覆盖；损坏/未知版本/半套文件不作首次安装；写失败不报成功。
+- 端口可重置，恢复出厂回默认，后台重启生效。`admin.apiKey`/token 已删除，无登录页。
+- `key.json` 只在初始化/迁移写入；密码不持久化、不进日志/浏览器存储；解锁串行防重复 KDF；重启需重解锁。
+- 网络（`bsvNetwork`）最后选择并绑定；WOC 端点由网络推导。
+- 旧 `config.json` + 网络绑定外壳迁移：验证密码/公钥/HMAC 后，内部 KeyHold 密文原样存 `key.json`（不重加密），绑定移入 `info.json`，保留原文件备份。
 
 ### dev 服务覆盖
 
@@ -122,15 +105,17 @@ LoadCredentialEncrypted=wallet-password:/etc/km/wallet-password.cred
 
 临时目录不写回 `config.json`；公钥与完整地址中的 PeerID 必须一致。费率不写入 env，从服务查询。完整默认身份和两端配置说明见 `../BSV8_Engineering/docs/keymaster.cc/服务缺省与开发覆盖.md`。
 
-## 目录布局
+## 目录布局（新布局）
 
 | 路径 | 用途 |
-| --- | --- |
-| `~/.km/config.json` | 设置（0600，可覆盖保存） |
-| `~/.km/key.json` | 钱包 KeyHold 文档（0600，启动输密码解锁） |
-| `~/.km/client/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
-| `~/.km/client/unresolved/` | 未决资金历史（append-only NDJSON；广播未知的交易记录） |
-| `~/.km/server/` | 服务端数据（`catalog.sqlite` 内容映射、`pricing.json`、`sessions/` 售卖会话） |
+|---|---|
+| `key.json` | 纯 KeyHold（0600） |
+| `info.json` | 网络身份 + 售卖根 + 默认下载根 |
+| `settings.json` | 普通参数（端口/主题/语言/价格/调度） |
+| `client/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
+| `client/unresolved/` | 未决资金历史 |
+| `server/roots/<rootID>/` | 每根 `catalog.sqlite` + `pricing.json`（多根，`rootID+相对路径` 身份） |
+| `server/sessions/` | 售卖会话证据（绑定原根，删根不删历史责任，不改用他根同名文件） |
 
 ## dev 调试日志
 
@@ -197,11 +182,11 @@ TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
 | `internal/discovery` | 需求发现：签名 Hash 请求发布（`bsv8.hash.request.v1`）与卖方验签监听 |
 | `internal/transport` | BitFS 传输：`/bitfs/wire/1.0.0` + uvarint 分帧（与浏览器同一协议），卖方拨号/买方接流 |
 | `internal/signal` | 浏览器 WebRTC 信令：`bsv8.webrtc.signal.v1` 收件箱消息 ↔ interconnect Envelope，会话 ID 与 PeerId 派生 |
-| `internal/admin` | Web Admin：解锁后启动的本地 HTTP API + 内嵌单页界面，API Key / Host / Origin 保护；卖方模式管文件与定价，常驻买方模式（`km` 无参数）与下载内嵌模式管下载执行（列表/重新下载/切回旧执行） |
-| `internal/ui` | 固定下载界面：阶段状态、进度条、地址二维码、TTY 原地刷新/非 TTY 普通日志 |
+| `internal/daemon` | 后台唯一管理者：状态机、HTTP API（无 token）、解锁、余额、售卖根、文件、定价、下载任务、采集上报、Web 嵌入 |
+| `internal/apiclient` | CLI HTTP 客户端：`--api` 优先，否则读本机 `settings.json` 端口 |
+| `web/` | Vite+React 管理界面（概览/售卖/下载/文件/采集/设置，中英日三语，主题跟随系统或设置）；发布 `dist/` 经 `web/embed.go` 进二进制 |
 
-`km -server <dir> -discover` 监听需求并按 locator 拨号买方；`-admin` 启动本地管理界面。
-关池由卖方广播，买方只按 txid 观察；付款不逐笔上链。
+后台解锁后自动开始多根售卖（需求发现→报价→交付，`rootID+相对路径` 身份，会话绑定原目录）；`km get` 提交任务默认落入默认下载根。关池由卖方广播，买方只按 txid 观察；付款不逐笔上链。
 
 ## 依赖
 
