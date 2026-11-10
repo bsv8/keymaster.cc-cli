@@ -3,16 +3,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/apiclient"
-	"github.com/bsv8/keymaster.cc-cli/internal/daemon"
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
+	"github.com/bsv8/keymaster.cc-cli/internal/daemonrun"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
+	"github.com/bsv8/keymaster.cc-cli/internal/session"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 )
@@ -21,31 +23,57 @@ import (
 const kmServiceName = "km"
 
 type kmServiceHandler struct {
-	dataDir string
-	d       *daemon.Daemon
+	dataDir  string
+	webAdmin bool
 }
 
+// Execute runs the backend under the service host. The whole lifecycle
+// (open → start → serve → orderly close) is owned by daemonrun with
+// TrayNever: services never start the tray. A requested stop cancels the
+// context and waits for the same bounded cleanup as the foreground daemon;
+// any other backend exit is reported as a service failure.
 func (h *kmServiceHandler) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	changes <- svc.Status{State: svc.StartPending}
-	// Open the daemon in locked start; never wait for input in service.
-	d, err := daemon.Open(daemon.Options{DataDir: h.dataDir})
-	if err != nil {
-		return true, 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	codeCh := make(chan int, 1)
+	go func() {
+		codeCh <- daemonrun.Run(ctx, daemonrun.Options{
+			DataDir:  h.dataDir,
+			WebAdmin: h.webAdmin,
+			Tray:     daemonrun.TrayNever,
+		})
+	}()
+	// SCM StartPending must resolve: report Running once the backend
+	// answers, fail when it exits first, honor Stop while waiting.
+	readyTick := time.NewTicker(500 * time.Millisecond)
+	defer readyTick.Stop()
+	readyTimeout := time.NewTimer(60 * time.Second)
+	defer readyTimeout.Stop()
+running:
+	for {
+		select {
+		case c := <-r:
+			switch c.Cmd {
+			case svc.Interrogate:
+				changes <- c.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				changes <- svc.Status{State: svc.StopPending}
+				cancel()
+				return mapServiceExit(<-codeCh)
+			}
+		case code := <-codeCh:
+			return mapServiceExit(code)
+		case <-readyTick.C:
+			if serviceBackendReady(h.dataDir) {
+				break running
+			}
+		case <-readyTimeout.C:
+			cancel()
+			return mapServiceExit(<-codeCh)
+		}
 	}
-	h.d = d
-	// Transport-independent lifecycle uses a background context tied to the
-	// service lifetime; Close drains it.
-	if err := d.Start(nil); err != nil {
-		_ = d.Close()
-		return true, 1
-	}
-	addr, err := d.ServeHTTP(nil)
-	if err != nil {
-		_ = d.Close()
-		return true, 1
-	}
-	_ = addr
 	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 	for {
 		select {
@@ -55,11 +83,41 @@ func (h *kmServiceHandler) Execute(args []string, r <-chan svc.ChangeRequest, ch
 				changes <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
 				changes <- svc.Status{State: svc.StopPending}
-				_ = d.Close()
-				return false, 0
+				cancel()
+				return mapServiceExit(<-codeCh)
 			}
+		case code := <-codeCh:
+			// Backend exit without a service request: failure, so SCM
+			// recovery (restart) can apply instead of silent death.
+			return mapServiceExit(code)
 		}
 	}
+}
+
+// mapServiceExit keeps the historic mapping: only a clean stop reads as
+// success; any backend failure code becomes a service failure.
+func mapServiceExit(code int) (bool, uint32) {
+	if code == exitOK {
+		return false, 0
+	}
+	return true, 1
+}
+
+// serviceBackendReady probes the just-started backend. False only means
+// "not yet"; a dead backend is observed through codeCh, never here.
+func serviceBackendReady(dataDir string) bool {
+	base, err := session.ResolveBaseURL("", dataDir)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client := kmapi.New(base, nil)
+	st, err := client.Status(ctx)
+	if err != nil {
+		return false
+	}
+	return st.State != ""
 }
 
 // runAsWindowsServiceIfNeeded reports whether the process is running as a
@@ -74,8 +132,17 @@ func runAsWindowsServiceIfNeeded(dataDir string) (bool, int) {
 	if elog != nil {
 		defer elog.Close()
 	}
-	handler := &kmServiceHandler{dataDir: dataDir}
-	// svc.Run blocks until Stop/Shutdown; Close is called by the handler.
+	webAdmin := true
+	for _, a := range os.Args[1:] {
+		if a == "--web-admin=false" {
+			webAdmin = false
+		} else if a == "--web-admin" || a == "--web-admin=true" {
+			webAdmin = true
+		}
+	}
+	handler := &kmServiceHandler{dataDir: dataDir, webAdmin: webAdmin}
+	// svc.Run blocks until Stop/Shutdown; orderly shutdown is owned by
+	// daemonrun inside the handler.
 	if err := svc.Run(kmServiceName, handler); err != nil {
 		return true, exitError
 	}
@@ -83,7 +150,12 @@ func runAsWindowsServiceIfNeeded(dataDir string) (bool, int) {
 }
 
 func serviceInstall(globalDataDir string, args []string) int {
-	dataDirFlag, _, _, err := parseServiceFlags(args)
+	webAdmin, rest, err := splitWebAdminFlag(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km service install:", err)
+		return exitUsage
+	}
+	dataDirFlag, _, _, err := parseServiceFlags(rest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km service install:", err)
 		return exitUsage
@@ -104,6 +176,10 @@ func serviceInstall(globalDataDir string, args []string) int {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
+	if err := rejectSharedDesktopDir(layout); err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
 	if err := layout.EnsureDirs(); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -115,7 +191,9 @@ func serviceInstall(globalDataDir string, args []string) int {
 		return exitError
 	}
 	// SCM runs the long-lived daemon locked; CLI commands pick it via probe.
-	binPath := fmt.Sprintf("\"%s\" daemon --data-dir \"%s\"", exe, dataDir)
+	// Services never start the tray (--no-tray); Web Admin follows the
+	// recorded install flag.
+	binPath := serviceBinPath(exe, dataDir, webAdmin)
 	// Repeatable install: an existing registration is updated in place
 	// (program location or data directory) instead of failing.
 	if qout, qerr := exec.Command("sc.exe", "query", kmServiceName).CombinedOutput(); qerr == nil {
@@ -199,18 +277,18 @@ func serviceStatus(globalDataDir string, _ []string) int {
 		fmt.Fprintln(os.Stderr, "km: 服务未安装或查询失败；可用 km daemon 手动启动")
 		return exitError
 	}
-	base, rerr := apiclient.ResolveBaseURL("", globalDataDir)
+	base, rerr := session.ResolveBaseURL("", globalDataDir)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "km: 未配置 API 地址:", rerr)
 		return exitOK
 	}
-	client := apiclient.NewExternal(base)
+	client := kmapi.New(base, nil)
 	st, serr := client.Status(nil)
 	if serr != nil {
 		fmt.Fprintln(os.Stderr, "km: 后台 API 不可达:", serr)
 		return exitError
 	}
-	fmt.Printf("后台 API: %s initialized=%v state=%v\n", base, st["initialized"], st["state"])
+	fmt.Printf("后台 API: %s initialized=%v state=%v\n", base, st.Initialized, st.State)
 	_ = dlock.ErrActive
 	return exitOK
 }
@@ -321,19 +399,23 @@ func activateUnitAfterInstall(_, _ bool, _, _, _, _ string, _ bool, _ string) in
 
 // privilegedInstallOrUpgrade is Linux-only; on Windows `km install`
 // never reaches the privileged path, but it must compile.
-func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string) int {
+func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string, webAdmin bool) int {
 	if exe != target {
 		if err := copyBinary(exe, target); err != nil {
 			fmt.Fprintln(os.Stderr, "km: 安装程序失败:", err)
 			return exitError
 		}
 	}
-	unit := strings.ReplaceAll(unitTemplate, "@DATA_DIR@", layout.Dir)
-	unit = strings.ReplaceAll(unit, "@KM_BIN@", target)
+	unit := renderUnit(target, layout.Dir, webAdmin)
 	if err := os.WriteFile(out, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入服务配置失败:", err)
 		return exitError
 	}
 	fmt.Printf("已写入配置: %s 数据目录: %s\n", out, layout.Dir)
 	return activateUnitAfterInstall(layout.HasInitMarkers(), layout.HasAnyWallet(), target, layout.Dir, "", "", false, out)
+}
+
+// serviceBinPath renders the SCM command line for the service backend.
+func serviceBinPath(exe, dataDir string, webAdmin bool) string {
+	return fmt.Sprintf("\"%s\" daemon --data-dir \"%s\" --no-tray%s", exe, dataDir, serviceExtraArgs(webAdmin))
 }

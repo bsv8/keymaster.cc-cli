@@ -30,6 +30,8 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
+	"github.com/bsv8/keymaster.cc-cli/internal/events"
+	"github.com/bsv8/keymaster.cc-cli/internal/webui"
 )
 
 // State is the daemon lifecycle state.
@@ -47,6 +49,10 @@ type Options struct {
 	DataDir string
 	// PortOverride forces the listen port (0 = from settings).
 	PortOverride int
+	// WebAdmin mounts the React Web Admin alongside the API on the
+	// standalone HTTP entry. CLI/MyGo embedded entries never call
+	// ServeHTTP and always use the API-only handler.
+	WebAdmin bool
 }
 
 // Daemon is the background owner.
@@ -64,6 +70,10 @@ type Daemon struct {
 	unlockMu     sync.Mutex
 	balanceMu    sync.Mutex
 	balanceCache *balanceSnapshot
+	// balanceWatching 标记余额采集循环已启动；lastPublished 记录上次
+	// 已发布的余额状态，用于变化检测（均由 balanceMu 保护）。
+	balanceWatching bool
+	lastPublished   lastBalance
 
 	tasks *taskManager
 	roots *rootsManager
@@ -84,6 +94,23 @@ type Daemon struct {
 	httpServer *http.Server
 	listener   net.Listener
 	lockGuard  *dlock.Guard
+
+	// closeOnce/closeDone make Close idempotent and let concurrent or
+	// repeated callers wait for the same completed cleanup instead of
+	// mistaking an early return for finished cleanup.
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
+	// httpDone reports the HTTP server result. Buffered size 1; closed
+	// with the Serve return value (nil on clean shutdown).
+	httpDone chan error
+
+	// webAdmin fixes the standalone composition at startup: API always,
+	// Web Admin only when enabled. CLI/GUI connections never change it.
+	webAdmin bool
+
+	// events 是统一消息总线，只做分发不持有真值；发布点在业务提交后调用。
+	events *events.Broker
 
 	// startMu guards the transport-independent lifecycle (periodic catalog
 	// refresh and other background loops). Start is idempotent; Close
@@ -110,6 +137,15 @@ type balanceSnapshot struct {
 	QueryTime string `json:"queryTime"`
 }
 
+// lastBalance 记录上次已发布的余额状态，用于变化检测。
+type lastBalance struct {
+	Total, Available, Allocated uint64
+	Err                         string
+	Cached                      bool
+	// published 标记是否发布过；首次采集无论结果都发布一次。
+	published bool
+}
+
 func (d *Daemon) dataDir() string { return d.layout.Dir }
 
 // Open prepares the daemon for dir without starting network services. It
@@ -123,7 +159,7 @@ func Open(opts Options) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Daemon{layout: layout, state: StateUninitialized, lockGuard: guard}
+	d := &Daemon{layout: layout, state: StateUninitialized, lockGuard: guard, webAdmin: opts.WebAdmin, events: events.New()}
 	store := appconfig.New(layout.Dir)
 	if layout.HasInitMarkers() {
 		if err := store.Load(); err != nil {
@@ -146,6 +182,8 @@ func Open(opts Options) (*Daemon, error) {
 		d.address = addr
 		d.state = StateLocked
 		d.tasks = newTaskManager(layout, store)
+		d.tasks.events = d.events
+		d.tasks.onTerminal = func() { go d.refreshBalance("task-terminal") }
 		if err := d.tasks.loadPersisted(); err != nil {
 			_ = guard.Release()
 			return nil, fmt.Errorf("daemon: 加载任务记录失败: %w", err)
@@ -215,12 +253,25 @@ func (d *Daemon) waitSeller(timeout time.Duration) {
 // so a timeout truncates waiting, never business responsibility.
 // It applies to both external (HTTP) and embedded (in-process) modes and
 // does not require an HTTP server to exist.
+//
+// Close is idempotent: the first call runs the cleanup, concurrent or
+// repeated callers wait for the same completed cleanup and observe its
+// result instead of an early return.
 func (d *Daemon) Close() error {
+	d.closeOnce.Do(func() {
+		d.closeDone = make(chan struct{})
+		go func() {
+			d.closeErr = d.close()
+			close(d.closeDone)
+		}()
+	})
+	<-d.closeDone
+	return d.closeErr
+}
+
+// close performs the one-time cleanup. Only called via Close.
+func (d *Daemon) close() error {
 	d.mu.Lock()
-	if d.state == StateStopping {
-		d.mu.Unlock()
-		return nil
-	}
 	d.state = StateStopping
 	sellerCancel := d.sellerCancel
 	server := d.httpServer
@@ -267,6 +318,10 @@ func (d *Daemon) Close() error {
 		case <-done:
 		case <-time.After(5 * time.Second):
 		}
+	}
+	// 关闭消息总线：订阅连接随之结束，不再接受新发布。
+	if d.events != nil {
+		d.events.Close()
 	}
 	if d.roots != nil {
 		d.roots.closeAll()
@@ -372,6 +427,10 @@ func (d *Daemon) Unlock(password string) error {
 	go d.ensureSellerStarted()
 	d.ensureCollectorsStarted()
 	d.feedCollectors()
+	// 钱包已解锁：发布钱包状态，启动余额统一采集（资金分配变化与
+	// 外部充值都经此发布，不靠各视图独立查链）。
+	d.publishWallet()
+	d.startBalanceWatcher()
 	// Resume crash-interrupted tasks against their bound roots now that the
 	// key is available; on-disk evidence makes each a resume, not a repurchase.
 	for _, seed := range resume {
@@ -395,9 +454,11 @@ func clearBytes(b []byte) {
 	}
 }
 
-// Handler returns the same API handler for both transports. It registers
-// routes and Host/Origin protection but never listens or starts goroutines.
-func (d *Daemon) Handler() http.Handler {
+// APIHandler returns the API-only handler shared by both transports. It
+// registers routes and Host/Origin protection but never listens, starts
+// goroutines or mounts the Web Admin. Unknown /api/* paths answer 404 and
+// are never swallowed by the SPA fallback.
+func (d *Daemon) APIHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", d.handleStatus)
 	mux.HandleFunc("/api/info", d.handleInfo)
@@ -421,11 +482,30 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("/api/pricing/file", d.handlePricingFile)
 	mux.HandleFunc("/api/tasks", d.handleTasks)
 	mux.HandleFunc("/api/tasks/", d.handleTaskRoute)
+	mux.HandleFunc("/api/events", d.handleEvents)
 	// Legacy download management (no token): keep functional until React
 	// replaces the surface, but never require an API key.
 	registerLegacyDownloads(mux, d)
-	// Favicon etc fall through to the embedded Web UI.
-	mux.HandleFunc("/", d.handleUI)
+	// Unknown API paths are explicit 404s, never the SPA fallback.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	return d.recoverPanic(d.guard(mux))
+}
+
+// httpHandler composes the standalone entry: always the API, plus the
+// Web Admin only when enabled. CLI/GUI connections never change this:
+// it is fixed at startup by the daemon owner.
+func (d *Daemon) httpHandler() http.Handler {
+	d.mu.Lock()
+	webAdmin := d.webAdmin
+	d.mu.Unlock()
+	if !webAdmin {
+		return d.APIHandler()
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/api/", d.APIHandler())
+	mux.Handle("/", webui.Handler())
 	return d.recoverPanic(d.guard(mux))
 }
 
@@ -478,9 +558,11 @@ func (d *Daemon) LifecycleContext() context.Context {
 	return d.lifecycleCtx
 }
 
-// ServeHTTP starts the HTTP API on 127.0.0.1:port using Handler().
-// Port comes from settings unless overridden. It never starts business
-// loops; call Start for the transport-independent lifecycle.
+// ServeHTTP starts the HTTP API on 127.0.0.1:port using APIHandler().
+// Port comes from settings unless overridden. With Options.WebAdmin the
+// React Web Admin is mounted alongside on the same port; without it page
+// paths answer explicit 404 while /api/* keeps working. It never starts
+// business loops; call Start for the transport-independent lifecycle.
 func (d *Daemon) ServeHTTP(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -505,13 +587,14 @@ func (d *Daemon) ServeHTTP(ctx context.Context) (string, error) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           d.Handler(),
+		Handler:           d.httpHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return "", fmt.Errorf("daemon: 监听 %s 失败: %w", addr, err)
 	}
+	d.httpDone = make(chan error, 1)
 	d.mu.Lock()
 	d.httpServer = server
 	d.listener = listener
@@ -523,9 +606,24 @@ func (d *Daemon) ServeHTTP(ctx context.Context) (string, error) {
 		_ = server.Shutdown(shutdown)
 	}()
 	go func() {
-		_ = server.Serve(listener)
+		// Report the server outcome (nil on clean Shutdown) so the
+		// lifecycle owner can distinguish crash from orderly stop.
+		// A failed Serve prevents normal operation; only the owner
+		// decides whether to shut down on it.
+		d.httpDone <- server.Serve(listener)
 	}()
 	return listener.Addr().String(), nil
+}
+
+// HTTPDone reports the HTTP server result. It is nil until ServeHTTP has
+// been called. A non-nil error (anything other than ErrServerClosed,
+// which accompanies orderly shutdown) means the HTTP surface died
+// unexpectedly while the daemon otherwise keeps running.
+func (d *Daemon) HTTPDone() <-chan error {
+	// No lock: assigned once under mu in ServeHTTP before serving, and
+	// only read afterwards. A data race here would mean ServeHTTP was
+	// called concurrently, which ServeHTTP itself already rejects.
+	return d.httpDone
 }
 
 // DefaultPort returns the effective port (for diagnostics).

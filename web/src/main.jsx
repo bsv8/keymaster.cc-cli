@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { t, setLang, resolveLang } from './i18n.js';
+import { watchTopics } from './subscribe.js';
 
 const TABS = [
   { id: 'overview', label: '概览' },
@@ -119,8 +120,8 @@ function CollectorPage() {
   }, []);
   useEffect(() => {
     load();
-    const t = setInterval(load, 8000);
-    return () => clearInterval(t);
+    // 统一订阅替代 8s 轮询：采集状态变化时重载。
+    return watchTopics(['collector'], () => load());
   }, [load]);
 
   const flush = async () => {
@@ -224,25 +225,39 @@ function SettingsPage({ onTheme }) {
   const [s, setS] = useState(null);
   const [err, setErr] = useState('');
   const [saved, setSaved] = useState('');
+  const [conflict, setConflict] = useState('');
+  // 正在编辑的草稿标记：收到设置变化事件时不静默覆盖，改为提示冲突。
+  const dirtyRef = useRef(false);
 
   const load = useCallback(async () => {
     try {
       const v = await api('/api/settings');
       setS(v);
+      dirtyRef.current = false;
+      setConflict('');
       setErr('');
     } catch (e) {
       setErr(String(e?.message || e));
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+  // 订阅设置主题：他人修改或恢复出厂时，非编辑态直接重载，
+  // 编辑中只提示冲突，由用户决定刷新或覆盖保存。
+  useEffect(() => watchTopics(['settings'], () => {
+    if (dirtyRef.current) {
+      setConflict(t('设置已在别处修改，当前草稿可能过期；刷新将丢失草稿，保存将按表单 revision 覆盖。'));
+    } else {
+      load();
+    }
+  }), [load]);
   useEffect(() => { if (s) onTheme(s.theme); }, [s, onTheme]);
 
   if (!s) return <section className="card"><h2>{t('设置')}</h2>{err ? <p className="error">{err}</p> : <p className="hint">{t('加载中…')}</p>}</section>;
 
-  const set = (patch) => setS({ ...s, ...patch });
-  const setSched = (patch) => setS({ ...s, scheduler: { ...s.scheduler, ...patch } });
-  const setServer = (patch) => setS({ ...s, server: { ...s.server, ...patch } });
-  const setCollector = (patch) => setS({ ...s, server: { ...s.server, collector: { ...s.server.collector, ...patch } } });
+  const set = (patch) => { dirtyRef.current = true; setS({ ...s, ...patch }); };
+  const setSched = (patch) => { dirtyRef.current = true; setS({ ...s, scheduler: { ...s.scheduler, ...patch } }); };
+  const setServer = (patch) => { dirtyRef.current = true; setS({ ...s, server: { ...s.server, ...patch } }); };
+  const setCollector = (patch) => { dirtyRef.current = true; setS({ ...s, server: { ...s.server, collector: { ...s.server.collector, ...patch } } }); };
 
   const save = async (e) => {
     e.preventDefault();
@@ -280,6 +295,8 @@ function SettingsPage({ onTheme }) {
         })
       });
       setS(updated);
+      dirtyRef.current = false;
+      setConflict('');
       setSaved(t('已保存（revision {rev}）。端口修改需重启后台生效。', { rev: updated.revision }));
     } catch (e) {
       setErr(String(e?.message || e));
@@ -295,6 +312,8 @@ function SettingsPage({ onTheme }) {
         body: JSON.stringify({ revision: s.revision })
       });
       setS(updated);
+      dirtyRef.current = false;
+      setConflict('');
       setSaved(t('已恢复出厂（普通参数回到默认，网络身份与售卖根保留）。'));
     } catch (e) {
       setErr(String(e?.message || e));
@@ -309,6 +328,7 @@ function SettingsPage({ onTheme }) {
     <section className="card">
       <h2>{t('设置（revision {rev}）', { rev: s.revision })}</h2>
       {err && <p className="error">{err}</p>}
+      {conflict && <p className="error">{conflict}</p>}
       {saved && <p className="hint">{saved}</p>}
       <form onSubmit={save}>
         <h3>{t('通用')}</h3>
@@ -441,8 +461,8 @@ function App() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
+    // 统一订阅替代 5s 整页轮询：快照与事件衔接无遗漏，有变化时重载。
+    return watchTopics([], () => load());
   }, [load]);
 
   const unlock = async (e) => {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 )
 
 func (d *Daemon) handleFiles(w http.ResponseWriter, r *http.Request) {
@@ -15,20 +17,7 @@ func (d *Daemon) handleFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
 		return
 	}
-	type fileView struct {
-		RootID     string  `json:"rootId"`
-		Path       string  `json:"path"`
-		Name       string  `json:"name"`
-		Size       *uint64 `json:"size"`
-		SeedHash   string  `json:"seedHash"`
-		Blocks     *uint64 `json:"blocks"`
-		SeedPrice  string  `json:"seedPrice"`
-		BlockPrice string  `json:"blockPrice"`
-		Override   bool    `json:"override"`
-		State      string  `json:"state"`
-		Error      string  `json:"error,omitempty"`
-	}
-	views := []fileView{}
+	views := []kmapi.FileView{}
 	handles := d.roots.list()
 	for _, h := range handles {
 		if h.deleted || h.catalog == nil || h.pricing == nil {
@@ -49,11 +38,11 @@ func (d *Daemon) handleFiles(w http.ResponseWriter, r *http.Request) {
 				v := e.Size
 				size = &v
 			}
-			views = append(views, fileView{
+			views = append(views, kmapi.FileView{
 				RootID: h.root.ID, Path: e.RelativePath, Name: e.Name,
 				Size: size, SeedHash: e.SeedHashHex, Blocks: blocks,
 				SeedPrice: seedPrice, BlockPrice: blockPrice, Override: override,
-				State: e.State, Error: e.Error,
+				State: e.State, Error: optStr(e.Error),
 			})
 		}
 	}
@@ -63,7 +52,7 @@ func (d *Daemon) handleFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		return views[i].Path < views[j].Path
 	})
-	writeJSON(w, map[string]any{"files": views})
+	writeJSON(w, kmapi.FilesView{Files: views})
 }
 
 func (d *Daemon) handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
@@ -75,15 +64,20 @@ func (d *Daemon) handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
 		return
 	}
-	var body struct {
-		RootID string `json:"rootId"`
-		Force  bool   `json:"force"`
-	}
+	var body kmapi.CatalogRefreshRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if body.RootID == "" {
+	rootID := ""
+	if body.RootID != nil {
+		rootID = *body.RootID
+	}
+	force := false
+	if body.Force != nil {
+		force = *body.Force
+	}
+	if rootID == "" {
 		// Refresh all roots serially (each catalog has its own queue).
 		type one struct {
 			RootID string `json:"rootId"`
@@ -97,7 +91,7 @@ func (d *Daemon) handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 			if h.catalog == nil {
 				continue
 			}
-			report, err := h.catalog.Refresh(r.Context(), body.Force)
+			report, err := h.catalog.Refresh(r.Context(), force)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -108,12 +102,12 @@ func (d *Daemon) handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 		d.feedCollectors()
 		return
 	}
-	h, ok := d.roots.get(body.RootID)
+	h, ok := d.roots.get(rootID)
 	if !ok || h.catalog == nil {
 		http.Error(w, "售卖根不可用", http.StatusNotFound)
 		return
 	}
-	report, err := h.catalog.Refresh(r.Context(), body.Force)
+	report, err := h.catalog.Refresh(r.Context(), force)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

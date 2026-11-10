@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 )
 
 // handleBrowse lists subdirectories of an absolute path so the Web UI can
@@ -44,17 +46,13 @@ func (d *Daemon) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "读取目录失败: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	type entry struct {
-		Name string `json:"name"`
-		Path string `json:"path"`
-	}
-	dirs := []entry{}
+	dirs := []kmapi.BrowseEntry{}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		// Skip symlinks that escape nowhere? List them; selection validates.
-		dirs = append(dirs, entry{Name: e.Name(), Path: filepath.Join(cleaned, e.Name())})
+		dirs = append(dirs, kmapi.BrowseEntry{Name: e.Name(), Path: filepath.Join(cleaned, e.Name())})
 		if len(dirs) >= 500 {
 			break
 		}
@@ -64,5 +62,5 @@ func (d *Daemon) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if parent == cleaned {
 		parent = ""
 	}
-	writeJSON(w, map[string]any{"path": cleaned, "parent": parent, "dirs": dirs})
+	writeJSON(w, kmapi.BrowseView{Path: cleaned, Parent: reqStr(parent), Dirs: dirs})
 }

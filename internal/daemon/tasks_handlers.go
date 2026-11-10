@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 )
 
 // handleTasks creates or reuses a download task. Duplicate submissions for the
@@ -18,7 +20,7 @@ func (d *Daemon) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, map[string]any{"tasks": d.tasks.list()})
+		writeJSON(w, taskListDTO(d.tasks.list()))
 	case http.MethodPost:
 		d.mu.Lock()
 		locked := d.state != StateUnlocked
@@ -31,9 +33,7 @@ func (d *Daemon) handleTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "后台停止中，不再接收新任务", http.StatusServiceUnavailable)
 			return
 		}
-		var body struct {
-			SeedHashHex string `json:"seedHashHex"`
-		}
+		var body kmapi.CreateTaskRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -51,7 +51,7 @@ func (d *Daemon) handleTasks(w http.ResponseWriter, r *http.Request) {
 		if created {
 			w.WriteHeader(http.StatusCreated)
 		}
-		writeJSON(w, task)
+		writeJSON(w, taskDTO(task))
 	default:
 		methodNotAllowed(w)
 	}
@@ -83,7 +83,7 @@ func (d *Daemon) handleTaskRoute(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true})
+		writeJSON(w, kmapi.Ok{Ok: true})
 		return
 	}
 	if len(parts) != 1 {
@@ -99,13 +99,13 @@ func (d *Daemon) handleTaskRoute(w http.ResponseWriter, r *http.Request) {
 		// Fall back to persisted evidence so a restarted daemon can still
 		// report completed tasks.
 		if persisted := d.loadPersistedTask(seed); persisted != nil {
-			writeJSON(w, persisted)
+			writeJSON(w, taskDTO(persisted))
 			return
 		}
 		http.Error(w, "任务不存在", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, t)
+	writeJSON(w, taskDTO(t))
 }
 
 func (d *Daemon) ensureTask(ctx context.Context, seed string) (*Task, bool, error) {
@@ -258,7 +258,7 @@ func (d *Daemon) serveTaskEvents(w http.ResponseWriter, r *http.Request, seed st
 		d.tasks.mu.Unlock()
 		// Emit the persisted state once, then close.
 		if persisted := d.loadPersistedTask(seed); persisted != nil {
-			_ = json.NewEncoder(w).Encode(persisted)
+			_ = json.NewEncoder(w).Encode(taskDTO(persisted))
 		} else {
 			http.Error(w, "任务不存在", http.StatusNotFound)
 		}
@@ -268,7 +268,7 @@ func (d *Daemon) serveTaskEvents(w http.ResponseWriter, r *http.Request, seed st
 		t.subs = make(map[chan Task]struct{})
 	}
 	t.subs[ch] = struct{}{}
-	current := *t
+	current := taskDTO(t)
 	d.tasks.mu.Unlock()
 	defer func() {
 		d.tasks.mu.Lock()
@@ -284,9 +284,10 @@ func (d *Daemon) serveTaskEvents(w http.ResponseWriter, r *http.Request, seed st
 		case <-r.Context().Done():
 			return
 		case updated := <-ch:
-			_ = writeSSE(w, updated)
+			dto := taskDTO(&updated)
+			_ = writeSSE(w, dto)
 			flusher.Flush()
-			if updated.State == TaskDone || updated.State == TaskFailed || updated.State == TaskCancelled {
+			if dto.State == string(TaskDone) || dto.State == string(TaskFailed) || dto.State == string(TaskCancelled) {
 				return
 			}
 		case <-time.After(30 * time.Second):
@@ -296,7 +297,7 @@ func (d *Daemon) serveTaskEvents(w http.ResponseWriter, r *http.Request, seed st
 	}
 }
 
-func writeSSE(w http.ResponseWriter, t Task) error {
+func writeSSE(w http.ResponseWriter, t kmapi.Task) error {
 	raw, err := json.Marshal(t)
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 )
 
@@ -20,11 +21,7 @@ func (d *Daemon) handlePricingDefaults(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "后台停止中", http.StatusServiceUnavailable)
 		return
 	}
-	var body struct {
-		SeedPrice  string `json:"seedPrice"`
-		BlockPrice string `json:"blockPrice"`
-		Revision   int64  `json:"revision"`
-	}
+	var body kmapi.PricingDefaultsRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -51,7 +48,8 @@ func (d *Daemon) handlePricingDefaults(w http.ResponseWriter, r *http.Request) {
 		_ = h.pricing.SetDefaults(settings.Server.DefaultSeedPriceSatoshis, settings.Server.DefaultFullBlockPriceSatoshis)
 	}
 	d.settingsApplyMu.Unlock()
-	writeJSON(w, map[string]any{"seedPrice": updated.Server.DefaultSeedPriceSatoshis, "blockPrice": updated.Server.DefaultFullBlockPriceSatoshis, "revision": updated.Revision})
+	writeJSON(w, kmapi.PricingDefaultsResponse{SeedPrice: updated.Server.DefaultSeedPriceSatoshis, BlockPrice: updated.Server.DefaultFullBlockPriceSatoshis, Revision: updated.Revision})
+	d.publishSettings(updated.Revision)
 }
 
 func (d *Daemon) handlePricingBatch(w http.ResponseWriter, r *http.Request) {
@@ -67,13 +65,7 @@ func (d *Daemon) handlePricingBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "后台停止中", http.StatusServiceUnavailable)
 		return
 	}
-	var body struct {
-		RootID     string `json:"rootId"`
-		Mode       string `json:"mode"`
-		Path       string `json:"path"`
-		SeedPrice  string `json:"seedPrice"`
-		BlockPrice string `json:"blockPrice"`
-	}
+	var body kmapi.PricingBatchRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -87,6 +79,10 @@ func (d *Daemon) handlePricingBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "售卖根不可用", http.StatusNotFound)
 		return
 	}
+	path := ""
+	if body.Path != nil {
+		path = *body.Path
+	}
 	entries, err := h.catalog.List(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -94,7 +90,7 @@ func (d *Daemon) handlePricingBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	paths := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if body.Path != "" && !(e.RelativePath == body.Path || len(e.RelativePath) > len(body.Path)+1 && e.RelativePath[:len(body.Path)+1] == body.Path+"/") {
+		if path != "" && !(e.RelativePath == path || len(e.RelativePath) > len(path)+1 && e.RelativePath[:len(path)+1] == path+"/") {
 			continue
 		}
 		paths = append(paths, e.RelativePath)
@@ -114,7 +110,7 @@ func (d *Daemon) handlePricingBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mode must be all or unpriced", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"updated": len(paths)})
+	writeJSON(w, kmapi.PricingBatchResponse{Updated: len(paths)})
 }
 
 func (d *Daemon) handlePricingFile(w http.ResponseWriter, r *http.Request) {
@@ -128,12 +124,7 @@ func (d *Daemon) handlePricingFile(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		var body struct {
-			RootID     string `json:"rootId"`
-			Path       string `json:"path"`
-			SeedPrice  string `json:"seedPrice"`
-			BlockPrice string `json:"blockPrice"`
-		}
+		var body kmapi.PricingFileRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -147,7 +138,7 @@ func (d *Daemon) handlePricingFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, map[string]any{"updated": body.Path})
+		writeJSON(w, kmapi.PricingFileResponse{Updated: body.Path})
 	case http.MethodDelete:
 		rootID := r.URL.Query().Get("rootId")
 		path := r.URL.Query().Get("path")
@@ -164,7 +155,7 @@ func (d *Daemon) handlePricingFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, map[string]any{"cleared": path})
+		writeJSON(w, kmapi.PricingClearResponse{Cleared: path})
 	default:
 		methodNotAllowed(w)
 	}

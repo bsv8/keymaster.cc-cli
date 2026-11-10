@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -74,6 +75,10 @@ func cmdInstall(g globalFlags, args []string) int {
 	// directory to it, then run the shared privileged flow (stop a running
 	// service, back up binary+unit, replace both, activate with rollback).
 	// Repeatable: key/info/settings/business data are never touched.
+	// macOS root goes through the launchd flow instead (no useradd/systemd).
+	if runtime.GOOS == "darwin" && os.Geteuid() == 0 {
+		return privilegedInstallOrUpgrade(layout, exe, "/usr/local/bin/km", "", true)
+	}
 	if err := ensureServiceUser(layout.Dir); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -82,7 +87,7 @@ func cmdInstall(g globalFlags, args []string) int {
 	if out == "" {
 		out = "/etc/systemd/system/km.service"
 	}
-	return privilegedInstallOrUpgrade(layout, exe, target, out)
+	return privilegedInstallOrUpgrade(layout, exe, target, out, true)
 }
 
 // ensureServiceUser creates the km service account/group when missing and

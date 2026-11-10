@@ -1,4 +1,4 @@
-//go:build !linux && !windows
+//go:build !linux && !windows && !darwin
 
 package main
 
@@ -49,15 +49,14 @@ func activateUnitAfterInstall(_, _ bool, _, _, _, _ string, _ bool, _ string) in
 
 // privilegedInstallOrUpgrade is Linux-only; on other platforms `km install`
 // never reaches the privileged path, but it must compile.
-func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string) int {
+func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string, webAdmin bool) int {
 	if exe != target {
 		if err := copyBinary(exe, target); err != nil {
 			fmt.Fprintln(os.Stderr, "km: 安装程序失败:", err)
 			return exitError
 		}
 	}
-	unit := strings.ReplaceAll(unitTemplate, "@DATA_DIR@", layout.Dir)
-	unit = strings.ReplaceAll(unit, "@KM_BIN@", target)
+	unit := renderUnit(target, layout.Dir, webAdmin)
 	if err := os.WriteFile(out, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入服务配置失败:", err)
 		return exitError

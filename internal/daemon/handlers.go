@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 )
 
@@ -25,7 +26,10 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	address := d.address
 	d.mu.Unlock()
 	if !hasStore {
-		writeJSON(w, map[string]any{"initialized": false, "state": StateUninitialized, "product": DaemonProduct, "apiVersion": DaemonAPIVersion})
+		writeJSON(w, kmapi.Status{
+			Initialized: false, State: string(StateUninitialized),
+			Product: DaemonProduct, APIVersion: DaemonAPIVersion,
+		})
 		return
 	}
 	info, _, err := d.store.Snapshot()
@@ -33,15 +37,15 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
-		"initialized": true,
-		"state":       state,
-		"network":     info.BsvNetwork,
-		"locked":      state != StateUnlocked,
-		"address":     address,
-		"publicKey":   publicKey,
-		"product":     DaemonProduct,
-		"apiVersion":  DaemonAPIVersion,
+	writeJSON(w, kmapi.Status{
+		Initialized: true,
+		State:       string(state),
+		Network:     reqStr(info.BsvNetwork),
+		Locked:      optBool(state != StateUnlocked, true),
+		Address:     reqStr(address),
+		PublicKey:   reqStr(publicKey),
+		Product:     DaemonProduct,
+		APIVersion:  DaemonAPIVersion,
 	})
 }
 
@@ -64,30 +68,30 @@ func (d *Daemon) handleInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	out := map[string]any{
-		"connected": true,
-		"network":   info.BsvNetwork,
-		"locked":    state != StateUnlocked,
-		"address":   address,
+	out := kmapi.Info{
+		Connected: true,
+		Network:   info.BsvNetwork,
+		Locked:    state != StateUnlocked,
+		Address:   address,
 	}
 	bal, cached, queryErr := d.queryBalance(r.Context())
 	if queryErr != nil {
-		out["error"] = queryErr.Error()
+		out.Error = optStr(queryErr.Error())
 		if cached != nil {
-			out["totalSats"] = cached.Total
-			out["availableSats"] = cached.Available
-			out["allocatedSats"] = cached.Allocated
-			out["queryTime"] = cached.QueryTime
-			out["cached"] = true
+			out.TotalSats = optU64(cached.Total, true)
+			out.AvailableSats = optU64(cached.Available, true)
+			out.AllocatedSats = optU64(cached.Allocated, true)
+			out.QueryTime = reqStr(cached.QueryTime)
+			out.Cached = optBool(true, true)
 		} else {
-			out["cached"] = false
+			out.Cached = optBool(false, true)
 		}
 	} else {
-		out["totalSats"] = bal.Total
-		out["availableSats"] = bal.Available
-		out["allocatedSats"] = bal.Allocated
-		out["queryTime"] = bal.QueryTime
-		out["cached"] = false
+		out.TotalSats = optU64(bal.Total, true)
+		out.AvailableSats = optU64(bal.Available, true)
+		out.AllocatedSats = optU64(bal.Allocated, true)
+		out.QueryTime = reqStr(bal.QueryTime)
+		out.Cached = optBool(false, true)
 	}
 	writeJSON(w, out)
 }
@@ -97,9 +101,7 @@ func (d *Daemon) handleUnlock(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	var body struct {
-		Password string `json:"password"`
-	}
+	var body kmapi.UnlockRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -128,7 +130,7 @@ func (d *Daemon) handleUnlock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, kmapi.Ok{Ok: true})
 }
 
 func (d *Daemon) handleRoots(w http.ResponseWriter, r *http.Request) {
@@ -143,14 +145,7 @@ func (d *Daemon) handleRoots(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		type rootView struct {
-			ID   string `json:"id"`
-			Path string `json:"path"`
-			// Accessible reports whether the daemon could open the directory.
-			Accessible bool   `json:"accessible"`
-			Error      string `json:"error,omitempty"`
-		}
-		views := make([]rootView, 0, len(info.Roots))
+		views := make([]kmapi.RootView, 0, len(info.Roots))
 		for _, root := range info.Roots {
 			accessible, errStr := true, ""
 			if h, ok := d.roots.get(root.ID); ok {
@@ -160,11 +155,11 @@ func (d *Daemon) handleRoots(w http.ResponseWriter, r *http.Request) {
 					accessible, errStr = false, "目录不可访问"
 				}
 			}
-			views = append(views, rootView{ID: root.ID, Path: root.Path, Accessible: accessible, Error: errStr})
+			views = append(views, kmapi.RootView{ID: root.ID, Path: root.Path, Accessible: accessible, Error: optStr(errStr)})
 		}
-		writeJSON(w, map[string]any{
-			"roots": views, "defaultDownloadRootID": info.DefaultDownloadRootID,
-			"revision": info.Revision,
+		writeJSON(w, kmapi.RootsView{
+			Roots: views, DefaultDownloadRootID: reqStr(info.DefaultDownloadRootID),
+			Revision: info.Revision,
 		})
 	case http.MethodPost:
 		if d.isStopping() {
@@ -178,10 +173,7 @@ func (d *Daemon) handleRoots(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "后台已锁定，请先解锁", http.StatusLocked)
 			return
 		}
-		var body struct {
-			Path     string `json:"path"`
-			Revision int64  `json:"revision"`
-		}
+		var body kmapi.AddRootRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -236,7 +228,8 @@ func (d *Daemon) handleRoots(w http.ResponseWriter, r *http.Request) {
 		d.roots.roots[id] = d.roots.openOne(r.Context(), appconfig.Root{ID: id, Path: cleaned}, settings.Server.DefaultSeedPriceSatoshis, settings.Server.DefaultFullBlockPriceSatoshis)
 		d.roots.mu.Unlock()
 		d.feedCollectors()
-		writeJSON(w, map[string]any{"id": id, "path": cleaned, "revision": updated.Revision})
+		writeJSON(w, kmapi.AddRootResponse{ID: id, Path: cleaned, Revision: updated.Revision})
+		d.publishRoots(id, updated.Revision)
 	case http.MethodDelete:
 		// DELETE /api/roots?id=<id>&revision=<rev> (exact path; the
 		// trailing-slash route below shares the same helper).
@@ -318,7 +311,8 @@ func (d *Daemon) deleteRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	d.roots.mu.Unlock()
 	d.roots.reapDeleted()
-	writeJSON(w, map[string]any{"ok": true, "revision": updated.Revision})
+	writeJSON(w, kmapi.RevisionedOk{Ok: true, Revision: updated.Revision})
+	d.publishRoots(id, updated.Revision)
 }
 
 func (d *Daemon) handleRootRoute(w http.ResponseWriter, r *http.Request) {
@@ -344,10 +338,7 @@ func (d *Daemon) handleRootsDefault(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "后台停止中", http.StatusServiceUnavailable)
 		return
 	}
-	var body struct {
-		ID       string `json:"id"`
-		Revision int64  `json:"revision"`
-	}
+	var body kmapi.SetDefaultRootRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -370,7 +361,8 @@ func (d *Daemon) handleRootsDefault(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "revision": updated.Revision})
+	writeJSON(w, kmapi.RevisionedOk{Ok: true, Revision: updated.Revision})
+	d.publishRoots(body.ID, updated.Revision)
 }
 
 func validSeedHash(s string) bool { return seedHashPattern.MatchString(strings.ToLower(s)) }

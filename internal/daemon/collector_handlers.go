@@ -5,43 +5,24 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/collector"
 )
 
-// handleCollectorStatus aggregates per-collector queues, intervals and state.
-func (d *Daemon) handleCollectorStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
-	if d.store == nil {
-		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
-		return
-	}
+// collectorStatusView 构建采集器状态视图，供 API 与事件发布共用。
+func (d *Daemon) collectorStatusView() kmapi.CollectorStatus {
 	_, settings, err := d.store.Snapshot()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return kmapi.CollectorStatus{}
 	}
-	type one struct {
-		ID             string `json:"id"`
-		Name           string `json:"name,omitempty"`
-		Endpoint       string `json:"endpoint,omitempty"`
-		Enabled        bool   `json:"enabled"`
-		PendingCount   int    `json:"pendingCount"`
-		ConfirmedCount int    `json:"confirmedCount"`
-		Inflight       bool   `json:"inflight"`
-		LastError      string `json:"lastError,omitempty"`
-		LastSuccessAt  *int64 `json:"lastSuccessAt"`
-	}
-	out := []one{}
+	out := []kmapi.CollectorStatusEntry{}
 	if d.collectors != nil {
 		names := map[string]string{}
 		for _, e := range settings.Server.Collector.Collectors {
 			names[e.ID] = e.Name
 		}
-		var mu []one
+		var mu []kmapi.CollectorStatusEntry
 		d.collectors.each(func(id string, svc *collector.Service) {
 			st := svc.Status()
 			pc, _ := st["pendingCount"].(int)
@@ -54,31 +35,48 @@ func (d *Daemon) handleCollectorStatus(w http.ResponseWriter, r *http.Request) {
 			if v, ok := st["lastSuccessAt"]; ok && v != nil {
 				switch n := v.(type) {
 				case int64:
-					lastPtr = &n
+					lastPtr = optI64(n, true)
 				case float64:
 					n64 := int64(n)
-					lastPtr = &n64
+					lastPtr = optI64(n64, true)
 				}
 			}
-			mu = append(mu, one{
-				ID: id, Name: names[id], Endpoint: ep, Enabled: en,
+			mu = append(mu, kmapi.CollectorStatusEntry{
+				ID: id, Name: optStr(names[id]), Endpoint: optStr(ep), Enabled: en,
 				PendingCount: pc, ConfirmedCount: cc, Inflight: inf,
-				LastError: le, LastSuccessAt: lastPtr,
+				LastError: optStr(le), LastSuccessAt: lastPtr,
 			})
 		})
 		out = mu
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	writeJSON(w, map[string]any{
-		"collectors": out,
-		"intervals": map[string]any{
+	return kmapi.CollectorStatus{
+		Collectors: out,
+		Intervals: map[string]any{
 			"earlyTriggerCount": settings.Server.Collector.EarlyTriggerCount,
 			"submitIntervalMs":  settings.Server.Collector.SubmitIntervalMs,
 			"retryBaseMs":       settings.Server.Collector.RetryBaseMs,
 			"retryCapMs":        settings.Server.Collector.RetryCapMs,
 		},
-		"officialEndpoint": appconfig.DefaultCollectorEndpoint,
-	})
+		OfficialEndpoint: reqStr(appconfig.DefaultCollectorEndpoint),
+	}
+}
+
+// handleCollectorStatus aggregates per-collector queues, intervals and state.
+func (d *Daemon) handleCollectorStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if d.store == nil {
+		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
+		return
+	}
+	if _, _, err := d.store.Snapshot(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, d.collectorStatusView())
 }
 
 // handleCollectorHistory lists submission operation history per collector,
@@ -92,14 +90,7 @@ func (d *Daemon) handleCollectorHistory(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
 		return
 	}
-	type one struct {
-		CollectorID string `json:"collectorId"`
-		ArchiveID   string `json:"archiveId"`
-		At          int64  `json:"at"`
-		Trigger     string `json:"trigger"`
-		Count       int    `json:"count"`
-	}
-	merged := []one{}
+	merged := []kmapi.CollectorSubmission{}
 	d.collectors.each(func(id string, svc *collector.Service) {
 		st := svc.Status()
 		hist, _ := st["history"].([]collector.Submission)
@@ -109,14 +100,14 @@ func (d *Daemon) handleCollectorHistory(w http.ResponseWriter, r *http.Request) 
 			_ = json.Unmarshal(raw, &hist)
 		}
 		for _, h := range hist {
-			merged = append(merged, one{CollectorID: id, ArchiveID: h.ArchiveID, At: h.At, Trigger: h.Trigger, Count: h.Count})
+			merged = append(merged, kmapi.CollectorSubmission{CollectorID: id, ArchiveID: h.ArchiveID, At: h.At, Trigger: h.Trigger, Count: h.Count})
 		}
 	})
 	sort.Slice(merged, func(i, j int) bool { return merged[i].At > merged[j].At })
 	if len(merged) > 100 {
 		merged = merged[:100]
 	}
-	writeJSON(w, map[string]any{"submissions": merged})
+	writeJSON(w, kmapi.CollectorHistory{Submissions: merged})
 }
 
 // handleCollectorDescription saves a file description (collector-owned store,
@@ -130,10 +121,7 @@ func (d *Daemon) handleCollectorDescription(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "采集未配置", http.StatusNotFound)
 		return
 	}
-	var body struct {
-		SeedHash    string `json:"seedHash"`
-		Description string `json:"description"`
-	}
+	var body kmapi.CollectorDescriptionRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -148,7 +136,8 @@ func (d *Daemon) handleCollectorDescription(w http.ResponseWriter, r *http.Reque
 		http.Error(w, firstErr.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, kmapi.Ok{Ok: true})
+	d.publishCollector()
 }
 
 // handleCollectorConfig replaces the collector target list and intervals
@@ -166,22 +155,15 @@ func (d *Daemon) handleCollectorConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "后台停止中", http.StatusServiceUnavailable)
 		return
 	}
-	var body struct {
-		Revision          int64                       `json:"revision"`
-		Collectors        *[]appconfig.CollectorEntry `json:"collectors,omitempty"`
-		EarlyTriggerCount *int                        `json:"earlyTriggerCount,omitempty"`
-		SubmitIntervalMs  *int64                      `json:"submitIntervalMs,omitempty"`
-		RetryBaseMs       *int64                      `json:"retryBaseMs,omitempty"`
-		RetryCapMs        *int64                      `json:"retryCapMs,omitempty"`
-	}
+	var body kmapi.CollectorConfigRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	d.settingsApplyMu.Lock()
-	_, err := d.store.UpdateSettings(body.Revision, func(next *appconfig.Settings) error {
+	updated, err := d.store.UpdateSettings(body.Revision, func(next *appconfig.Settings) error {
 		if body.Collectors != nil {
-			next.Server.Collector.Collectors = append([]appconfig.CollectorEntry(nil), *body.Collectors...)
+			next.Server.Collector.Collectors = collectorEntriesToApp(body.Collectors)
 		}
 		if body.EarlyTriggerCount != nil {
 			next.Server.Collector.EarlyTriggerCount = *body.EarlyTriggerCount
@@ -205,7 +187,9 @@ func (d *Daemon) handleCollectorConfig(w http.ResponseWriter, r *http.Request) {
 	d.rebuildCollectors()
 	d.feedCollectors()
 	d.settingsApplyMu.Unlock()
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, kmapi.Ok{Ok: true})
+	d.publishSettings(updated.Revision)
+	d.publishCollector()
 }
 
 // handleCollectorFlush triggers an immediate submit on every enabled collector.
@@ -228,7 +212,8 @@ func (d *Daemon) handleCollectorFlush(w http.ResponseWriter, r *http.Request) {
 			triggered = append(triggered, id)
 		}
 	})
-	writeJSON(w, map[string]any{"triggered": triggered})
+	writeJSON(w, kmapi.CollectorFlushResponse{Triggered: triggered})
+	d.publishCollector()
 }
 
 // handleCollectorRetry re-sends in-flight batches byte-identical.
@@ -247,5 +232,6 @@ func (d *Daemon) handleCollectorRetry(w http.ResponseWriter, r *http.Request) {
 			retried = append(retried, id)
 		}
 	})
-	writeJSON(w, map[string]any{"retried": retried})
+	writeJSON(w, kmapi.CollectorRetryResponse{Retried: retried})
+	d.publishCollector()
 }

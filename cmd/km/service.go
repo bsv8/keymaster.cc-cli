@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 )
 
 func cmdService(g globalFlags, args []string) int {
@@ -58,4 +60,57 @@ func parseServiceFlags(args []string) (dataDir, unitOut string, rest []string, e
 		err = fmt.Errorf("未知参数 %q", strings.Join(rest, " "))
 	}
 	return dataDir, unitOut, rest, err
+}
+
+// splitWebAdminFlag extracts --web-admin[=true|false] (default true,
+// matching `km daemon`). Services accept it at install time so all three
+// platforms record the same setting; the tray is never enabled for
+// services regardless of flags.
+func splitWebAdminFlag(args []string) (webAdmin bool, rest []string, err error) {
+	webAdmin = true
+	for _, a := range args {
+		switch {
+		case a == "--web-admin" || a == "--web-admin=true":
+			webAdmin = true
+		case a == "--web-admin=false":
+			webAdmin = false
+		case strings.HasPrefix(a, "--web-admin="):
+			return false, nil, fmt.Errorf("未知参数 %q", a)
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return webAdmin, rest, nil
+}
+
+// serviceExtraArgs renders the daemon flags a service always carries:
+// never the tray, plus --web-admin=false only when disabled.
+func serviceExtraArgs(webAdmin bool) string {
+	if webAdmin {
+		return ""
+	}
+	return " --web-admin=false"
+}
+
+// renderUnit renders the systemd template with the service daemon flags.
+func renderUnit(bin, dataDir string, webAdmin bool) string {
+	unit := strings.ReplaceAll(unitTemplate, "@DATA_DIR@", dataDir)
+	unit = strings.ReplaceAll(unit, "@KM_BIN@", bin)
+	unit = strings.ReplaceAll(unit, "@EXTRA_ARGS@", serviceExtraArgs(webAdmin))
+	return unit
+}
+
+// rejectSharedDesktopDir refuses a service data directory that equals the
+// desktop default (~/.km of the invoking user). Service and desktop must
+// not share a data directory: only one backend instance may own a
+// directory, and a service wallet must not be the interactive one.
+func rejectSharedDesktopDir(layout datadir.Layout) error {
+	desktop, err := datadir.Resolve("")
+	if err != nil {
+		return nil
+	}
+	if layout.Dir == desktop.Dir {
+		return fmt.Errorf("服务与桌面不得共用数据目录 %s，请用 --data-dir 指定服务专用目录", layout.Dir)
+	}
+	return nil
 }

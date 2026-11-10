@@ -1,5 +1,5 @@
 // Package inprocapi provides a production in-process http.RoundTripper that
-// routes apiclient requests to the same Daemon.Handler() without sockets.
+// routes kmapi client requests to the same Daemon.Handler() without sockets.
 //
 // Properties:
 //   - No net.Listen / net.Dial, no sockets, no environment proxy.

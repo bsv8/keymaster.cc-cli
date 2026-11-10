@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 	"github.com/bsv8/keymaster.cc-cli/internal/woc"
 )
@@ -106,4 +107,87 @@ func wocBaseURL(network string) string {
 		return "https://api.whatsonchain.com/v1/bsv/main"
 	}
 	return "https://api.whatsonchain.com/v1/bsv/test"
+}
+
+// startBalanceWatcher 启动余额统一采集：资金分配变化后由任务终态触发
+// refreshBalance，外部充值由本循环定期查链发现。幂等，停止中拒绝启动。
+func (d *Daemon) startBalanceWatcher() {
+	d.balanceMu.Lock()
+	if d.balanceWatching {
+		d.balanceMu.Unlock()
+		return
+	}
+	d.balanceWatching = true
+	d.balanceMu.Unlock()
+	parent := d.LifecycleContext()
+	if parent == nil {
+		parent = context.Background()
+	}
+	go func() {
+		d.refreshBalance("watcher-init")
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-parent.Done():
+				return
+			case <-ticker.C:
+				if d.isStopping() {
+					return
+				}
+				d.refreshBalance("watcher-tick")
+			}
+		}
+	}()
+}
+
+// refreshBalance 查询链上余额并在变化时发布。查询失败发布错误及缓存
+// 时间，不伪造零余额。网络 I/O 由调用者决定上下文（任务终态为异步）。
+func (d *Daemon) refreshBalance(reason string) {
+	_ = reason
+	if d.isStopping() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	bal, cached, queryErr := d.queryBalance(ctx)
+	data := map[string]any{}
+	errStr := ""
+	if queryErr != nil {
+		errStr = queryErr.Error()
+		data["error"] = errStr
+		if cached != nil {
+			data["totalSats"] = cached.Total
+			data["availableSats"] = cached.Available
+			data["allocatedSats"] = cached.Allocated
+			data["queryTime"] = cached.QueryTime
+			data["cached"] = true
+		} else {
+			data["cached"] = false
+		}
+	} else {
+		data["totalSats"] = bal.Total
+		data["availableSats"] = bal.Available
+		data["allocatedSats"] = bal.Allocated
+		data["queryTime"] = bal.QueryTime
+		data["cached"] = false
+	}
+	var total, avail, alloc uint64
+	if queryErr == nil {
+		total, avail, alloc = bal.Total, bal.Available, bal.Allocated
+	} else if cached != nil {
+		total, avail, alloc = cached.Total, cached.Available, cached.Allocated
+	}
+	cachedFlag := queryErr != nil && cached != nil
+	d.balanceMu.Lock()
+	prev := d.lastPublished
+	changed := !prev.published || prev.Total != total || prev.Available != avail ||
+		prev.Allocated != alloc || prev.Err != errStr || prev.Cached != cachedFlag
+	if changed {
+		d.lastPublished = lastBalance{Total: total, Available: avail, Allocated: alloc, Err: errStr, Cached: cachedFlag, published: true}
+	}
+	d.balanceMu.Unlock()
+	if changed && d.events != nil {
+		d.events.Publish(kmapi.TopicBalance, "", nil, data)
+	}
 }

@@ -27,18 +27,18 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	keyhold "github.com/bsv8/KeyHold/go/v2"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"golang.org/x/term"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/apiclient"
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
-	"github.com/bsv8/keymaster.cc-cli/internal/daemon"
-	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
+	"github.com/bsv8/keymaster.cc-cli/internal/daemonrun"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
 	"github.com/bsv8/keymaster.cc-cli/internal/migrate"
+	"github.com/bsv8/keymaster.cc-cli/internal/session"
+	"github.com/bsv8/keymaster.cc-cli/internal/tray"
 )
 
 const (
@@ -128,6 +128,8 @@ func run(args []string) int {
 		return cmdInit(g, cmdArgs)
 	case "daemon":
 		return cmdDaemon(g, cmdArgs)
+	case "internal-tray":
+		return cmdInternalTray()
 	case "unlock":
 		return cmdUnlock(g, cmdArgs)
 	case "info":
@@ -153,7 +155,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `用法:
   km install [--data-dir DIR]   安装程序、检查初始化状态、生成系统服务
   km init [--data-dir DIR]      独立初始化钱包和设置，不启动长期业务
-  km daemon [--data-dir DIR]    运行后台，已有钱包时以锁定状态启动
+  km daemon [--data-dir DIR] [--web-admin=false] [--no-tray]
+                         运行后台，已有钱包时以锁定状态启动；默认启用 Web Admin 与托盘
   km unlock [--api URL] [--data-dir DIR]
   km info [--api URL] [--data-dir DIR]
   km get <seedhashhex> [--api URL] [--data-dir DIR]
@@ -179,10 +182,6 @@ func isSeedHash(s string) bool {
 		}
 	}
 	return true
-}
-
-func resolveLayout(dataDir string) (datadir.Layout, error) {
-	return datadir.Resolve(dataDir)
 }
 
 // ttyReader returns a reader for interactive prompts: /dev/tty when stdin is
@@ -287,7 +286,7 @@ func cmdInit(g globalFlags, args []string) int {
 		fmt.Fprintln(os.Stderr, "km init 不接受参数")
 		return exitUsage
 	}
-	layout, err := resolveLayout(g.dataDir)
+	layout, err := session.ResolveLayout(g.dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -516,55 +515,66 @@ func cmdInit(g globalFlags, args []string) int {
 }
 
 func cmdDaemon(g globalFlags, args []string) int {
-	if len(args) != 0 {
-		fmt.Fprintln(os.Stderr, "km daemon 不接受参数")
-		return exitUsage
+	webAdmin := true
+	noTray := false
+	for _, a := range args {
+		switch a {
+		case "--web-admin", "--web-admin=true":
+			webAdmin = true
+		case "--web-admin=false":
+			webAdmin = false
+		case "--no-tray", "--no-tray=true":
+			noTray = true
+		case "--no-tray=false":
+			noTray = false
+		default:
+			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--web-admin=false] [--no-tray]")
+			return exitUsage
+		}
 	}
-	layout, err := resolveLayout(g.dataDir)
+	layout, err := session.ResolveLayout(g.dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
 	// Windows: when launched by SCM, run under the service host so Stop
-	// maps to the same daemon Close with bounded cleanup.
+	// maps to the same orderly shutdown with bounded cleanup.
 	if handled, code := runAsWindowsServiceIfNeeded(layout.Dir); handled {
 		return code
 	}
-	// Missing data prompts init; never wait for input in the service process.
-	if !layout.HasInitMarkers() {
-		if layout.HasAnyWallet() {
-			fmt.Fprintln(os.Stderr, "km: 数据不完整或为旧版，请先运行 km init（迁移或修复）")
-		} else {
-			fmt.Fprintln(os.Stderr, "km: 尚未初始化，请先运行 km init")
-		}
-		return exitError
+	mode := daemonrun.TrayAuto
+	if noTray {
+		mode = daemonrun.TrayNever
 	}
-	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir})
-	if err != nil {
-		if errors.Is(err, dlock.ErrActive) {
-			fmt.Fprintln(os.Stderr, "km: 数据目录已有后台在运行")
-			return exitError
-		}
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	defer d.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := d.Start(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
+	// Ctrl-C keeps the historic exit code; all lifecycle rules
+	// (tray isolation, serialized restart, close-and-wait) live in
+	// daemonrun. Missing init, lock conflicts and startup failures
+	// are reported there with the same messages as before.
+	return daemonrun.Run(ctx, daemonrun.Options{
+		DataDir:          layout.Dir,
+		WebAdmin:         webAdmin,
+		Tray:             mode,
+		ExitCodeOnSignal: exitCancelled,
+	})
+}
+
+// cmdInternalTray is the hidden tray child entry: same binary, no wallet,
+// no keys, no config, no locks, no business APIs. Stdin/stdout carry only
+// control frames; stderr carries diagnostics. It is never shown in usage.
+func cmdInternalTray() int {
+	// Refuse a terminal stdin: the child protocol needs a pipe from the
+	// daemon parent; an interactive shell would block forever on input
+	// with a stale tray showing.
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		fmt.Fprintln(os.Stderr, "km: internal-tray 是内部入口，不能直接运行（由 km daemon 按需启动）")
+		return exitUsage
 	}
-	addr, err := d.ServeHTTP(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
 	}
-	fmt.Printf("km 后台已启动（锁定状态）: http://%s/ 数据目录: %s\n", addr, layout.Dir)
-	fmt.Fprintln(os.Stderr, "Ctrl-C 结束（有界收尾）。")
-	<-ctx.Done()
-	fmt.Fprintln(os.Stderr, "退出中/收尾中…")
-	return exitCancelled
+	return tray.RunChild(os.Stdin, os.Stdout, logf)
 }
 
 func cmdUnlock(g globalFlags, args []string) int {
@@ -574,24 +584,24 @@ func cmdUnlock(g globalFlags, args []string) int {
 	}
 	// Unlock is for an external daemon. Never create an embedded daemon
 	// that would exit immediately just to run unlock.
-	base, err := apiclient.ResolveBaseURL(g.api, g.dataDir)
+	base, err := session.ResolveBaseURL(g.api, g.dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		fmt.Fprintln(os.Stderr, "km: 本地命令（info/get）启动时会自行询问密码并解锁，无需单独 unlock")
 		return exitError
 	}
-	if err := validateAPIURL(base); err != nil {
+	if err := session.ValidateAPIURL(base); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	probe := apiclient.NewExternal(base)
-	ctx, cancel := context.WithTimeout(context.Background(), apiclient.ProbeTimeout)
+	probe := kmapi.New(base, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), kmapi.ProbeTimeout)
 	defer cancel()
 	st, err := probe.Status(ctx)
 	if err != nil {
-		if isConnectionFailure(err) {
+		if session.IsConnectionFailure(err) {
 			fmt.Fprintln(os.Stderr, "km:", err)
 			fmt.Fprintln(os.Stderr, "km: 没有外部后台；本地命令（info/get）启动时会自行询问密码，不创建随即退出的内嵌后台")
 			return exitError
@@ -599,7 +609,7 @@ func cmdUnlock(g globalFlags, args []string) int {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	if err := checkDaemonIdentity(st); err != nil {
+	if err := kmapi.CheckIdentity(st); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
@@ -616,7 +626,7 @@ func cmdUnlock(g globalFlags, args []string) int {
 		fmt.Fprintln(os.Stderr, "km: 密码不能为空")
 		return exitError
 	}
-	unlockCtx, unlockCancel := context.WithTimeout(context.Background(), apiclient.LongTimeout)
+	unlockCtx, unlockCancel := context.WithTimeout(context.Background(), kmapi.LongTimeout)
 	defer unlockCancel()
 	if err := probe.Unlock(unlockCtx, password); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -633,7 +643,7 @@ func cmdInfo(g globalFlags, args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	sess, warning, err := OpenSession(ctx, g.api, g.dataDir)
+	sess, warning, err := session.OpenSession(ctx, g.api, g.dataDir, readHiddenPasswordWithContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -648,9 +658,9 @@ func cmdInfo(g globalFlags, args []string) int {
 		return exitError
 	}
 	// Render: mode, network, lock, address, QR, balance with time/cache/error.
-	network, _ := info["network"].(string)
-	locked, _ := info["locked"].(bool)
-	address, _ := info["address"].(string)
+	network := info.Network
+	locked := info.Locked
+	address := info.Address
 	if sess.Mode == "embedded" {
 		fmt.Printf("模式: 内嵌后台（当前进程，退出即关闭）\n")
 	} else {
@@ -661,43 +671,42 @@ func cmdInfo(g globalFlags, args []string) int {
 	if network != "" {
 		fmt.Printf("网络: %s\n", network)
 	}
-	if _, ok := info["locked"]; ok {
-		if locked {
-			fmt.Println("状态: 已锁定")
-		} else {
-			fmt.Println("状态: 已解锁")
-		}
+	if locked {
+		fmt.Println("状态: 已锁定")
+	} else {
+		fmt.Println("状态: 已解锁")
 	}
 	if address != "" {
 		fmt.Printf("收款地址: %s\n", address)
 		printQR(address)
 	}
-	if errStr, ok := info["error"].(string); ok && errStr != "" {
-		fmt.Printf("余额查询失败: %s\n", errStr)
-		if cached, _ := info["cached"].(bool); cached {
+	cached := info.Cached != nil && *info.Cached
+	if info.Error != nil && *info.Error != "" {
+		fmt.Printf("余额查询失败: %s\n", *info.Error)
+		if cached {
 			fmt.Println("（显示缓存，已标明时间，非实时）")
 		}
 	} else {
-		if total, ok := info["totalSats"]; ok {
-			fmt.Printf("余额: %v sats", total)
-			if avail, ok := info["availableSats"]; ok {
-				fmt.Printf("（可用 %v", avail)
-				if alloc, ok := info["allocatedSats"]; ok {
-					fmt.Printf("，占用 %v", alloc)
+		if info.TotalSats != nil {
+			fmt.Printf("余额: %d sats", *info.TotalSats)
+			if info.AvailableSats != nil {
+				fmt.Printf("（可用 %d", *info.AvailableSats)
+				if info.AllocatedSats != nil {
+					fmt.Printf("，占用 %d", *info.AllocatedSats)
 				}
 				fmt.Print("）")
 			}
 			fmt.Println()
 		}
-		if qt, ok := info["queryTime"].(string); ok && qt != "" {
-			if cached, _ := info["cached"].(bool); cached {
-				fmt.Printf("查询时间: %s（缓存）\n", qt)
+		if info.QueryTime != nil && *info.QueryTime != "" {
+			if cached {
+				fmt.Printf("查询时间: %s（缓存）\n", *info.QueryTime)
 			} else {
-				fmt.Printf("查询时间: %s\n", qt)
+				fmt.Printf("查询时间: %s\n", *info.QueryTime)
 			}
 		}
 	}
-	if connected, _ := info["connected"].(bool); !connected {
+	if !info.Connected {
 		fmt.Fprintln(os.Stderr, "km: 后台未连接")
 		return exitError
 	}
@@ -728,7 +737,7 @@ func cmdGet(g globalFlags, args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	sess, warning, err := OpenSession(ctx, g.api, g.dataDir)
+	sess, warning, err := session.OpenSession(ctx, g.api, g.dataDir, readHiddenPasswordWithContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
@@ -752,13 +761,45 @@ func cmdGet(g globalFlags, args []string) int {
 	} else {
 		fmt.Printf("已提交下载任务: %s（后台落入默认下载根；断开只停显示，后台继续）\n", seed)
 	}
-	// Poll progress. Request cancellation never cancels the task itself;
-	// only explicit cancel or (embedded) session close does.
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	// Progress via the unified subscription (snapshot first, then changes).
+	// Request cancellation never cancels the task itself; only explicit
+	// cancel or (embedded) session close does.
 	for {
-		select {
-		case <-ctx.Done():
+		terminal, resync := watchTaskProgress(ctx, client, seed)
+		if terminal != "" {
+			switch terminal {
+			case "done":
+				// Session.Close waits for the execution goroutine and
+				// index/refresh收尾, not just the state string.
+				return exitOK
+			case "failed":
+				return exitError
+			case "cancelled":
+				return exitCancelled
+			}
+		}
+		if resync {
+			// Gap/overflow/instance change: query the original task once,
+			// render it, then resubscribe. Never repurchase here.
+			task, err := client.GetTask(ctx, seed)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "km:", err)
+				fmt.Fprintln(os.Stderr, "km: 已提交任务，查询失败不重复采购；请重新 km get 查询原任务")
+				return exitError
+			}
+			if st := renderTaskProgress(seed, task); st != "" {
+				switch st {
+				case "done":
+					return exitOK
+				case "failed":
+					return exitError
+				case "cancelled":
+					return exitCancelled
+				}
+			}
+			continue
+		}
+		if ctx.Err() != nil {
 			if sess.Mode == "embedded" {
 				fmt.Fprintln(os.Stderr, "已取消在途工作，有界收尾中…")
 				// Session.Close (deferred) drains with bounds; report
@@ -768,76 +809,164 @@ func cmdGet(g globalFlags, args []string) int {
 			}
 			fmt.Fprintln(os.Stderr, "已断开显示，后台继续（重新 km get 可查询；取消用 km get --cancel）")
 			return exitOK
-		case <-ticker.C:
-			task, err := client.GetTask(ctx, seed)
+		}
+		// Subscribe ended (transport error or old backend): report like a
+		// failed poll, never repurchase.
+		fmt.Fprintln(os.Stderr, "km: 订阅中断")
+		fmt.Fprintln(os.Stderr, "km: 已提交任务，查询失败不重复采购；请重新 km get 查询原任务")
+		return exitError
+	}
+}
+
+// watchTaskProgress streams one subscription until a terminal task state,
+// a resync request, a transport failure, or command cancellation.
+// Returns the terminal state ("" when none) and whether resync was requested.
+// Cancellation is reported through ctx and handled by the caller, which
+// keeps the embedded/external Ctrl-C distinction in one place.
+func watchTaskProgress(ctx context.Context, client *kmapi.Client, seed string) (terminal string, resync bool) {
+	var done string
+	err := client.SubscribeEvents(ctx, []string{kmapi.TopicTask},
+		func(snap kmapi.SnapshotEvent) {
+			tasks := snapshotTasks(snap, seed)
+			for _, t := range tasks {
+				if st := renderTaskProgress(seed, t); st != "" {
+					done = st
+				}
+			}
+		},
+		func(env kmapi.EventEnvelope) bool {
+			if env.Topic != kmapi.TopicTask {
+				return true
+			}
+			if env.EntityID == nil || *env.EntityID != seed {
+				return true
+			}
+			task, err := envelopeTask(env)
 			if err != nil {
-				// Already submitted: query the original task on retry,
-				// never repurchase here.
-				fmt.Fprintln(os.Stderr, "km:", err)
-				fmt.Fprintln(os.Stderr, "km: 已提交任务，查询失败不重复采购；请重新 km get 查询原任务")
-				return exitError
+				return true
 			}
-			state, _ := task["state"].(string)
-			detail, _ := task["detail"].(string)
-			done, _ := task["blocksDone"].(float64)
-			total, _ := task["blocksTotal"].(float64)
-			fmt.Printf("任务 %s: %s %.0f/%.0f %s\n", seed, state, done, total, detail)
-			if recs, ok := task["recommended"].([]any); ok && len(recs) > 0 {
-				names := make([]string, 0, len(recs))
-				for _, r := range recs {
-					if s, ok := r.(string); ok {
-						names = append(names, s)
-					}
-				}
-				if len(names) > 0 {
-					fmt.Printf("推荐名: %s\n", strings.Join(names, ", "))
-				}
+			if st := renderTaskProgress(seed, task); st != "" {
+				done = st
+				return false
 			}
-			switch state {
-			case "done":
-				if path, ok := task["finalPath"].(string); ok && path != "" {
-					fmt.Printf("完成: %s\n", path)
-				}
-				// Session.Close waits for the execution goroutine and
-				// index/refresh收尾, not just the state string.
-				return exitOK
-			case "failed":
-				if msg, ok := task["error"].(string); ok {
-					fmt.Fprintln(os.Stderr, "km: 下载失败:", msg)
-				}
-				return exitError
-			case "cancelled":
-				fmt.Println("已取消")
-				return exitCancelled
-			}
+			return true
+		},
+		func() bool {
+			resync = true
+			return false
+		})
+	if done != "" {
+		return done, false
+	}
+	if resync {
+		return "", true
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+	}
+	return "", false
+}
+
+// snapshotTasks extracts our task from a snapshot (first frame, no loss).
+func snapshotTasks(snap kmapi.SnapshotEvent, seed string) []kmapi.Task {
+	if snap.State == nil {
+		return nil
+	}
+	raw, ok := snap.State[kmapi.TopicTask]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var list kmapi.TaskList
+	if err := json.Unmarshal(encoded, &list); err != nil {
+		// Single-task shape fallback (forward tolerance).
+		var one kmapi.Task
+		if err := json.Unmarshal(encoded, &one); err != nil || one.SeedHashHex != seed {
+			return nil
+		}
+		return []kmapi.Task{one}
+	}
+	var out []kmapi.Task
+	for _, t := range list.Tasks {
+		if t.SeedHashHex == seed {
+			out = append(out, t)
 		}
 	}
+	return out
+}
+
+// envelopeTask decodes a task change payload.
+func envelopeTask(env kmapi.EventEnvelope) (kmapi.Task, error) {
+	var task kmapi.Task
+	if env.Data == nil {
+		return task, fmt.Errorf("任务事件缺少数据")
+	}
+	raw, err := json.Marshal(env.Data)
+	if err != nil {
+		return task, err
+	}
+	if err := json.Unmarshal(raw, &task); err != nil {
+		return task, err
+	}
+	return task, nil
+}
+
+// renderTaskProgress prints one task state; returns the terminal state or "".
+func renderTaskProgress(seed string, task kmapi.Task) string {
+	state := task.State
+	detail := ""
+	if task.Detail != nil {
+		detail = *task.Detail
+	}
+	fmt.Printf("任务 %s: %s %d/%d %s\n", seed, state, task.BlocksDone, task.BlocksTotal, detail)
+	if len(task.Recommended) > 0 {
+		fmt.Printf("推荐名: %s\n", strings.Join(task.Recommended, ", "))
+	}
+	switch state {
+	case "done":
+		if task.FinalPath != nil && *task.FinalPath != "" {
+			fmt.Printf("完成: %s\n", *task.FinalPath)
+		}
+		return "done"
+	case "failed":
+		if task.Error != nil {
+			fmt.Fprintln(os.Stderr, "km: 下载失败:", *task.Error)
+		}
+		return "failed"
+	case "cancelled":
+		fmt.Println("已取消")
+		return "cancelled"
+	}
+	return ""
 }
 
 // cmdGetCancel only acts on an external daemon. Without one it never starts
 // an embedded daemon just to cancel, never steals the data directory lock,
 // and never adds an implicit cross-process cancel channel.
 func cmdGetCancel(g globalFlags, seed string) int {
-	base, err := apiclient.ResolveBaseURL(g.api, g.dataDir)
+	base, err := session.ResolveBaseURL(g.api, g.dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		fmt.Fprintln(os.Stderr, "km: 没有外部后台时不抢占数据目录锁；本地执行者通过自身 Ctrl-C 取消")
 		return exitError
 	}
-	if err := validateAPIURL(base); err != nil {
+	if err := session.ValidateAPIURL(base); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	probe := apiclient.NewExternal(base)
-	ctx, cancel := context.WithTimeout(context.Background(), apiclient.ProbeTimeout)
+	probe := kmapi.New(base, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), kmapi.ProbeTimeout)
 	defer cancel()
 	st, err := probe.Status(ctx)
 	if err != nil {
-		if isConnectionFailure(err) {
+		if session.IsConnectionFailure(err) {
 			// No daemon to cancel against. Distinguish lock-held from idle.
-			layout, lerr := resolveLayout(g.dataDir)
+			layout, lerr := session.ResolveLayout(g.dataDir)
 			if lerr == nil {
-				if guardErr := tryLockHeld(layout.Dir); guardErr {
+				if guardErr := session.TryLockHeld(layout.Dir); guardErr {
 					fmt.Fprintln(os.Stderr, "km: 数据目录已有本地进程占用，不抢占，不新增跨进程取消通道；请用该进程的 Ctrl-C 取消")
 				} else {
 					fmt.Fprintln(os.Stderr, "km: 没有运行中的后台可取消（外部不可达，本地无占用）")
@@ -849,11 +978,11 @@ func cmdGetCancel(g globalFlags, seed string) int {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	if err := checkDaemonIdentity(st); err != nil {
+	if err := kmapi.CheckIdentity(st); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	cctx, ccancel := context.WithTimeout(context.Background(), apiclient.ShortTimeout)
+	cctx, ccancel := context.WithTimeout(context.Background(), kmapi.ShortTimeout)
 	defer ccancel()
 	if err := probe.CancelTask(cctx, seed); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)

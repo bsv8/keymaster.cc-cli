@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/apiclient"
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
+	"github.com/bsv8/keymaster.cc-cli/internal/session"
 )
 
 func defaultUnitPath() string { return "/etc/systemd/system/km.service" }
@@ -136,7 +137,7 @@ func backupLiveFile(path string, mode os.FileMode, desc string) (backup string, 
 // up the live binary and unit, replaces both, and activates the service.
 // Wallets, settings and business data are never touched. Any failure rolls
 // back to the previous version and returns a non-zero exit code.
-func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string) int {
+func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string, webAdmin bool) int {
 	wasActive, ok := stopServiceForUpgrade(out)
 	if !ok {
 		return exitError
@@ -169,8 +170,7 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string) 
 			return exitError
 		}
 	}
-	unit := strings.ReplaceAll(unitTemplate, "@DATA_DIR@", layout.Dir)
-	unit = strings.ReplaceAll(unit, "@KM_BIN@", target)
+	unit := renderUnit(target, layout.Dir, webAdmin)
 	if err := writeFileAtomic(out, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入 systemd unit 失败:", err)
 		restoreAfterFailure(target, backup, out, unitBackup, unitReplaced)
@@ -182,7 +182,12 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string) 
 }
 
 func serviceInstall(globalDataDir string, args []string) int {
-	dataDirFlag, unitOut, _, err := parseServiceFlags(args)
+	webAdmin, rest, err := splitWebAdminFlag(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "km service install:", err)
+		return exitUsage
+	}
+	dataDirFlag, unitOut, _, err := parseServiceFlags(rest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km service install:", err)
 		return exitUsage
@@ -200,6 +205,10 @@ func serviceInstall(globalDataDir string, args []string) int {
 	}
 	layout, err := datadir.Resolve(dataDir)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "km:", err)
+		return exitError
+	}
+	if err := rejectSharedDesktopDir(layout); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
@@ -227,13 +236,12 @@ func serviceInstall(globalDataDir string, args []string) int {
 			fmt.Fprintln(os.Stderr, "km:", err)
 			return exitError
 		}
-		return privilegedInstallOrUpgrade(layout, exe, target, out)
+		return privilegedInstallOrUpgrade(layout, exe, target, out, webAdmin)
 	}
 	// Non-root verification path: write the unit for inspection only.
 	// Activation below warns without systemd and keeps exit 0.
 	target = exe
-	unit := strings.ReplaceAll(unitTemplate, "@DATA_DIR@", layout.Dir)
-	unit = strings.ReplaceAll(unit, "@KM_BIN@", target)
+	unit := renderUnit(target, layout.Dir, webAdmin)
 	if err := writeFileAtomic(out, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入 systemd unit 失败:", err)
 		return exitError
@@ -291,7 +299,7 @@ func serviceStatus(globalDataDir string, _ []string) int {
 		fmt.Fprintln(os.Stderr, "km: 服务未运行（或无 systemd），可用 km daemon 手动启动；查看 journalctl -u km")
 	}
 	// Then daemon API when reachable.
-	base, err := apiclient.ResolveBaseURL("", globalDataDir)
+	base, err := session.ResolveBaseURL("", globalDataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 未配置 API 地址:", err)
 		if activeErr != nil {
@@ -299,14 +307,21 @@ func serviceStatus(globalDataDir string, _ []string) int {
 		}
 		return exitOK
 	}
-	client := apiclient.NewExternal(base)
+	client := kmapi.New(base, nil)
 	st, err := client.Status(nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 后台 API 不可达:", err)
 		return exitError
 	}
+	initialized, state, network, locked := st.Initialized, st.State, "", false
+	if st.Network != nil {
+		network = *st.Network
+	}
+	if st.Locked != nil {
+		locked = *st.Locked
+	}
 	fmt.Printf("后台 API: %s initialized=%v state=%v network=%v locked=%v\n",
-		base, st["initialized"], st["state"], st["network"], st["locked"])
+		base, initialized, state, network, locked)
 	return exitOK
 }
 
