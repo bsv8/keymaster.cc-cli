@@ -106,6 +106,32 @@ type Daemon struct {
 
 	connectMgr *connect.Manager
 
+	// paymentHeld 为冻结的付款计划（批准前冻结，批准后原样广播）。
+	// 仅内存持有，重启后按持久 rawHex 直接广播，不重新选币。
+	paymentsMu  sync.Mutex
+	paymentHeld map[string]*heldPayment
+
+	// dispatchMu/dispatchStopping/dispatchWg 统计 WS 与进程内共用的分派器在途请求。
+	// 关闭时先停止接收（新请求直接拒绝并取消在途上下文），再等待在途付款执行退出，
+	// 之后才释放钱包目录锁；排空失败保留锁并报告关闭失败。
+	// 与 state=Stopping 不同：该标记专用于 Add/Wait 配对的原子性，避免新请求
+	// 在排空等待开始后溜入。
+	dispatchMu       sync.Mutex
+	dispatchStopping bool
+	dispatchWg       sync.WaitGroup
+
+	// paymentRetry 为付款记录落盘失败时的待重试写入（内存队列 + 定时器链）。
+	// 只重试记录写入本身（条件写，防覆盖后续状态），绝不重新选币/签名/广播；
+	// 进程重启后由启动收敛接管（遗留 pending 按有无冻结与审批收敛）。
+	// paymentRetryStopped 为永久停止标记：关闭流程在同一把锁下设置，
+	// enqueue 与回调均检查；关闭时等待正在执行的重试结束，保证 Close 返回后
+	// 旧实例不再写付款文件（同进程重开同一钱包目录时不会覆盖新实例数据）。
+	paymentRetryMu      sync.Mutex
+	paymentRetry        map[string]paymentRetryOp
+	paymentRetryTimer   *time.Timer
+	paymentRetryStopped bool
+	paymentRetryWg      sync.WaitGroup
+
 	// closeOnce/closeDone make Close idempotent and let concurrent or
 	// repeated callers wait for the same completed cleanup instead of
 	// mistaking an early return for finished cleanup.
@@ -282,6 +308,32 @@ func (d *Daemon) isStopping() bool {
 	return d.state == StateStopping
 }
 
+// stopDispatchAccepting 停止接收新的分派请求（WS 与进程内共用入口）。
+// 与 WaitGroup.Add 在同一把锁下配对，保证排空等待开始后不会再有新请求溜入。
+// 在关闭流程最靠前调用（与 state=Stopping 同一步），之后再取消在途上下文。
+func (d *Daemon) stopDispatchAccepting() {
+	d.dispatchMu.Lock()
+	d.dispatchStopping = true
+	d.dispatchMu.Unlock()
+}
+
+// waitDispatchDrain 等待在途分派请求（含在途付款执行）退出，超时返回错误。
+// 调用方负责在超时后保留文件锁并报告关闭失败，不得释放目录锁。
+// 广播因取消而中断的，会在返回前按 unknown 完成责任记录（执行路径内处理）。
+func (d *Daemon) waitDispatchDrain(timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		d.dispatchWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("daemon: 分派在途请求未在预算内排空")
+	}
+}
+
 // waitSeller bounded-waits for the seller loop (which itself waits, bounded,
 // for in-flight sessions to reach a persisted step) to exit.
 func (d *Daemon) waitSeller(timeout time.Duration) {
@@ -325,6 +377,9 @@ func (d *Daemon) close() error {
 	sellerCancel := d.sellerCancel
 	server := d.httpServer
 	d.mu.Unlock()
+	// 停止接收新的分派请求（WS 与进程内共用 Dispatch 入口）；
+	// 与在途统计 Add 在同一把锁下配对，保证排空等待开始后不会再有新请求溜入。
+	d.stopDispatchAccepting()
 	// Stop the transport-independent lifecycle (periodic refresh) first so
 	// no new background work starts while we drain.
 	d.startMu.Lock()
@@ -334,6 +389,8 @@ func (d *Daemon) close() error {
 	if cancel != nil {
 		cancel()
 	}
+	// 停止付款重试定时器；未落盘的待重试项由下次启动收敛接管，不在关闭时补写。
+	d.stopPaymentRetry()
 	{
 		done := make(chan struct{})
 		go func() {
@@ -358,6 +415,11 @@ func (d *Daemon) close() error {
 	}
 	d.wsConns = map[*wsConn]struct{}{}
 	d.wsMu.Unlock()
+	// 在途分派请求排空（WS 与进程内共用 Dispatch 入口，含在途付款执行）：
+	// 上一步关闭连接已取消在途上下文，这里等待执行退出（广播取消按 unknown
+	// 完成责任记录，见执行路径），之后才释放钱包目录锁。
+	// 排空失败保留文件锁并报告关闭失败；预算覆盖单次付款执行的最坏网络等待。
+	drainErr := d.waitDispatchDrain(45 * time.Second)
 	if d.tasks != nil {
 		d.tasks.stopAllAndWait(10 * time.Second)
 	}
@@ -413,7 +475,7 @@ func (d *Daemon) close() error {
 	d.privateKey = nil
 	// Break the seller cancel reference so a later Unlock cannot reuse it.
 	d.sellerCancel = nil
-	if storageErr == nil {
+	if storageErr == nil && drainErr == nil {
 		if d.storageGuard != nil {
 			_ = d.storageGuard.Release()
 			d.storageGuard = nil
@@ -425,7 +487,7 @@ func (d *Daemon) close() error {
 		return nil
 	}
 	// 异常收尾：保留文件锁（由进程退出释放），但已清理内存密钥。
-	return storageErr
+	return errors.Join(storageErr, drainErr)
 }
 
 // Unlock decrypts the pure KeyHold with password and moves to unlocked.

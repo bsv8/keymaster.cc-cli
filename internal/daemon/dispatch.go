@@ -87,6 +87,16 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 关闭期间停止接收：在途统计 Add 必须与停止标记检查原子进行，
+	// 否则新请求可能在排空等待开始后溜入并在锁释放后写盘。
+	d.dispatchMu.Lock()
+	if d.dispatchStopping {
+		d.dispatchMu.Unlock()
+		return nil, nil, errDetail(kmapi.ErrStopping, "后台停止中")
+	}
+	d.dispatchWg.Add(1)
+	d.dispatchMu.Unlock()
+	defer d.dispatchWg.Done()
 	// App 上下文禁止进入钱包管理方法。
 	if isAppCaller(ctx) && isWalletMethod(method) {
 		return nil, nil, errDetail(kmapi.ErrOriginRejected, "App 无权调用钱包管理方法")

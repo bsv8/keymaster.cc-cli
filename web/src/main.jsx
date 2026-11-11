@@ -5,6 +5,7 @@ import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
 import { initConnectReceiver, decideApproval } from './connect.js';
+import { interpretLockingScript } from 'keymaster-connect/script';
 
 const TABS = [
   { id: 'overview', label: '概览' },
@@ -436,6 +437,7 @@ function ConnectPanel() {
         {(approvals.length === 0) ? <p className="hint">无待办</p> : approvals.map((a) => (
           <div key={a.id} className="card" data-testid={`approval-${a.id}`} style={{ marginBottom: 8 }}>
             <p className="mono">{a.method} · {a.appId} · {a.origin}</p>
+            {a.method === 'payment.pay' ? <PaymentApprovalPreview params={a.params} /> : null}
             <div className="row"><button data-testid={`approve-${a.id}`} onClick={() => decide(a.id, 'approve')}>批准</button><button data-testid={`reject-${a.id}`} className="danger" onClick={() => decide(a.id, 'reject')}>拒绝</button></div>
           </div>))}
       </section>
@@ -446,6 +448,48 @@ function ConnectPanel() {
         {(auths.length === 0) ? <p className="hint">无授权</p> : auths.map((a) => (
           <div key={a.appPublicKey} className="row"><span className="mono">{a.appId} · {a.appPublicKey.slice(0, 12)}…</span><button className="danger" onClick={() => revoke(a.appPublicKey)}>撤销</button></div>))}
       </section>
+    </div>
+  );
+}
+
+function PaymentApprovalPreview({ params }) {
+  const outputs = Array.isArray(params?.outputs) ? params.outputs : [];
+  let total = 0n;
+  try {
+    for (const o of outputs) total += BigInt(o.amount || 0);
+  } catch { /* ignore */ }
+  let fee = 0n;
+  let change = 0n;
+  try { fee = BigInt(params?.feeSatoshis || 0); } catch { /* ignore */ }
+  try { change = BigInt(params?.changeSatoshis || 0); } catch { /* ignore */ }
+  let spend = total;
+  try { spend = total + fee; } catch { /* ignore */ }
+  return (
+    <div className="mono" style={{ marginTop: 8 }}>
+      <p>业务输出总额 {total.toString()} sat · 矿工费 {fee.toString()} sat · 找零 {change.toString()} sat · 实际支出 {spend.toString()} sat（含费）</p>
+      <p>批准绑定已保存计划，不重新选币；计划改变需重新确认。</p>
+      <ol>
+        {outputs.map((o, i) => {
+          const scriptHex = String(o.script || '').toLowerCase();
+          const amount = Number(o.amount || 0);
+          let label = '未知脚本';
+          let detail = '不认识此脚本，无法解释其用途';
+          try {
+            const it = interpretLockingScript(scriptHex, Number.isSafeInteger(amount) ? amount : 0);
+            if (it.kind === 'p2pkh') { label = 'P2PKH'; detail = `收款地址 ${it.addressMainnet} / ${it.addressTestnet}，金额 ${o.amount} sat`; }
+            else if (it.kind === 'p2pk') { label = 'P2PK'; detail = `收款公钥 ${it.publicKeyHex}，金额 ${o.amount} sat`; }
+            else if (it.kind === 'multisig') { label = `标准多签 ${it.m}/${it.n}`; detail = `所需签名数 ${it.m}，公钥 ${it.publicKeysHex.join(', ')}，金额 ${o.amount} sat`; }
+            else if (it.kind === 'op_return') { label = '数据输出'; detail = `数据 ${it.dataHex || '(空)'}${it.dataText ? `（文本：${it.dataText}）` : ''}，金额 ${o.amount} sat`; }
+          } catch { /* 按未知展示 */ }
+          return (
+            <li key={i}>
+              <div>#{i} [{label}] {String(o.amount)} sat</div>
+              <div>{detail}</div>
+              <div>完整脚本 <code>{scriptHex}</code></div>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

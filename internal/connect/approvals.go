@@ -9,6 +9,10 @@ import (
 // Approval 为待办审批（不跨重启恢复）。原请求按批准时的快照保存，决定只
 // 引用审批 ID；批准后由执行路径认领一次并执行，结果随认领返回，重复认领
 // 返回已保存的结果，不重复执行。
+//
+// 付款审批必须先持久化绑定再可见：创建时为 staged（不进入待办列表、不能被
+// 决定或认领），落盘成功后 Publish 转为 pending。避免“先可见后落盘”窗口内
+// 的决定/执行与迟到回写互相覆盖。
 type Approval struct {
 	ID             string         `json:"id"`
 	AppPublicKey   string         `json:"appPublicKey"`
@@ -59,6 +63,50 @@ func (q *Queue) Create(appPubkey, appID, appName, method string, params map[stri
 	return &cp
 }
 
+// CreateStaged 创建暂存审批：落盘绑定完成前不进入待办列表，不能被决定或认领。
+// 调用方必须在持久化成功后 Publish，未成功则 Discard。
+func (q *Queue) CreateStaged(appPubkey, appID, appName, method string, params map[string]any, origin string, requirements []string, digest string) *Approval {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.seq++
+	id := fmt.Sprintf("ap_%d_%d", time.Now().UnixMilli(), q.seq)
+	a := &Approval{
+		ID: id, AppPublicKey: appPubkey, AppID: appID, AppName: appName, Method: method,
+		Params: params, Origin: origin,
+		Requirements:   append([]string(nil), requirements...),
+		IdentityDigest: digest,
+		Status:         "staged", CreatedAt: time.Now().UnixMilli(),
+	}
+	q.items[id] = a
+	cp := *a
+	return &cp
+}
+
+// Publish 将暂存审批转为可见待办。只有 staged 能发布，防止重复发布或发布已终态审批。
+func (q *Queue) Publish(id string) (Approval, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a, ok := q.items[id]
+	if !ok || a.Status != "staged" {
+		return Approval{}, false
+	}
+	a.Status = "pending"
+	return *a, true
+}
+
+// Discard 丢弃暂存审批（持久化失败时清理，避免留下不可见但占位的审批）。
+// 已发布或已终态的审批不能丢弃，只能走正常决定流程。
+func (q *Queue) Discard(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a, ok := q.items[id]
+	if !ok || a.Status != "staged" {
+		return false
+	}
+	delete(q.items, id)
+	return true
+}
+
 func (q *Queue) List() []Approval {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -82,12 +130,16 @@ func (q *Queue) Get(id string) (Approval, bool) {
 }
 
 // Decide 尝试终态转换；仅 pending 可转换，重复决定返回当前状态不重复执行。
+// staged 审批尚未发布，不接受决定，避免对未完成持久绑定的审批提前决策。
 func (q *Queue) Decide(id, decision string) (Approval, bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	a, ok := q.items[id]
 	if !ok {
 		return Approval{}, false, fmt.Errorf("审批不存在")
+	}
+	if a.Status == "staged" {
+		return Approval{}, false, fmt.Errorf("审批尚未发布")
 	}
 	if a.Status != "pending" {
 		return *a, false, nil

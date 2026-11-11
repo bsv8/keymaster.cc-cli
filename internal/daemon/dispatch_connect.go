@@ -34,6 +34,8 @@ func connectRequirement(method string) (requirement string, ok bool) {
 		return "storage", true
 	case method == "cipher.encrypt" || method == "cipher.decrypt":
 		return "private-key", true
+	case method == "payment.pay" || method == "payment.status":
+		return "private-key", true
 	default:
 		return "", false
 	}
@@ -138,6 +140,14 @@ func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectAp
 	if !first {
 		// 重复决定不重复执行。
 		return map[string]any{"ok": true, "status": approval.Status, "deduped": true}, nil
+	}
+	// 付款拒绝/取消：明确未提交，释放冻结输入，不广播。
+	if approval.Method == "payment.pay" && (approval.Status == "rejected" || approval.Status == "cancelled") {
+		reason := "user-rejected"
+		if approval.Status == "cancelled" {
+			reason = "cancelled"
+		}
+		d.rejectPaymentByApproval(approval, reason)
 	}
 	return map[string]any{"ok": true, "status": approval.Status}, nil
 }
@@ -322,6 +332,14 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		return d.execConnectStorage(appCtx, auth, method, d.paramsMapOf(p), attachments)
 	case method == "cipher.encrypt" || method == "cipher.decrypt":
 		return d.execConnectCipher(appCtx, auth, method, d.paramsMapOf(p), attachments, origin)
+	case method == "payment.pay":
+		return d.opConnectPaymentPay(appCtx, auth, d.paramsMapOf(p), origin)
+	case method == "payment.status":
+		res, perr := d.opConnectPaymentStatus(appCtx, auth, d.paramsMapOf(p), origin)
+		if perr != nil {
+			return nil, nil, perr
+		}
+		return res, nil, nil
 	default:
 		return nil, nil, errDetail(kmapi.ErrInternal, "未实现")
 	}
@@ -368,6 +386,8 @@ func (d *Daemon) paramsMapOf(p kmapi.ConnectExecRequest) map[string]any {
 // execConnectMethod 执行已批准审批保存的原请求。只被 approvalId 认领路径调用一次。
 func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any, map[string][]byte, *kmapi.ErrorDetail) {
 	switch {
+	case a.Method == "payment.pay":
+		return d.execPaymentApproved(ctx, a)
 	case a.Method == "connect.login" || a.Method == "connect.resume":
 		if d.store == nil {
 			return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")

@@ -131,6 +131,22 @@ function sdkError(method, perr) {
       default: return { code: 'internal_error', message };
     }
   }
+  if (method === 'payment.pay' || method === 'payment.status') {
+    switch (code) {
+      case 'BAD_REQUEST': return { code: 'invalid_request', message };
+      case 'NOT_FOUND':
+        return method === 'payment.status'
+          ? { code: 'payment_not_found', message }
+          : { code: 'invalid_request', message };
+      case 'FORBIDDEN': return { code: 'unsupported_scope', message };
+      case 'LOCKED': return { code: 'active_key_unavailable', message };
+      case 'STATE_CONFLICT':
+        if (message.includes('内容不同')) return { code: 'id_conflict', message };
+        if (message.includes('过多')) return { code: 'payment_pending_limit', message };
+        return { code: 'id_conflict', message };
+      default: return { code: 'internal_error', message };
+    }
+  }
   switch (code) {
     case 'BAD_REQUEST': return { code: 'invalid_request', message };
     case 'NOT_FOUND': return { code: 'invalid_request', message };
@@ -234,6 +250,11 @@ async function handleRequest(req) {
     // 始终经 callWithBinary：服务端可能在响应中附带二进制（get/decrypt），
     // 普通 call 会丢弃这些附件并导致后续转换失败。
     const raw = await client.callWithBinary({ signal }, 'connect.request.exec', execParams, attachments);
+    // payment.pay 冻结后返回 approvalId，需经用户批准后认领执行；其他业务直接返回结果。
+    if (raw && raw.result && raw.result.approvalId) {
+      pendingApproval.set(raw.result.approvalId, { approvalId: raw.result.approvalId, ctx: req, method, origin, reqId: req.id });
+      return;
+    }
     receiver.replyResult(req, toSdkResult(method, raw.result, raw.binaries || {}));
   } catch (e) {
     if (signal.aborted) return;

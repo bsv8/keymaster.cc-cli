@@ -191,7 +191,7 @@ func (w *Wallet) BuildWithFeeRate(ctx context.Context, outputs []Output, feeRate
 		}
 		declared = append(declared, len(o.LockingScript.Bytes()))
 	}
-	if target == 0 {
+	if len(outputs) == 0 {
 		return nil, errors.New("wallet: positive output amount required")
 	}
 	id := newAllocationID()
