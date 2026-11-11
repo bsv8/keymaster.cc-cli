@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/session"
 )
@@ -137,7 +137,7 @@ func backupLiveFile(path string, mode os.FileMode, desc string) (backup string, 
 // up the live binary and unit, replaces both, and activates the service.
 // Wallets, settings and business data are never touched. Any failure rolls
 // back to the previous version and returns a non-zero exit code.
-func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string, webAdmin bool) int {
+func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string) int {
 	wasActive, ok := stopServiceForUpgrade(out)
 	if !ok {
 		return exitError
@@ -170,7 +170,7 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string, 
 			return exitError
 		}
 	}
-	unit := renderUnit(target, layout.Dir, webAdmin)
+	unit := renderUnit(target, layout.Dir)
 	if err := writeFileAtomic(out, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入 systemd unit 失败:", err)
 		restoreAfterFailure(target, backup, out, unitBackup, unitReplaced)
@@ -182,12 +182,7 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, out string, 
 }
 
 func serviceInstall(globalDataDir string, args []string) int {
-	webAdmin, rest, err := splitWebAdminFlag(args)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km service install:", err)
-		return exitUsage
-	}
-	dataDirFlag, unitOut, _, err := parseServiceFlags(rest)
+	dataDirFlag, unitOut, _, err := parseServiceFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km service install:", err)
 		return exitUsage
@@ -236,12 +231,12 @@ func serviceInstall(globalDataDir string, args []string) int {
 			fmt.Fprintln(os.Stderr, "km:", err)
 			return exitError
 		}
-		return privilegedInstallOrUpgrade(layout, exe, target, out, webAdmin)
+		return privilegedInstallOrUpgrade(layout, exe, target, out)
 	}
 	// Non-root verification path: write the unit for inspection only.
 	// Activation below warns without systemd and keeps exit 0.
 	target = exe
-	unit := renderUnit(target, layout.Dir, webAdmin)
+	unit := renderUnit(target, layout.Dir)
 	if err := writeFileAtomic(out, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入 systemd unit 失败:", err)
 		return exitError
@@ -307,8 +302,13 @@ func serviceStatus(globalDataDir string, _ []string) int {
 		}
 		return exitOK
 	}
-	client := kmapi.New(base, nil)
-	st, err := client.Status(nil)
+	client, derr := session.DialExternal(context.Background(), base)
+	if derr != nil {
+		fmt.Fprintln(os.Stderr, "km: 后台 API 不可达:", derr)
+		return exitError
+	}
+	defer client.Close()
+	st, err := client.Status(context.Background())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 后台 API 不可达:", err)
 		return exitError

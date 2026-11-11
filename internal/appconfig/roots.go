@@ -12,6 +12,13 @@ import (
 // data directory; internal wallet, config and business data must never become
 // shared roots. Symlinks are resolved to their canonical target first.
 func ValidateNewRoot(dataDir, candidate string, existing []Root) (string, error) {
+	return ValidateNewRootProtected(dataDir, nil, candidate, existing)
+}
+
+// ValidateNewRootProtected 与 ValidateNewRoot 一致，并额外保护一组独立数据
+// 目录（例如 App Storage 根）：候选根不得等于其中任何一个，也不得与其构成
+// 父子重叠；符号链接解析后比较，防止链接绕过。
+func ValidateNewRootProtected(dataDir string, protected []string, candidate string, existing []Root) (string, error) {
 	if strings.TrimSpace(candidate) == "" {
 		return "", errors.New("售卖目录不能为空")
 	}
@@ -36,9 +43,29 @@ func ValidateNewRoot(dataDir, candidate string, existing []Root) (string, error)
 		return "", err
 	}
 	dataAbs = filepath.Clean(dataAbs)
+	if resolved, err := filepath.EvalSymlinks(dataAbs); err == nil {
+		dataAbs = filepath.Clean(resolved)
+	}
 	// Internal data directories must never be shared.
 	if cleaned == dataAbs || isWithin(cleaned, dataAbs) || isWithin(dataAbs, cleaned) {
 		return "", errors.New("内部数据目录不能作为共享根")
+	}
+	// 独立保护目录（App Storage 根等）同样不得被出售或包含出售目录。
+	for _, p := range protected {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		protAbs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(protAbs); err == nil {
+			protAbs = resolved
+		}
+		protAbs = filepath.Clean(protAbs)
+		if cleaned == protAbs || isWithin(cleaned, protAbs) || isWithin(protAbs, cleaned) {
+			return "", errors.New("受保护的数据目录不能作为共享根")
+		}
 	}
 	for _, r := range existing {
 		other := filepath.Clean(r.Path)

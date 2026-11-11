@@ -57,9 +57,8 @@ const (
 
 // Options configures one daemonrun execution.
 type Options struct {
-	DataDir  string
-	WebAdmin bool
-	Tray     TrayMode
+	DataDir string
+	Tray    TrayMode
 	// Logf receives lifecycle diagnostics (stderr in practice).
 	Logf func(format string, args ...any)
 	// ExitCodeOnSignal is returned after an orderly shutdown triggered by
@@ -144,7 +143,7 @@ func (c *Controller) runOne(ctx context.Context, sighup <-chan os.Signal) (int, 
 		}
 		return exitError, false
 	}
-	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir, WebAdmin: c.opts.WebAdmin})
+	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir})
 	if err != nil {
 		if errors.Is(err, dlock.ErrActive) {
 			c.opts.Logf("km: 数据目录已有后台在运行")
@@ -164,8 +163,7 @@ func (c *Controller) runOne(ctx context.Context, sighup <-chan os.Signal) (int, 
 		_ = d.Close()
 		return exitError, false
 	}
-	webState := map[bool]string{true: "开", false: "关"}[c.opts.WebAdmin]
-	c.opts.Logf("km 后台已启动（锁定状态，Web Admin: %s）: http://%s/ 数据目录: %s", webState, addr, layout.Dir)
+	c.opts.Logf("km 后台已启动（锁定状态，Web Admin: %s）: http://%s/ 数据目录: %s", "开", addr, layout.Dir)
 
 	c.maybeStartTray()
 	watcher := c.startStatusWatcher(d, addr)
@@ -330,7 +328,7 @@ func (c *Controller) pushTrayStatus(d *daemon.Daemon, state, addr string) {
 	if child == nil {
 		return
 	}
-	st := tray.Status{WebAdmin: c.opts.WebAdmin}
+	st := tray.Status{}
 	switch state {
 	case "unlocked":
 		st.State, st.Locked = "unlocked", false

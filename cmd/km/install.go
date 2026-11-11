@@ -77,7 +77,7 @@ func cmdInstall(g globalFlags, args []string) int {
 	// Repeatable: key/info/settings/business data are never touched.
 	// macOS root goes through the launchd flow instead (no useradd/systemd).
 	if runtime.GOOS == "darwin" && os.Geteuid() == 0 {
-		return privilegedInstallOrUpgrade(layout, exe, "/usr/local/bin/km", "", true)
+		return privilegedInstallOrUpgrade(layout, exe, "/usr/local/bin/km", "")
 	}
 	if err := ensureServiceUser(layout.Dir); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -87,7 +87,7 @@ func cmdInstall(g globalFlags, args []string) int {
 	if out == "" {
 		out = "/etc/systemd/system/km.service"
 	}
-	return privilegedInstallOrUpgrade(layout, exe, target, out, true)
+	return privilegedInstallOrUpgrade(layout, exe, target, out)
 }
 
 // ensureServiceUser creates the km service account/group when missing and

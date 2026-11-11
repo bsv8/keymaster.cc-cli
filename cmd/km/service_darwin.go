@@ -3,13 +3,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/session"
 )
@@ -53,7 +53,7 @@ func launchdDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
-func launchdPlist(target, dataDir string, webAdmin bool) string {
+func launchdPlist(target, dataDir string) string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -65,7 +65,7 @@ func launchdPlist(target, dataDir string, webAdmin bool) string {
     <string>daemon</string>
     <string>--data-dir</string>
     <string>` + dataDir + `</string>
-    <string>--no-tray</string>` + launchdWebAdminArg(webAdmin) + `
+    <string>--no-tray</string>` + `
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -139,12 +139,7 @@ func launchctlBootout() {
 }
 
 func serviceInstall(globalDataDir string, args []string) int {
-	webAdmin, rest, err := splitWebAdminFlag(args)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km service install:", err)
-		return exitUsage
-	}
-	dataDirFlag, plistOut, _, err := parseServiceFlags(rest)
+	dataDirFlag, plistOut, _, err := parseServiceFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km service install:", err)
 		return exitUsage
@@ -220,7 +215,7 @@ func serviceInstall(globalDataDir string, args []string) int {
 			return exitError
 		}
 	}
-	if err := writeFileAtomicLocal(out, []byte(launchdPlist(target, layout.Dir, webAdmin)), 0o644); err != nil {
+	if err := writeFileAtomicLocal(out, []byte(launchdPlist(target, layout.Dir)), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入 launchd plist 失败:", err)
 		restoreLaunchdAfterFailure(target, backup, out, plistBackup)
 		return exitError
@@ -320,7 +315,7 @@ func serviceStatus(globalDataDir string, _ []string) int {
 		}
 		return exitOK
 	}
-	client := kmapi.New(base, nil)
+	client, _ := session.DialExternal(context.Background(), base)
 	st, serr := client.Status(nil)
 	if serr != nil {
 		fmt.Fprintln(os.Stderr, "km: 后台 API 不可达:", serr)
@@ -369,7 +364,7 @@ func serviceRestart(_ string, _ []string) int {
 // privilegedInstallOrUpgrade is the macOS root install/upgrade flow:
 // stop a loaded service, back up binary+plist, replace both, bootstrap
 // with rollback. Repeatable; wallets and business data are never touched.
-func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, _ string, webAdmin bool) int {
+func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, _ string) int {
 	out := launchdPlistPath()
 	wasLoaded := launchdIsLoaded()
 	if wasLoaded {
@@ -400,7 +395,7 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, _ string, we
 			return exitError
 		}
 	}
-	if err := writeFileAtomicLocal(out, []byte(launchdPlist(target, layout.Dir, webAdmin)), 0o644); err != nil {
+	if err := writeFileAtomicLocal(out, []byte(launchdPlist(target, layout.Dir)), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "km: 写入 launchd plist 失败:", err)
 		restoreLaunchdAfterFailure(target, backup, out, plistBackup)
 		return exitError
@@ -429,12 +424,6 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, _ string, we
 // Non-service entry: never intercepts `km daemon` on macOS.
 func runAsWindowsServiceIfNeeded(_ string) (bool, int) { return false, 0 }
 
-// launchdWebAdminArg renders the optional Web Admin opt-out for the plist.
-// Services never start the tray (--no-tray is unconditional above).
-func launchdWebAdminArg(webAdmin bool) string {
-	if webAdmin {
-		return ""
-	}
 	return `
     <string>--web-admin=false</string>`
 }

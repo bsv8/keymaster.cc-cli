@@ -3,13 +3,12 @@ module github.com/bsv8/keymaster.cc-cli
 go 1.26.0
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/bsv-blockchain/go-sdk v1.7.2
 	github.com/bsv8/BitFSProtocol v0.6.0
 	github.com/bsv8/ChannelProtocol v0.6.0
 	github.com/bsv8/KeyHold/go/v2 v2.1.0
 	github.com/bsv8/KeymasterAPIProtocol v0.1.0
-	fyne.io/systray v1.12.2
-	github.com/godbus/dbus/v5 v5.1.0
 	github.com/bsv8/MasterSeed v1.1.0
 	github.com/bsv8/SatSubscriptionProtocol v0.3.0
 	github.com/bsv8/bitcoin-libp2p v0.3.2
@@ -17,6 +16,7 @@ require (
 	github.com/bsv8/keymaster.cc-utxo-manager v0.7.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/libp2p/go-libp2p v0.50.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -39,7 +39,7 @@ require (
 	filippo.io/keygen v1.0.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bsv8/MultisigPool/v4 v4.0.0 // indirect
+	github.com/bsv8/MultisigPool/v4 v4.0.0
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
@@ -125,3 +125,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
+
+replace github.com/bsv8/KeymasterAPIProtocol => ../KeymasterAPIProtocol

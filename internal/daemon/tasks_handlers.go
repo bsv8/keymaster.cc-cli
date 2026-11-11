@@ -2,112 +2,13 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"strings"
 	"time"
 
-	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 )
 
 // handleTasks creates or reuses a download task. Duplicate submissions for the
 // same seed never start a second purchase: the existing task is returned.
-func (d *Daemon) handleTasks(w http.ResponseWriter, r *http.Request) {
-	if d.store == nil {
-		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		writeJSON(w, taskListDTO(d.tasks.list()))
-	case http.MethodPost:
-		d.mu.Lock()
-		locked := d.state != StateUnlocked
-		d.mu.Unlock()
-		if locked {
-			http.Error(w, "后台已锁定，请先解锁", http.StatusLocked)
-			return
-		}
-		if d.isStopping() {
-			http.Error(w, "后台停止中，不再接收新任务", http.StatusServiceUnavailable)
-			return
-		}
-		var body kmapi.CreateTaskRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		seed := strings.ToLower(strings.TrimSpace(body.SeedHashHex))
-		if !validSeedHash(seed) {
-			http.Error(w, "seedHashHex 无效", http.StatusBadRequest)
-			return
-		}
-		task, created, err := d.ensureTask(r.Context(), seed)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if created {
-			w.WriteHeader(http.StatusCreated)
-		}
-		writeJSON(w, taskDTO(task))
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (d *Daemon) handleTaskRoute(w http.ResponseWriter, r *http.Request) {
-	if d.store == nil || d.tasks == nil {
-		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
-		return
-	}
-	// /api/tasks/<seed> , /api/tasks/<seed>/events , /api/tasks/<seed>/cancel
-	rest := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
-	parts := strings.Split(rest, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
-		return
-	}
-	seed := strings.ToLower(parts[0])
-	if len(parts) == 2 && parts[1] == "events" {
-		d.serveTaskEvents(w, r, seed)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "cancel" {
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w)
-			return
-		}
-		if err := d.cancelTask(seed); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		writeJSON(w, kmapi.Ok{Ok: true})
-		return
-	}
-	if len(parts) != 1 {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
-	t, ok := d.tasks.get(seed)
-	if !ok {
-		// Fall back to persisted evidence so a restarted daemon can still
-		// report completed tasks.
-		if persisted := d.loadPersistedTask(seed); persisted != nil {
-			writeJSON(w, taskDTO(persisted))
-			return
-		}
-		http.Error(w, "任务不存在", http.StatusNotFound)
-		return
-	}
-	writeJSON(w, taskDTO(t))
-}
-
 func (d *Daemon) ensureTask(ctx context.Context, seed string) (*Task, bool, error) {
 	info, _, err := d.store.Snapshot()
 	if err != nil {
@@ -238,76 +139,6 @@ func (d *Daemon) cancelTask(seed string) error {
 	return nil
 }
 
-func (d *Daemon) serveTaskEvents(w http.ResponseWriter, r *http.Request, seed string) {
-	if d.store == nil || d.tasks == nil {
-		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "stream unsupported", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	ch := make(chan Task, 16)
-	d.tasks.mu.Lock()
-	t, exists := d.tasks.tasks[seed]
-	if !exists {
-		d.tasks.mu.Unlock()
-		// Emit the persisted state once, then close.
-		if persisted := d.loadPersistedTask(seed); persisted != nil {
-			_ = json.NewEncoder(w).Encode(taskDTO(persisted))
-		} else {
-			http.Error(w, "任务不存在", http.StatusNotFound)
-		}
-		return
-	}
-	if t.subs == nil {
-		t.subs = make(map[chan Task]struct{})
-	}
-	t.subs[ch] = struct{}{}
-	current := taskDTO(t)
-	d.tasks.mu.Unlock()
-	defer func() {
-		d.tasks.mu.Lock()
-		if cur, ok := d.tasks.tasks[seed]; ok {
-			delete(cur.subs, ch)
-		}
-		d.tasks.mu.Unlock()
-	}()
-	_ = writeSSE(w, current)
-	flusher.Flush()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case updated := <-ch:
-			dto := taskDTO(&updated)
-			_ = writeSSE(w, dto)
-			flusher.Flush()
-			if dto.State == string(TaskDone) || dto.State == string(TaskFailed) || dto.State == string(TaskCancelled) {
-				return
-			}
-		case <-time.After(30 * time.Second):
-			_, _ = w.Write([]byte(": ping\n\n"))
-			flusher.Flush()
-		}
-	}
-}
-
-func writeSSE(w http.ResponseWriter, t kmapi.Task) error {
-	raw, err := json.Marshal(t)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(w, "data: %s\n\n", raw)
-	return err
-}
-
-// loadPersistedTask reports persisted tasks (restored at startup) so a
-// reconnecting CLI can query finished or interrupted work without a live run.
 func (d *Daemon) loadPersistedTask(seed string) *Task {
 	if d.tasks == nil {
 		return nil

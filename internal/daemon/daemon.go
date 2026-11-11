@@ -28,10 +28,13 @@ import (
 
 	keyhold "github.com/bsv8/KeyHold/go/v2"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
+	"github.com/bsv8/keymaster.cc-cli/internal/appstorage"
+	"github.com/bsv8/keymaster.cc-cli/internal/connect"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
 	"github.com/bsv8/keymaster.cc-cli/internal/events"
 	"github.com/bsv8/keymaster.cc-cli/internal/webui"
+	"github.com/gorilla/websocket"
 )
 
 // State is the daemon lifecycle state.
@@ -49,10 +52,9 @@ type Options struct {
 	DataDir string
 	// PortOverride forces the listen port (0 = from settings).
 	PortOverride int
-	// WebAdmin mounts the React Web Admin alongside the API on the
-	// standalone HTTP entry. CLI/MyGo embedded entries never call
-	// ServeHTTP and always use the API-only handler.
-	WebAdmin bool
+	// StorageDir 独立指定 App Storage 根；为空时默认钱包根同级 <目录名>-storage。
+	StorageDir string
+	// 独立后台统一提供完整 Web；CLI 内嵌后台不监听端口。
 }
 
 // Daemon is the background owner.
@@ -95,6 +97,15 @@ type Daemon struct {
 	listener   net.Listener
 	lockGuard  *dlock.Guard
 
+	wsMu    sync.Mutex
+	wsConns map[*wsConn]struct{}
+
+	storageLayout appstorage.Layout
+	storage       *appstorage.Store
+	storageGuard  *dlock.Guard
+
+	connectMgr *connect.Manager
+
 	// closeOnce/closeDone make Close idempotent and let concurrent or
 	// repeated callers wait for the same completed cleanup instead of
 	// mistaking an early return for finished cleanup.
@@ -104,10 +115,6 @@ type Daemon struct {
 	// httpDone reports the HTTP server result. Buffered size 1; closed
 	// with the Serve return value (nil on clean shutdown).
 	httpDone chan error
-
-	// webAdmin fixes the standalone composition at startup: API always,
-	// Web Admin only when enabled. CLI/GUI connections never change it.
-	webAdmin bool
 
 	// events 是统一消息总线，只做分发不持有真值；发布点在业务提交后调用。
 	events *events.Broker
@@ -159,23 +166,65 @@ func Open(opts Options) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Daemon{layout: layout, state: StateUninitialized, lockGuard: guard, webAdmin: opts.WebAdmin, events: events.New()}
+	d := &Daemon{layout: layout, state: StateUninitialized, lockGuard: guard, events: events.New()}
+	// 独立 Storage 根：与钱包根完全分开，独立加锁，禁止重叠。
+	storageLayout, err := appstorage.Resolve(layout.Dir, opts.StorageDir)
+	if err != nil {
+		_ = guard.Release()
+		return nil, err
+	}
+	if err := appstorage.CheckOverlap(layout.Dir, storageLayout.Dir); err != nil {
+		_ = guard.Release()
+		return nil, err
+	}
+	storageGuard, err := dlock.Acquire(storageLayout.Dir)
+	if err != nil {
+		_ = guard.Release()
+		if errors.Is(err, dlock.ErrActive) {
+			return nil, fmt.Errorf("Storage 目录已有后台在运行，不启动第二个钱包实例")
+		}
+		return nil, err
+	}
+	storageStore, err := appstorage.Open(storageLayout)
+	if err != nil {
+		_ = storageGuard.Release()
+		_ = guard.Release()
+		return nil, fmt.Errorf("daemon: 打开 App Storage 失败: %w", err)
+	}
+	d.storageLayout = storageLayout
+	d.storageGuard = storageGuard
+	d.storage = storageStore
+	d.connectMgr = connect.NewManager(layout.Dir)
+	d.connectMgr.SetGeneration(d.events.InstanceID())
+	if err := d.connectMgr.Load(); err != nil {
+		_ = storageStore.Close()
+		_ = storageGuard.Release()
+		_ = guard.Release()
+		return nil, fmt.Errorf("daemon: 加载 App 授权失败: %w", err)
+	}
 	store := appconfig.New(layout.Dir)
+	releaseAll := func() {
+		if storageStore != nil {
+			_ = storageStore.Close()
+		}
+		_ = storageGuard.Release()
+		_ = guard.Release()
+	}
 	if layout.HasInitMarkers() {
 		if err := store.Load(); err != nil {
-			_ = guard.Release()
+			releaseAll()
 			return nil, fmt.Errorf("daemon: 加载持久数据失败: %w", err)
 		}
 		d.store = store
 		info, settings, err := store.Snapshot()
 		if err != nil {
-			_ = guard.Release()
+			releaseAll()
 			return nil, err
 		}
 		_ = settings
 		addr, err := addressFor(info.PublicKeyHex, info.BsvNetwork == "main")
 		if err != nil {
-			_ = guard.Release()
+			releaseAll()
 			return nil, fmt.Errorf("daemon: 派生地址失败: %w", err)
 		}
 		d.publicKey = info.PublicKeyHex
@@ -185,7 +234,7 @@ func Open(opts Options) (*Daemon, error) {
 		d.tasks.events = d.events
 		d.tasks.onTerminal = func() { go d.refreshBalance("task-terminal") }
 		if err := d.tasks.loadPersisted(); err != nil {
-			_ = guard.Release()
+			releaseAll()
 			return nil, fmt.Errorf("daemon: 加载任务记录失败: %w", err)
 		}
 		d.roots = newRootsManager(layout, store)
@@ -301,6 +350,14 @@ func (d *Daemon) close() error {
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	}
+	// 关闭全部 WS 连接：重启后旧连接必须终止，不 lingering。
+	d.wsMu.Lock()
+	for c := range d.wsConns {
+		_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "restart"), time.Now().Add(2*time.Second))
+		_ = c.conn.Close()
+	}
+	d.wsConns = map[*wsConn]struct{}{}
+	d.wsMu.Unlock()
 	if d.tasks != nil {
 		d.tasks.stopAllAndWait(10 * time.Second)
 	}
@@ -326,17 +383,49 @@ func (d *Daemon) close() error {
 	if d.roots != nil {
 		d.roots.closeAll()
 	}
+	// Storage 独立收尾预算 5s：先拒绝新操作，再等待在途排空，最后关闭数据库。
+	// 超时则视为异常收尾：不释放独占锁（避免新实例与仍在使用的数据库重叠），
+	// 调用者（daemonrun）据此报告异常退出；进程退出时由 OS 回收锁。
+	storageErr := error(nil)
+	if d.storage != nil {
+		d.storage.BeginClose()
+		done := make(chan struct{})
+		go func() {
+			d.storage.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			storageErr = fmt.Errorf("daemon: App Storage 在途操作未在预算内排空")
+		}
+		if storageErr == nil {
+			if err := d.storage.Close(); err != nil {
+				storageErr = fmt.Errorf("daemon: 关闭 App Storage 失败: %w", err)
+			} else {
+				d.storage = nil
+			}
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	clearKey(d.privateKey)
 	d.privateKey = nil
 	// Break the seller cancel reference so a later Unlock cannot reuse it.
 	d.sellerCancel = nil
-	if d.lockGuard != nil {
-		_ = d.lockGuard.Release()
-		d.lockGuard = nil
+	if storageErr == nil {
+		if d.storageGuard != nil {
+			_ = d.storageGuard.Release()
+			d.storageGuard = nil
+		}
+		if d.lockGuard != nil {
+			_ = d.lockGuard.Release()
+			d.lockGuard = nil
+		}
+		return nil
 	}
-	return nil
+	// 异常收尾：保留文件锁（由进程退出释放），但已清理内存密钥。
+	return storageErr
 }
 
 // Unlock decrypts the pure KeyHold with password and moves to unlocked.
@@ -454,38 +543,20 @@ func clearBytes(b []byte) {
 	}
 }
 
-// APIHandler returns the API-only handler shared by both transports. It
-// registers routes and Host/Origin protection but never listens, starts
-// goroutines or mounts the Web Admin. Unknown /api/* paths answer 404 and
-// are never swallowed by the SPA fallback.
+// InstanceID 返回后台实例标识，用于握手与旧实例事件丢弃。
+func (d *Daemon) InstanceID() string {
+	if d.events == nil {
+		return ""
+	}
+	return d.events.InstanceID()
+}
+
+// APIHandler returns the API-only handler: only /api/ws plus explicit 404
+// for retired paths. Old business HTTP API and SSE are deleted; HTTP only
+// carries static Web and WebSocket upgrade.
 func (d *Daemon) APIHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/status", d.handleStatus)
-	mux.HandleFunc("/api/info", d.handleInfo)
-	mux.HandleFunc("/api/unlock", d.handleUnlock)
-	mux.HandleFunc("/api/roots", d.handleRoots)
-	mux.HandleFunc("/api/roots/", d.handleRootRoute)
-	mux.HandleFunc("/api/roots/default", d.handleRootsDefault)
-	mux.HandleFunc("/api/files", d.handleFiles)
-	mux.HandleFunc("/api/browse", d.handleBrowse)
-	mux.HandleFunc("/api/settings", d.handleSettings)
-	mux.HandleFunc("/api/settings/reset", d.handleSettingsReset)
-	mux.HandleFunc("/api/catalog/refresh", d.handleCatalogRefresh)
-	mux.HandleFunc("/api/collector/status", d.handleCollectorStatus)
-	mux.HandleFunc("/api/collector/history", d.handleCollectorHistory)
-	mux.HandleFunc("/api/collector/description", d.handleCollectorDescription)
-	mux.HandleFunc("/api/collector/config", d.handleCollectorConfig)
-	mux.HandleFunc("/api/collector/flush", d.handleCollectorFlush)
-	mux.HandleFunc("/api/collector/retry", d.handleCollectorRetry)
-	mux.HandleFunc("/api/pricing/defaults", d.handlePricingDefaults)
-	mux.HandleFunc("/api/pricing/batch", d.handlePricingBatch)
-	mux.HandleFunc("/api/pricing/file", d.handlePricingFile)
-	mux.HandleFunc("/api/tasks", d.handleTasks)
-	mux.HandleFunc("/api/tasks/", d.handleTaskRoute)
-	mux.HandleFunc("/api/events", d.handleEvents)
-	// Legacy download management (no token): keep functional until React
-	// replaces the surface, but never require an API key.
-	registerLegacyDownloads(mux, d)
+	mux.HandleFunc("/api/ws", d.handleWS)
 	// Unknown API paths are explicit 404s, never the SPA fallback.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -493,16 +564,9 @@ func (d *Daemon) APIHandler() http.Handler {
 	return d.recoverPanic(d.guard(mux))
 }
 
-// httpHandler composes the standalone entry: always the API, plus the
-// Web Admin only when enabled. CLI/GUI connections never change this:
-// it is fixed at startup by the daemon owner.
+// httpHandler composes the standalone entry: always the API plus the full
+// Web. CLI embedded entries use the API-only handler via APIHandler.
 func (d *Daemon) httpHandler() http.Handler {
-	d.mu.Lock()
-	webAdmin := d.webAdmin
-	d.mu.Unlock()
-	if !webAdmin {
-		return d.APIHandler()
-	}
 	mux := http.NewServeMux()
 	mux.Handle("/api/", d.APIHandler())
 	mux.Handle("/", webui.Handler())
@@ -558,10 +622,8 @@ func (d *Daemon) LifecycleContext() context.Context {
 	return d.lifecycleCtx
 }
 
-// ServeHTTP starts the HTTP API on 127.0.0.1:port using APIHandler().
-// Port comes from settings unless overridden. With Options.WebAdmin the
-// React Web Admin is mounted alongside on the same port; without it page
-// paths answer explicit 404 while /api/* keeps working. It never starts
+// ServeHTTP starts the HTTP entry on 127.0.0.1:port: full Web plus /api/ws.
+// Port comes from settings unless overridden. It never starts
 // business loops; call Start for the transport-independent lifecycle.
 func (d *Daemon) ServeHTTP(ctx context.Context) (string, error) {
 	if ctx == nil {

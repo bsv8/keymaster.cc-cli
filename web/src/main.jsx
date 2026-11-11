@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
+import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
+import { initConnectReceiver, decideApproval } from './connect.js';
 
 const TABS = [
   { id: 'overview', label: '概览' },
@@ -11,6 +13,7 @@ const TABS = [
   { id: 'files', label: '文件' },
   { id: 'collect', label: '采集' },
   { id: 'settings', label: '设置' },
+  { id: 'connect', label: '连接' },
 ];
 
 function useAppliedTheme(theme) {
@@ -34,11 +37,8 @@ function useAppliedTheme(theme) {
   }, [theme]);
 }
 
-async function api(path, opts) {
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${opts?.method || 'GET'} ${path} → ${res.status} ${await res.text()}`);
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
+async function client() {
+  return getClient();
 }
 
 function StateBadge({ state, locked }) {
@@ -56,7 +56,7 @@ function DirPicker({ initial, onPick, onConfirm, onClose }) {
 
   const browse = useCallback(async (p) => {
     try {
-      const r = await api(`/api/browse?path=${encodeURIComponent(p)}`);
+      const r = await (await client()).browse(p);
       setPath(r.path);
       setParent(r.parent || '');
       setDirs(r.dirs || []);
@@ -109,9 +109,9 @@ function CollectorPage() {
 
   const load = useCallback(async () => {
     try {
-      const s = await api('/api/collector/status');
+      const s = await (await client()).collectorStatus();
       setData(s);
-      const h = await api('/api/collector/history');
+      const h = await (await client()).collectorHistory();
       setHist(h.submissions || []);
       setErr('');
     } catch (e) {
@@ -126,7 +126,7 @@ function CollectorPage() {
 
   const flush = async () => {
     try {
-      const r = await api('/api/collector/flush', { method: 'POST' });
+      const r = await (await client()).collectorFlush();
       setErr('');
       await load();
       if ((r.triggered || []).length === 0) setErr(t('无待提交队列'));
@@ -136,7 +136,7 @@ function CollectorPage() {
   };
   const retry = async () => {
     try {
-      const r = await api('/api/collector/retry', { method: 'POST' });
+      const r = await (await client()).collectorRetry();
       setErr('');
       await load();
       if ((r.retried || []).length === 0) setErr(t('无发送中批次'));
@@ -147,11 +147,7 @@ function CollectorPage() {
   const saveDesc = async (e) => {
     e.preventDefault();
     try {
-      await api('/api/collector/description', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ seedHash: descSeed.trim().toLowerCase(), description: descText })
-      });
+      await (await client()).collectorDescribe(descSeed.trim().toLowerCase(), descText);
       setDescSeed('');
       setDescText('');
       await load();
@@ -231,7 +227,7 @@ function SettingsPage({ onTheme }) {
 
   const load = useCallback(async () => {
     try {
-      const v = await api('/api/settings');
+      const v = await (await client()).getSettings();
       setS(v);
       dirtyRef.current = false;
       setConflict('');
@@ -263,10 +259,7 @@ function SettingsPage({ onTheme }) {
     e.preventDefault();
     setErr(''); setSaved('');
     try {
-      const updated = await api('/api/settings', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+      const updated = await (await client()).updateSettings({
           revision: s.revision,
           port: Number(s.port),
           theme: s.theme,
@@ -292,8 +285,7 @@ function SettingsPage({ onTheme }) {
               retryCapMs: Number(s.server.collector?.retryCapMs ?? 3600000),
             },
           },
-        })
-      });
+        });
       setS(updated);
       dirtyRef.current = false;
       setConflict('');
@@ -306,11 +298,7 @@ function SettingsPage({ onTheme }) {
   const reset = async () => {
     setErr(''); setSaved('');
     try {
-      const updated = await api('/api/settings/reset', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ revision: s.revision })
-      });
+      const updated = await (await client()).resetSettings(s.revision);
       setS(updated);
       dirtyRef.current = false;
       setConflict('');
@@ -350,7 +338,7 @@ function SettingsPage({ onTheme }) {
             </select>
           </label>
           <label>{t('WoC API Key')}<input value={s.wocApiKey || ''} onChange={(e) => set({ wocApiKey: e.target.value })} autoComplete="off" placeholder={t('可选')} /></label>
-          <label>{t('手续费率 sats/KB')}{num(s.feeRateSatoshisPerKb, (v) => set({ feeRateSatoshisPerKb: v }))}</label>
+          <label>{t('手续费率 sats/KB')}<input data-testid="settings-fee-rate" type="number" value={s.feeRateSatoshisPerKb ?? ''} onChange={(e) => set({ feeRateSatoshisPerKb: e.target.value === '' ? 0 : Number(e.target.value) })} /></label>
         </div>
         <h3>{t('调度')}</h3>
         <div className="formgrid">
@@ -416,6 +404,80 @@ function SettingsPage({ onTheme }) {
   );
 }
 
+function ConnectPanel() {
+  const [approvals, setApprovals] = React.useState([]);
+  const [bindings, setBindings] = React.useState([]);
+  const [auths, setAuths] = React.useState([]);
+  const [err, setErr] = React.useState('');
+  const load = React.useCallback(async () => {
+    try {
+      const c = await getClient();
+      const a = await c.approvalsList().catch(() => ({ approvals: [] }));
+      setApprovals(a.approvals || []);
+      const b = await c.bindingsList().catch(() => ({ bindings: [] }));
+      setBindings(b.bindings || []);
+      const au = await c.authList().catch(() => ({ authorizations: [] }));
+      setAuths(au.authorizations || []);
+      setErr('');
+    } catch (e) { setErr(String(e?.message || e)); }
+  }, []);
+  React.useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t); }, [load]);
+  const decide = async (id, decision) => {
+    try { await decideApproval(id, decision); await load(); }
+    catch (e) { setErr(String(e?.message || e)); }
+  };
+  const revoke = async (appPublicKey) => {
+    try { await (await getClient()).authRevoke(appPublicKey); await load(); }
+    catch (e) { setErr(String(e?.message || e)); }
+  };
+  return (
+    <div>
+      <section className="card"><h2>待审批</h2>{err && <p className="error">{err}</p>}
+        {(approvals.length === 0) ? <p className="hint">无待办</p> : approvals.map((a) => (
+          <div key={a.id} className="card" data-testid={`approval-${a.id}`} style={{ marginBottom: 8 }}>
+            <p className="mono">{a.method} · {a.appId} · {a.origin}</p>
+            <div className="row"><button data-testid={`approve-${a.id}`} onClick={() => decide(a.id, 'approve')}>批准</button><button data-testid={`reject-${a.id}`} className="danger" onClick={() => decide(a.id, 'reject')}>拒绝</button></div>
+          </div>))}
+      </section>
+      <section className="card" style={{ marginTop: 12 }}><h2>应用连接</h2>
+        {(bindings.length === 0) ? <p className="hint">无连接</p> : bindings.map((b, i) => <p key={i} className="mono">{b.appPublicKey} · {b.origin}</p>)}
+      </section>
+      <section className="card" style={{ marginTop: 12 }}><h2>应用授权</h2>
+        {(auths.length === 0) ? <p className="hint">无授权</p> : auths.map((a) => (
+          <div key={a.appPublicKey} className="row"><span className="mono">{a.appId} · {a.appPublicKey.slice(0, 12)}…</span><button className="danger" onClick={() => revoke(a.appPublicKey)}>撤销</button></div>))}
+      </section>
+    </div>
+  );
+}
+
+function WalletInit({ onDone }) {
+  const [mode, setMode] = React.useState('new');
+  const [password, setPassword] = React.useState('');
+  const [network, setNetwork] = React.useState('test');
+  const [keyMaterial, setKeyMaterial] = React.useState('');
+  const [err, setErr] = React.useState('');
+  const submit = async (e) => {
+    e.preventDefault(); setErr('');
+    try {
+      const c = await getClient();
+      if (mode === 'new') await c.walletCreate(password, network);
+      else await c.walletImport(password, keyMaterial);
+      setPassword(''); setKeyMaterial(''); await onDone();
+    } catch (e) { setErr(String(e?.message || e)); }
+  };
+  return (<form data-testid="wallet-init" onSubmit={submit}>
+    {err && <p className="error">{err}</p>}
+    <div className="row">
+      <select data-testid="wallet-init-mode" value={mode} onChange={(e) => setMode(e.target.value)}><option value="new">新建</option><option value="import">导入 KeyHold</option></select>
+      <select data-testid="wallet-init-network" value={network} onChange={(e) => setNetwork(e.target.value)}><option value="test">test</option><option value="main">main</option></select>
+    </div>
+    <div className="row"><input data-testid="wallet-init-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="钱包密码" autoComplete="off" /></div>
+    {mode === 'import' && <textarea rows={4} value={keyMaterial} onChange={(e) => setKeyMaterial(e.target.value)} placeholder="纯 KeyHold JSON" className="mono" />}
+    <div className="row"><button data-testid="wallet-init-submit" type="submit">执行</button></div>
+    <p className="hint">失败不覆盖已有钱包，不留下半套状态。</p>
+  </form>);
+}
+
 function App() {
   const [page, setPage] = useState('overview');
   const [theme, setTheme] = useState('system');
@@ -430,22 +492,41 @@ function App() {
   const [seed, setSeed] = useState('');
   const [newRoot, setNewRoot] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [conn, setConn] = useState('connecting');
+  const instanceRef = useRef('');
 
   useAppliedTheme(theme);
 
+  useEffect(() => onConnectionStatus(setConn), []);
+
+  // 向 opener（App 弹窗模式）发布 ready：仅当后台已连接、已初始化且已解锁。
+  // ready 只表示传输可用，不携带授权；官方 SDK 凭 origin 校验发送方。
+  // 每个后台实例只发布一次；重启/重连后实例变化会再次发布。
+  useEffect(() => {
+    if (conn !== 'connected' || !status?.initialized || (info?.locked ?? status?.locked)) return;
+    const iid = getInstanceId();
+    if (!iid || instanceRef.current === iid) return;
+    instanceRef.current = iid;
+    try {
+      const opener = window.opener;
+      if (opener && !opener.closed) opener.postMessage({ v: 1, type: 'ready' }, '*');
+    } catch { /* ignore */ }
+  }, [conn, status, info]);
+  useEffect(() => { initConnectReceiver().catch(() => {}); }, []);
+
   const load = useCallback(async () => {
     try {
-      const s = await api('/api/status');
+      const s = await (await client()).status();
       setStatus(s);
-      const i = await api('/api/info');
+      const i = await (await client()).info();
       setInfo(i);
-      const r = await api('/api/roots').catch(() => null);
+      const r = await (await client()).listRoots().catch(() => null);
       setRoots(r);
-      const f = await api('/api/files').catch(() => null);
+      const f = await (await client()).listFiles().catch(() => null);
       setFiles(f);
-      const t = await api('/api/tasks').catch(() => ({ tasks: [] }));
+      const t = await (await client()).listTasks().catch(() => ({ tasks: [] }));
       setTasks(t.tasks || []);
-      const st = await api('/api/settings').catch(() => null);
+      const st = await (await client()).getSettings().catch(() => null);
       if (st?.theme) setTheme(st.theme);
       {
         const L = resolveLang(st?.language);
@@ -469,11 +550,7 @@ function App() {
     e.preventDefault();
     setError('');
     try {
-      await api('/api/unlock', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password })
-      });
+      await (await client()).unlock(password);
       await load();
     } catch (e) {
       setError(String(e?.message || e));
@@ -486,11 +563,7 @@ function App() {
     e.preventDefault();
     setError('');
     try {
-      await api('/api/tasks', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ seedHashHex: seed.trim().toLowerCase() })
-      });
+      await (await client()).createTask(seed.trim().toLowerCase());
       setSeed('');
       await load();
     } catch (e) {
@@ -500,7 +573,7 @@ function App() {
 
   const cancelTask = async (seedHashHex) => {
     try {
-      await api(`/api/tasks/${seedHashHex}/cancel`, { method: 'POST' });
+      await (await client()).cancelTask(seedHashHex);
       await load();
     } catch (e) {
       setError(String(e?.message || e));
@@ -512,11 +585,7 @@ function App() {
     const p = (dirPath || '').trim();
     if (!p) return;
     try {
-      await api('/api/roots', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: p, revision: roots.revision })
-      });
+      await (await client()).addRoot(p, roots.revision);
       setNewRoot('');
       setPickerOpen(false);
       await load();
@@ -532,11 +601,7 @@ function App() {
 
   const setDefault = async (id) => {
     try {
-      await api('/api/roots/default', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id, revision: roots.revision })
-      });
+      await (await client()).setDefaultRoot(id, roots.revision);
       await load();
     } catch (e) {
       setError(String(e?.message || e));
@@ -545,7 +610,7 @@ function App() {
 
   const removeRoot = async (id) => {
     try {
-      await api(`/api/roots?id=${encodeURIComponent(id)}&revision=${roots.revision}`, { method: 'DELETE' });
+      await (await client()).removeRoot(id, roots.revision);
       await load();
     } catch (e) {
       setError(String(e?.message || e));
@@ -554,11 +619,7 @@ function App() {
 
   const refreshRoots = async (rootId) => {
     try {
-      await api('/api/catalog/refresh', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(rootId ? { rootId, force: false } : { force: false })
-      });
+      await (await client()).refreshCatalog(rootId || undefined, false);
       await load();
     } catch (e) {
       setError(String(e?.message || e));
@@ -582,9 +643,9 @@ function App() {
           <div><b>km</b><small>{t('Keymaster 后台')}</small></div>
         </div>
         <nav className="nav">
-          {TABS.map((t) => (
-            <button key={t.id} type="button" className={page === t.id ? 'active' : ''} onClick={() => setPage(t.id)}>
-              <span className="dot" />{t(t.label)}
+          {TABS.map((tab) => (
+            <button key={tab.id} type="button" data-testid={`nav-${tab.id}`} className={page === tab.id ? 'active' : ''} onClick={() => setPage(tab.id)}>
+              <span className="dot" />{t(tab.label)}
             </button>
           ))}
         </nav>
@@ -594,12 +655,17 @@ function App() {
         <header className="topbar">
           <h1>{TABS.find((t) => t.id === page)?.label ? t(TABS.find((x) => x.id === page).label) : t('Keymaster 后台')}</h1>
           <span className="spacer" />
-          <StateBadge state={status?.state} locked={status?.locked ?? info?.locked} />
+          <span className="badge" data-testid="connection-state" data-state={conn}>{conn === 'connected' ? t('已连接') : conn === 'connecting' ? t('连接中') : conn === 'protocol-incompatible' ? t('协议不兼容') : t('已断开')}</span>
+          {conn === 'disconnected' && <button type="button" className="ghost" onClick={() => retryConnection()}>{t('重试')}</button>}
+          <StateBadge state={conn === 'connected' ? status?.state : undefined} locked={status?.locked ?? info?.locked} />
           {info?.network && <span className="badge">{info.network} · {info?.address ? `${info.address.slice(0, 8)}…` : ''}</span>}
         </header>
         <div className="content">
           {error && <p className="error">{error}</p>}
-      {!status?.initialized && status && <p className="card">{t('尚未初始化，请在终端运行')} <span className="mono">km init</span>。</p>}
+      {!status?.initialized && status && (
+        <section className="card"><h2>{t('新建 / 导入钱包（后台执行）')}</h2>
+          <WalletInit onDone={() => load()} />
+        </section>)}
 
       {page === 'overview' && (
         <div className="grid">
@@ -630,8 +696,8 @@ function App() {
             {(status?.locked ?? info?.locked) ? (
               <form onSubmit={unlock}>
                 <div className="row">
-                  <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t("钱包密码（仅解密，不建会话）")} autoComplete="off" />
-                  <button type="submit">{t('解锁')}</button>
+                  <input data-testid="unlock-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t("钱包密码（仅解密，不建会话）")} autoComplete="off" />
+                  <button data-testid="unlock-submit" type="submit">{t('解锁')}</button>
                 </div>
                 <p className="hint">{t('密码只进本次请求体，不存浏览器存储，提交后清空。')}</p>
               </form>
@@ -731,6 +797,8 @@ function App() {
       {page === 'collect' && <CollectorPage />}
 
       {page === 'settings' && <SettingsPage onTheme={setTheme} />}
+
+      {page === 'connect' && <ConnectPanel />}
 
           <p className="hint">{t('主题跟随系统或设置页选择（settings 唯一来源，本页不写 localStorage）。远程访问请自备反向代理与认证。')}</p>
         </div>

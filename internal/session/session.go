@@ -6,9 +6,8 @@
 // ③ 独占启动内嵌后台。仅连接失败时尝试下一级；业务错误、钱包锁定、
 // 协议不兼容、配置损坏、URL 非法明确报错，不绕过错误选择另一钱包。
 //
-// 密码输入经 PasswordReader 注入：CLI 传终端实现，GUI 传原生密码界面。
-// 本包不导入终端或 GUI 包。后台选定后业务执行期间不自动切换；断线恢复
-// 与任务查询由调用者完成，Session 只固定当前后台。
+// 外部后台走 WebSocket（/api/ws），内嵌后台走无端口进程内通信，
+// 共用同一分派器。握手返回产品、版本与实例标识；版本不兼容不回退。
 package session
 
 import (
@@ -16,17 +15,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/daemon"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
-	"github.com/bsv8/keymaster.cc-cli/internal/inprocapi"
 )
 
 // PasswordReader 按提示读取密码。CLI 用终端隐藏输入，GUI 用原生密码界面。
@@ -34,28 +32,24 @@ type PasswordReader func(ctx context.Context, prompt string) (string, error)
 
 // Session 统一外部与内嵌后台访问。命令只使用 Session.Client；Session 负责清理。
 type Session struct {
-	Client    *kmapi.Client
-	Mode      string // "external" or "embedded"
-	DataDir   string
-	APIURL    string
-	Daemon    *daemon.Daemon
-	transport *inprocapi.Transport
+	Client  *kmapi.UnifiedClient
+	Mode    string // "external" or "embedded"
+	DataDir string
+	APIURL  string
+	Daemon  *daemon.Daemon
 }
 
 // Close 释放会话资源。内嵌模式停止自持后台（有界收尾、清密钥、释放锁）；
-// 外部模式只关闭空闲连接，不关闭共享后台。
+// 外部模式只关闭连接，不关闭共享后台。
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.Mode == "embedded" && s.Daemon != nil {
-		if s.transport != nil {
-			s.transport.Close()
-		}
-		return s.Daemon.Close()
+	if s.Client != nil {
+		_ = s.Client.Close()
 	}
-	if s.Client != nil && s.Client.HTTP != nil {
-		s.Client.HTTP.CloseIdleConnections()
+	if s.Mode == "embedded" && s.Daemon != nil {
+		return s.Daemon.Close()
 	}
 	return nil
 }
@@ -83,14 +77,16 @@ func TryLockHeld(dir string) bool {
 }
 
 // ValidateAPIURL 在探测前拒绝不支持的协议与畸形地址，使其明确报错而不
-// 回退到本地钱包。
+// 回退到本地钱包。支持 http/https 基地址与显式 ws/wss 地址。
 func ValidateAPIURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("API 地址非法: %w", err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("API 地址协议不支持 %q，只支持 http/https", u.Scheme)
+	switch u.Scheme {
+	case "http", "https", "ws", "wss":
+	default:
+		return fmt.Errorf("API 地址协议不支持 %q，只支持 http/https/ws/wss", u.Scheme)
 	}
 	if u.Host == "" {
 		return fmt.Errorf("API 地址缺少主机: %q", raw)
@@ -99,25 +95,21 @@ func ValidateAPIURL(raw string) error {
 }
 
 // IsConnectionFailure 报告是否为连接失败（拒绝、超时、DNS），这类失败才
-// 允许尝试下一级。业务 HTTP 响应、协议不兼容与调用者取消永不回退。
+// 允许尝试下一级。业务错误、协议不兼容与调用者取消永不回退。
 func IsConnectionFailure(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Caller cancellation is explicit, never a reason to start a wallet.
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var terr *kmapi.TransportError
 	if errors.As(err, &terr) {
-		// A transport error wrapping cancellation (e.g. probe ctx) is
-		// still a cancellation, not an offline daemon.
 		if errors.Is(terr.Err, context.Canceled) {
 			return false
 		}
 		return true
 	}
-	// Defensive: raw context timeouts without wrapper.
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -195,19 +187,36 @@ func candidates(explicitAPI, dataDir string) ([]Candidate, error) {
 	}
 	addr, err := settingsAddr(dataDir)
 	if err != nil {
-		// 显式地址已给出且本机配置损坏：显式探测失败后仍会走到内嵌，
-		// 内嵌启动同样需要本地初始化检查；损坏的本机配置必须明确报错。
 		if strings.TrimSpace(explicitAPI) == "" {
 			return nil, err
 		}
-		// 有显式地址时，本机配置损坏不阻断显式探测；显式失败后内嵌
-		// 路径会再次面对本地状态并给出明确引导。
 		return out, nil
 	}
 	if addr != "" {
 		add("本机配置", addr)
 	}
 	return out, nil
+}
+
+func DialExternal(ctx context.Context, rawURL string) (*kmapi.UnifiedClient, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ws, err := kmapi.DialWS(dialCtx, rawURL, kmapi.ClientInfo{Name: "km-cli", Version: "v1"})
+	if err != nil {
+		return nil, err
+	}
+	u := kmapi.NewUnifiedWS(ws)
+	// 握手后业务探测：版本不兼容直接返回，不换后台。
+	st, err := u.Status(ctx)
+	if err != nil {
+		_ = ws.Close()
+		return nil, err
+	}
+	if err := kmapi.CheckIdentity(st); err != nil {
+		_ = ws.Close()
+		return nil, err
+	}
+	return u, nil
 }
 
 // OpenSession 按三级回退建立会话：显式 --api → 本机配置地址 → 内嵌后台。
@@ -234,32 +243,24 @@ func OpenSession(ctx context.Context, explicitAPI, dataDir string, readPassword 
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
 		}
-		probe := kmapi.New(c.URL, nil)
-		st, perr := probe.Status(ctx)
+		client, perr := DialExternal(ctx, c.URL)
 		if perr == nil {
-			if err := kmapi.CheckIdentity(st); err != nil {
-				return nil, "", err
-			}
 			return &Session{
-				Client:  probe,
+				Client:  client,
 				Mode:    "external",
 				DataDir: layout.Dir,
 				APIURL:  c.URL,
 			}, fallbackWarning(explicitAPI, c, failures), nil
 		}
 		if err := ctx.Err(); err != nil {
-			// Caller cancelled (Ctrl-C) during probe: respect it, never
-			// start an embedded daemon as a side effect.
 			return nil, "", err
 		}
 		if !IsConnectionFailure(perr) {
-			// Business error or illegal URL/protocol: explicit, no fallback.
 			return nil, "", perr
 		}
 		failures = append(failures, fmt.Sprintf("%s %s 连接失败（%v）", c.Source, c.URL, perr))
 	}
 
-	// 前两级均不可连接（或根本没有候选）：检查本地初始化，再竞争锁。
 	sess, err := openEmbedded(ctx, layout.Dir, readPassword)
 	if err != nil {
 		if len(failures) > 0 {
@@ -330,7 +331,6 @@ func openEmbeddedWithWarning(ctx context.Context, dir string, readPassword Passw
 		}
 		return nil, "", err
 	}
-	// Ensure cleanup on every failure after Open.
 	success := false
 	defer func() {
 		if !success {
@@ -343,9 +343,6 @@ func openEmbeddedWithWarning(ctx context.Context, dir string, readPassword Passw
 	if readPassword == nil {
 		return nil, "", fmt.Errorf("内嵌后台需要密码，但未提供密码输入")
 	}
-	// Password entry honors command cancellation (Ctrl-C): the just-opened
-	// daemon is closed (releasing the data directory lock) instead of
-	// hanging on input.
 	password, err := readPassword(ctx, "钱包密码: ")
 	if err != nil {
 		return nil, "", err
@@ -356,10 +353,9 @@ func openEmbeddedWithWarning(ctx context.Context, dir string, readPassword Passw
 	if err := d.Unlock(password); err != nil {
 		return nil, "", err
 	}
-	tr := &inprocapi.Transport{Handler: d.APIHandler()}
-	httpClient := &http.Client{Transport: tr}
-	client := kmapi.New(inprocapi.BaseURL, httpClient)
-	// Validate the embedded surface matches the external one.
+	// 进程内调用同一分派器，不经过网络。
+	inproc := kmapi.NewInprocWithEvents(d, d, d.InstanceID())
+	client := kmapi.NewUnifiedInproc(inproc)
 	if st, err := client.Status(ctx); err != nil {
 		return nil, "", fmt.Errorf("内嵌后台自检失败: %w", err)
 	} else if err := kmapi.CheckIdentity(st); err != nil {
@@ -367,26 +363,23 @@ func openEmbeddedWithWarning(ctx context.Context, dir string, readPassword Passw
 	}
 	success = true
 	return &Session{
-		Client:    client,
-		Mode:      "embedded",
-		DataDir:   layout.Dir,
-		APIURL:    inprocapi.BaseURL + "（内嵌后台）",
-		Daemon:    d,
-		transport: tr,
+		Client:  client,
+		Mode:    "embedded",
+		DataDir: layout.Dir,
+		APIURL:  "inproc（内嵌后台）",
+		Daemon:  d,
 	}, "", nil
 }
 
 func describeLocal(s *Session) string {
-	if s == nil || s.Daemon == nil {
+	if s == nil {
 		return ""
 	}
-	// Best-effort: report local data dir via session; network/address come
-	// from the embedded status call when available.
-	ctx, cancel := context.WithTimeout(context.Background(), kmapi.ShortTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	st, err := s.Client.Status(ctx)
 	if err != nil {
-		return fmt.Sprintf("本地数据目录: %s", s.DataDir)
+		return "本地数据目录: " + s.DataDir
 	}
 	network := ""
 	if st.Network != nil {
@@ -396,12 +389,12 @@ func describeLocal(s *Session) string {
 	if st.Address != nil {
 		address = *st.Address
 	}
-	parts := []string{fmt.Sprintf("本地数据目录: %s", s.DataDir)}
+	parts := []string{"本地数据目录: " + s.DataDir}
 	if network != "" {
-		parts = append(parts, fmt.Sprintf("网络: %s", network))
+		parts = append(parts, "网络: "+network)
 	}
 	if address != "" {
-		parts = append(parts, fmt.Sprintf("地址: %s", address))
+		parts = append(parts, "地址: "+address)
 	}
 	return strings.Join(parts, "，")
 }

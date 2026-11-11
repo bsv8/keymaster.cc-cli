@@ -55,7 +55,7 @@ func RunChild(stdin io.Reader, stdout io.Writer, logf func(string, ...any)) int 
 		}
 		si.SetTitle(title)
 		si.SetTooltip(title)
-		if st.WebAdmin && isLoopbackHTTP(st.APIAddr) {
+		if isLoopbackHTTP(st.APIAddr) {
 			oi.Enable()
 		} else {
 			oi.Disable()
@@ -90,7 +90,6 @@ func RunChild(stdin io.Reader, stdout io.Writer, logf func(string, ...any)) int 
 					Locked:   m.Locked,
 					Network:  m.Network,
 					APIAddr:  m.APIAddr,
-					WebAdmin: m.WebAdmin,
 				})
 			case MsgShutdown:
 				quit()
@@ -116,9 +115,9 @@ func RunChild(stdin io.Reader, stdout io.Writer, logf func(string, ...any)) int 
 		go func() {
 			for range openItem.ClickedCh {
 				mu.Lock()
-				addr, web := cur.APIAddr, cur.WebAdmin
+				addr := cur.APIAddr
 				mu.Unlock()
-				if !web || !isLoopbackHTTP(addr) {
+				if !isLoopbackHTTP(addr) {
 					continue
 				}
 				if !openWeb(addr) {

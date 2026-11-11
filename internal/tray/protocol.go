@@ -11,7 +11,6 @@ type Message struct {
 	Locked   bool   `json:"locked,omitempty"`
 	Network  string `json:"network,omitempty"`
 	APIAddr  string `json:"apiAddr,omitempty"`
-	WebAdmin bool   `json:"webAdmin,omitempty"`
 	Detail   string `json:"detail,omitempty"`
 
 	// action (child -> parent)

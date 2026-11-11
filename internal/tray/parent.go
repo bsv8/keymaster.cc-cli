@@ -205,7 +205,6 @@ type Status struct {
 	Locked   bool
 	Network  string
 	APIAddr  string // "127.0.0.1:PORT" or "" when none
-	WebAdmin bool
 	Detail   string
 }
 
@@ -221,7 +220,6 @@ func StatusMessage(s Status) Message {
 		Locked:   s.Locked,
 		Network:  s.Network,
 		APIAddr:  s.APIAddr,
-		WebAdmin: s.WebAdmin,
-		Detail:   s.Detail,
+				Detail:   s.Detail,
 	}
 }

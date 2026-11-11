@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/internal/events"
@@ -159,108 +157,7 @@ func (d *Daemon) buildSnapshot(topics []string) (kmapi.SnapshotEvent, error) {
 	return snap, nil
 }
 
-// handleEvents 服务 GET /api/events：注册订阅→快照→重放缓冲→持续推送。
-// 慢消费者溢出或历史不可衔接时发送 resync，由客户端重建并重取快照。
-func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
-	if d.store == nil {
-		http.Error(w, "尚未初始化", http.StatusPreconditionFailed)
-		return
-	}
-	topics, err := parseTopics(r.URL.Query().Get("topics"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "stream unsupported", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
-	sub := d.events.Subscribe(topics)
-	defer d.events.Unsubscribe(sub)
-
-	snap, err := d.buildSnapshot(topics)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := writeEvent(w, "snapshot", snap); err != nil {
-		return
-	}
-	flusher.Flush()
-
-	// 重放注册期间暂存的变化（按序号有序），再进入持续推送。
-	if !d.replayBuffered(w, flusher, sub) {
-		return
-	}
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case env, ok := <-sub.Chan():
-			if !ok {
-				if sub.Dropped() {
-					_ = writeEvent(w, "resync", map[string]any{})
-					flusher.Flush()
-				}
-				return
-			}
-			if err := writeEvent(w, "change", env); err != nil {
-				return
-			}
-			flusher.Flush()
-		case <-heartbeat.C:
-			_, _ = w.Write([]byte(": ping\n\n"))
-			flusher.Flush()
-		}
-	}
-}
-
-// replayBuffered 按序发送订阅后暂存的事件。溢出则发送 resync 并结束。
-func (d *Daemon) replayBuffered(w http.ResponseWriter, flusher http.Flusher, sub *events.Subscriber) bool {
-	for {
-		select {
-		case env, ok := <-sub.Chan():
-			if !ok {
-				if sub.Dropped() {
-					_ = writeEvent(w, "resync", map[string]any{})
-					flusher.Flush()
-				}
-				return false
-			}
-			if err := writeEvent(w, "change", env); err != nil {
-				return false
-			}
-			flusher.Flush()
-		default:
-			if sub.Dropped() {
-				_ = writeEvent(w, "resync", map[string]any{})
-				flusher.Flush()
-				return false
-			}
-			return true
-		}
-	}
-}
-
-func writeEvent(w http.ResponseWriter, event string, v any) error {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, raw)
-	return err
-}
 
 // publishTask 发布下载任务变化。调用者在任务持久化成功后调用。
 func (d *Daemon) publishTask(t *Task) {

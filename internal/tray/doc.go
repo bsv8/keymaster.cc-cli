@@ -21,7 +21,7 @@
 // 父 → 子：
 //   - {"type":"status","state":"locked|unlocked|restarting|stopping",
 //     "locked":bool,"network":"test|main","apiAddr":"127.0.0.1:PORT"|"",
-//     "webAdmin":bool,"detail"?:string}
+//     "detail"?:string}
 //   - {"type":"shutdown"}：有序关闭。子进程清理后退出码 0。
 //
 // 子 → 父：

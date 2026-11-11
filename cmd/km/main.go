@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	keyhold "github.com/bsv8/KeyHold/go/v2"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -155,7 +156,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `用法:
   km install [--data-dir DIR]   安装程序、检查初始化状态、生成系统服务
   km init [--data-dir DIR]      独立初始化钱包和设置，不启动长期业务
-  km daemon [--data-dir DIR] [--web-admin=false] [--no-tray]
+  km daemon [--data-dir DIR] [--no-tray]
                          运行后台，已有钱包时以锁定状态启动；默认启用 Web Admin 与托盘
   km unlock [--api URL] [--data-dir DIR]
   km info [--api URL] [--data-dir DIR]
@@ -515,20 +516,15 @@ func cmdInit(g globalFlags, args []string) int {
 }
 
 func cmdDaemon(g globalFlags, args []string) int {
-	webAdmin := true
 	noTray := false
 	for _, a := range args {
 		switch a {
-		case "--web-admin", "--web-admin=true":
-			webAdmin = true
-		case "--web-admin=false":
-			webAdmin = false
 		case "--no-tray", "--no-tray=true":
 			noTray = true
 		case "--no-tray=false":
 			noTray = false
 		default:
-			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--web-admin=false] [--no-tray]")
+			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--no-tray]")
 			return exitUsage
 		}
 	}
@@ -554,7 +550,6 @@ func cmdDaemon(g globalFlags, args []string) int {
 	// are reported there with the same messages as before.
 	return daemonrun.Run(ctx, daemonrun.Options{
 		DataDir:          layout.Dir,
-		WebAdmin:         webAdmin,
 		Tray:             mode,
 		ExitCodeOnSignal: exitCancelled,
 	})
@@ -596,10 +591,16 @@ func cmdUnlock(g globalFlags, args []string) int {
 	}
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	probe := kmapi.New(base, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), kmapi.ProbeTimeout)
+	probe, err := session.DialExternal(context.Background(), base)
+	if err == nil {
+		defer probe.Close()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	st, err := probe.Status(ctx)
+	var st kmapi.Status
+	if err == nil {
+		st, err = probe.Status(ctx)
+	}
 	if err != nil {
 		if session.IsConnectionFailure(err) {
 			fmt.Fprintln(os.Stderr, "km:", err)
@@ -626,7 +627,7 @@ func cmdUnlock(g globalFlags, args []string) int {
 		fmt.Fprintln(os.Stderr, "km: 密码不能为空")
 		return exitError
 	}
-	unlockCtx, unlockCancel := context.WithTimeout(context.Background(), kmapi.LongTimeout)
+	unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer unlockCancel()
 	if err := probe.Unlock(unlockCtx, password); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)
@@ -823,7 +824,7 @@ func cmdGet(g globalFlags, args []string) int {
 // Returns the terminal state ("" when none) and whether resync was requested.
 // Cancellation is reported through ctx and handled by the caller, which
 // keeps the embedded/external Ctrl-C distinction in one place.
-func watchTaskProgress(ctx context.Context, client *kmapi.Client, seed string) (terminal string, resync bool) {
+func watchTaskProgress(ctx context.Context, client *kmapi.UnifiedClient, seed string) (terminal string, resync bool) {
 	var done string
 	err := client.SubscribeEvents(ctx, []string{kmapi.TopicTask},
 		func(snap kmapi.SnapshotEvent) {
@@ -957,10 +958,16 @@ func cmdGetCancel(g globalFlags, seed string) int {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	probe := kmapi.New(base, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), kmapi.ProbeTimeout)
+	probe, err := session.DialExternal(context.Background(), base)
+	if err == nil {
+		defer probe.Close()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	st, err := probe.Status(ctx)
+	var st kmapi.Status
+	if err == nil {
+		st, err = probe.Status(ctx)
+	}
 	if err != nil {
 		if session.IsConnectionFailure(err) {
 			// No daemon to cancel against. Distinguish lock-held from idle.
@@ -982,7 +989,7 @@ func cmdGetCancel(g globalFlags, seed string) int {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	cctx, ccancel := context.WithTimeout(context.Background(), kmapi.ShortTimeout)
+	cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer ccancel()
 	if err := probe.CancelTask(cctx, seed); err != nil {
 		fmt.Fprintln(os.Stderr, "km:", err)

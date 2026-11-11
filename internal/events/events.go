@@ -54,7 +54,8 @@ func (s *Subscriber) Wants(topic string) bool {
 // Broker 分发事件。零值不可用，请用 New。
 type Broker struct {
 	instanceID string
-	seq        atomic.Int64
+	seq        atomic.Int64     // 全局序号仅用于内部快照衔接
+	topicSeq   map[string]int64 // 对外 EventMsg.Seq：每主题连续
 	mu         sync.Mutex
 	subs       map[uint64]*Subscriber
 	next       uint64
@@ -67,6 +68,7 @@ func New() *Broker {
 	_, _ = rand.Read(b[:])
 	return &Broker{
 		instanceID: "b_" + hex.EncodeToString(b[:]),
+		topicSeq:   map[string]int64{},
 		subs:       map[uint64]*Subscriber{},
 	}
 }
@@ -140,11 +142,16 @@ func (b *Broker) Close() {
 // 由订阅循环发送 resync。调用者应在业务提交成功后调用，传入已准备好的
 // 数据（本函数只做浅拷贝分发，不读业务锁）。
 func (b *Broker) Publish(topic, entityID string, revision *int64, data map[string]any) {
-	seq := b.seq.Add(1)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	global := b.seq.Add(1)
+	// 对外序号按主题连续：订阅只包含部分主题时，客户端仍可按主题检测
+	// 缺口，不会把其他主题的正常交错误判为丢包。
+	b.topicSeq[topic]++
 	env := kmapi.EventEnvelope{
 		ProtocolVersion: ProtocolVersion,
 		InstanceID:      b.instanceID,
-		Seq:             seq,
+		Seq:             b.topicSeq[topic],
 		Topic:           topic,
 		Data:            data,
 	}
@@ -155,8 +162,6 @@ func (b *Broker) Publish(topic, entityID string, revision *int64, data map[strin
 		v := *revision
 		env.Revision = &v
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	for _, sub := range b.subs {
 		if !sub.Wants(topic) {
 			continue
@@ -168,8 +173,8 @@ func (b *Broker) Publish(topic, entityID string, revision *int64, data map[strin
 		}
 		select {
 		case sub.ch <- env:
-			if seq > sub.seq {
-				sub.seq = seq
+			if global > sub.seq {
+				sub.seq = global
 			}
 		default:
 			sub.dropped = true

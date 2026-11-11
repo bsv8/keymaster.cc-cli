@@ -10,8 +10,6 @@ github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/bsv-blockchain/go-sdk v1.7.2 h1:AKJaeDOzcIqcLgEG/i5ksi6/StQsFEsGSZrIgHBRMzc=
 github.com/bsv-blockchain/go-sdk v1.7.2/go.mod h1:NtCYkU9NX/D8wzdN+9zGUtl2Rpdp+Zk5Uhyd0Aww+/c=
-github.com/bsv8/BitFSProtocol v0.5.1 h1:DWhJZVFe4md/jWae3TMzgkYGDUt9DCS5kyeX4TSjVHw=
-github.com/bsv8/BitFSProtocol v0.5.1/go.mod h1:Z0+pgwzV3bhO1r6FUflWJpdT6gQ3HndvGShHqBApX0Y=
 github.com/bsv8/BitFSProtocol v0.6.0 h1:OdtN4Vxuck8Ym2/hJdfrZcEd4rwj1N2DXWXNE1Y7RqM=
 github.com/bsv8/BitFSProtocol v0.6.0/go.mod h1:Z0+pgwzV3bhO1r6FUflWJpdT6gQ3HndvGShHqBApX0Y=
 github.com/bsv8/ChannelProtocol v0.6.0 h1:XuYue6SYAj2P10Ki58Gir6ccUD8RRF5LNyIwPUJwWYE=
@@ -26,8 +24,6 @@ github.com/bsv8/SatSubscriptionProtocol v0.3.0 h1:oGN0oLVSUjBzRu6VQOCzqrh/qW8IgR
 github.com/bsv8/SatSubscriptionProtocol v0.3.0/go.mod h1:l+RorrPP8crMcvfKuzAtsXjKOsycbwDLZhnE/MkU1/4=
 github.com/bsv8/bitcoin-libp2p v0.3.2 h1:4cSGmB2hSNlzY903sRbxTe2w0DuG4UR5BnByhhk1c0s=
 github.com/bsv8/bitcoin-libp2p v0.3.2/go.mod h1:MqJ6OJVnBEPeBHZuZ5pWPGkUMG8QcBaYZAzYPSe4K0w=
-github.com/bsv8/keymaster.cc-download-scheduler v0.2.0 h1:VL318YPabbC12PZcobaABKCBygl3t+rv2qokP2f8oxA=
-github.com/bsv8/keymaster.cc-download-scheduler v0.2.0/go.mod h1:pKsznjt7kretRmV/RVu0V3LxqIsaZZWB60KILOgp4bs=
 github.com/bsv8/keymaster.cc-download-scheduler v0.3.0 h1:VsK412bbThTn8JE7DDxJ2CoDWKbEWOsmKs/zUo4FIF8=
 github.com/bsv8/keymaster.cc-download-scheduler v0.3.0/go.mod h1:pKsznjt7kretRmV/RVu0V3LxqIsaZZWB60KILOgp4bs=
 github.com/bsv8/keymaster.cc-utxo-manager v0.7.0 h1:z/T1O51UglrytpSPtMjcsUl3VQ1NpklW+WsC3ERJz2M=
