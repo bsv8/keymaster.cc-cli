@@ -4,7 +4,7 @@ import './styles.css';
 import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
-import { initConnectReceiver, decideApproval } from './connect.js';
+import { initConnectReceiver, decideApproval, issueLaunchToken, registerLaunchedApp, teardownLaunchedApp, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup } from './connect.js';
 import { interpretLockingScript } from 'keymaster-connect/script';
 
 const TABS = [
@@ -410,6 +410,13 @@ function ConnectPanel() {
   const [bindings, setBindings] = React.useState([]);
   const [auths, setAuths] = React.useState([]);
   const [err, setErr] = React.useState('');
+  const [demoUrl, setDemoUrl] = React.useState('');
+  const [walletReady, setWalletReady] = React.useState(false);
+  const [launchErr, setLaunchErr] = React.useState('');
+  const [launchBusy, setLaunchBusy] = React.useState(false);
+  const [iframeSrc, setIframeSrc] = React.useState('');
+  const iframeRef = React.useRef(null);
+  const iframeHandleRef = React.useRef(null);
   const load = React.useCallback(async () => {
     try {
       const c = await getClient();
@@ -419,10 +426,18 @@ function ConnectPanel() {
       setBindings(b.bindings || []);
       const au = await c.authList().catch(() => ({ authorizations: [] }));
       setAuths(au.authorizations || []);
+      const st = await c.status().catch(() => null);
+      setWalletReady(!!(st && st.initialized && !st.locked));
       setErr('');
     } catch (e) { setErr(String(e?.message || e)); }
   }, []);
   React.useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t); }, [load]);
+  // 独立窗口的连接管理归钱包整体生命周期（App 根 effect 定期收殓已关闭窗口，
+  // 卸载时 teardown 全部启动连接）；面板卸载只处理随展示销毁的 iframe，
+  // 页面导航不得误终止仍在运行的独立窗口。
+  React.useEffect(() => () => {
+    if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
+  }, []);
   const decide = async (id, decision) => {
     try { await decideApproval(id, decision); await load(); }
     catch (e) { setErr(String(e?.message || e)); }
@@ -431,9 +446,79 @@ function ConnectPanel() {
     try { await (await getClient()).authRevoke(appPublicKey); await load(); }
     catch (e) { setErr(String(e?.message || e)); }
   };
+  const demoOriginOf = (value) => {
+    const trimmed = String(value || '').trim();
+    const u = new URL(trimmed);
+    if (!['http:', 'https:'].includes(u.protocol) || !u.host) throw new Error('应用地址必须为精确 HTTP(S) origin');
+    return u.origin;
+  };
+  // 窗口方式在点击时预留窗口，避免异步签发后被拦截；签发失败则关闭预留窗口。
+  const launchWindow = async () => {
+    setLaunchErr('');
+    let child = null;
+    try {
+      const origin = demoOriginOf(demoUrl);
+      setLaunchBusy(true);
+      child = window.open('about:blank', '_blank');
+      if (!child) throw new Error('应用窗口被拦截');
+      const issued = await issueLaunchToken(origin);
+      if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
+      const base = origin.replace(/\/+$/, '');
+      const url = `${base}/?mode=appView&launchToken=${encodeURIComponent(issued.launchToken)}&sessionWindowOrigin=${encodeURIComponent(window.location.origin)}`;
+      const handle = registerLaunchedApp({ origin, getSource: () => child, kind: 'window', child });
+      try {
+        child.location.href = url;
+      } catch (e) {
+        try { teardownLaunchedApp(handle); } catch { /* ignore */ }
+        throw e;
+      }
+    } catch (e) {
+      try { if (child && !child.closed) child.close(); } catch { /* ignore */ }
+      setLaunchErr(String(e?.message || e));
+    } finally {
+      setLaunchBusy(false);
+    }
+  };
+  // 页内方式由钱包页面挂载 iframe；应用以 parent 为启动方自动 launch。
+  const launchIframe = async () => {
+    setLaunchErr('');
+    try {
+      const origin = demoOriginOf(demoUrl);
+      setLaunchBusy(true);
+      const issued = await issueLaunchToken(origin);
+      if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
+      if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
+      const base = origin.replace(/\/+$/, '');
+      const handle = registerLaunchedApp({ origin, getSource: () => (iframeRef.current ? iframeRef.current.contentWindow : null), kind: 'iframe' });
+      iframeHandleRef.current = handle;
+      setIframeSrc(`${base}/?mode=iframe&launchToken=${encodeURIComponent(issued.launchToken)}&sessionWindowOrigin=${encodeURIComponent(window.location.origin)}`);
+    } catch (e) {
+      setLaunchErr(String(e?.message || e));
+    } finally {
+      setLaunchBusy(false);
+    }
+  };
+  const closeIframe = () => {
+    setIframeSrc('');
+    if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
+  };
   return (
     <div>
-      <section className="card"><h2>待审批</h2>{err && <p className="error">{err}</p>}
+      <section className="card"><h2>启动应用</h2>
+        <p className="hint">钱包已初始化并解锁后才能启动；点击启动即授权，应用自动完成登录，不再弹第二次审批。</p>
+        {launchErr && <p className="error" data-testid="launch-error">{launchErr}</p>}
+        <div className="row">
+          <input data-testid="launch-demo-url" value={demoUrl} onChange={(e) => setDemoUrl(e.target.value)} placeholder="应用地址（精确 origin，如 http://127.0.0.1:4392）" className="mono" style={{ minWidth: 320 }} />
+          <button type="button" data-testid="launch-window" disabled={!walletReady || launchBusy} onClick={launchWindow}>窗口打开</button>
+          <button type="button" data-testid="launch-iframe" disabled={!walletReady || launchBusy} onClick={launchIframe}>页内打开</button>
+        </div>
+        {!walletReady && <p className="hint">钱包未就绪或已锁定：先完成初始化并解锁。</p>}
+        {iframeSrc && <div style={{ marginTop: 12 }}>
+          <div className="row"><span className="hint mono">{iframeSrc}</span><button type="button" className="danger" onClick={closeIframe}>关闭页内应用</button></div>
+          <iframe data-testid="launch-iframe-view" ref={iframeRef} src={iframeSrc} title="launched-app" style={{ width: '100%', height: 560, border: '1px solid var(--border, #ccc)' }} />
+        </div>}
+      </section>
+      <section className="card" style={{ marginTop: 12 }}><h2>待审批</h2>{err && <p className="error">{err}</p>}
         {(approvals.length === 0) ? <p className="hint">无待办</p> : approvals.map((a) => (
           <div key={a.id} className="card" data-testid={`approval-${a.id}`} style={{ marginBottom: 8 }}>
             <p className="mono">{a.method} · {a.appId} · {a.origin}</p>
@@ -556,7 +641,16 @@ function App() {
       if (opener && !opener.closed) opener.postMessage({ v: 1, type: 'ready' }, '*');
     } catch { /* ignore */ }
   }, [conn, status, info]);
-  useEffect(() => { initConnectReceiver().catch(() => {}); }, []);
+  // 独立启动窗口与 popup 传输对端的连接管理归钱包整体生命周期：
+  // 定期收殓已关闭窗口与已关闭的应用方卸载时 teardown 全部启动连接并尽力发送官方 closing 通知；
+  // 面板切换只影响 iframe 展示不误终止独立窗口。
+  useEffect(() => {
+    initConnectReceiver().catch(() => {});
+    const t = setInterval(() => { try { sweepClosedLaunchedApps(); sweepClosedPopup(); } catch { /* ignore */ } }, 2000);
+    const onHide = () => { try { teardownAllLaunchedApps(); } catch { /* ignore */ } };
+    window.addEventListener('pagehide', onHide);
+    return () => { clearInterval(t); window.removeEventListener('pagehide', onHide); };
+  }, []);
 
   const load = useCallback(async () => {
     try {

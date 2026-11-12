@@ -10,17 +10,19 @@ type Manager struct {
 	auth       *AuthStore
 	queue      *Queue
 	payments   *PaymentStore
+	launch     *LaunchStore
 	mu         sync.Mutex
 	generation string
 }
 
 func NewManager(walletDir string) *Manager {
-	return &Manager{auth: NewAuthStore(walletDir), queue: NewQueue(), payments: NewPaymentStore(walletDir)}
+	return &Manager{auth: NewAuthStore(walletDir), queue: NewQueue(), payments: NewPaymentStore(walletDir), launch: NewLaunchStore()}
 }
 
 func (m *Manager) AuthStore() *AuthStore { return m.auth }
 func (m *Manager) Queue() *Queue         { return m.queue }
 func (m *Manager) Payments() *PaymentStore { return m.payments }
+func (m *Manager) LaunchStore() *LaunchStore { return m.launch }
 
 func (m *Manager) Load() error {
 	if err := m.auth.Load(); err != nil {

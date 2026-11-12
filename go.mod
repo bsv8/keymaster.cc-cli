@@ -47,7 +47,7 @@ require (
 	github.com/filecoin-project/go-clock v0.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/gorilla/websocket v1.5.3
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/ipfs/go-cid v0.6.2 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
@@ -112,10 +112,10 @@ require (
 	go.uber.org/mock v0.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/crypto v0.58.0
 	golang.org/x/exp v0.0.0-20260718201538-764159d718ef // indirect
 	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0
 	golang.org/x/telemetry v0.0.0-20261009151841-97e8ea77aa2a // indirect

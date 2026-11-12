@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -138,7 +139,17 @@ func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectAp
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
 	if !first {
-		// 重复决定不重复执行。
+		// 重复决定不重复执行。但“已批准、尚未认领”的审批可能因连接已死
+		// 永远无人认领：此时取消/拒绝决定将其原子终结并释放冻结，
+		// 已认领或已终态的不动（认领是执行的唯一入口，未认领即确定未提交）。
+		if (p.Decision == "cancel" || p.Decision == "reject") && approval.Status == "approved" {
+			if abandoned, ok := d.connectMgr.Queue().AbandonApproved(p.ApprovalID); ok {
+				if abandoned.Method == "payment.pay" {
+					d.rejectPaymentByApproval(abandoned, "abandoned")
+				}
+				return map[string]any{"ok": true, "status": abandoned.Status}, nil
+			}
+		}
 		return map[string]any{"ok": true, "status": approval.Status, "deduped": true}, nil
 	}
 	// 付款拒绝/取消：明确未提交，释放冻结输入，不广播。
@@ -249,10 +260,10 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		origin = *p.Origin
 	}
 
-	// launch 需要一次性启动令牌与完整 appView 会话；CLI 宿主尚未实现，明确拒绝，
-	// 不能走 login 审批后误签发普通授权。
+	// launch 由钱包主动启动流程消费一次性令牌：发起即授权，不进入审批队列。
+	// 普通 connect.login 继续走审批，不能借此变成免审批登录。
 	if method == "connect.launch" {
-		return nil, nil, errDetail(kmapi.ErrForbidden, "connect.launch 尚未实现")
+		return d.execConnectLaunch(ctx, p)
 	}
 	// 建立连接类方法：proof 必填，每次调用都需用户确认绑定。
 	// 例外：Receiver 已把持有授权的 reconnect 心跳转成 resume；此时只复核
@@ -370,6 +381,181 @@ func (d *Daemon) resumeConnect(authorizationID, origin string) (any, map[string]
 		"appIdentity": map[string]any{
 			"version": 1, "publisherPublicKeyHex": auth.AppPublicKey,
 			"appId": auth.AppID, "appName": auth.AppName, "identityDigestHex": auth.IdentityDigest,
+		},
+	}, nil, nil
+}
+
+// isExactHttpOrigin 只接受精确 HTTP(S) origin，不接受路径、查询或 opaque 来源。
+func isExactHttpOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	return origin == u.Scheme+"://"+u.Host
+}
+
+// opConnectLaunchIssue 为钱包主动启动签发一次性令牌。
+// 钱包管理上下文专用，App 上下文禁止调用；签发时钱包必须已初始化并解锁。
+func (d *Daemon) opConnectLaunchIssue(ctx context.Context, p kmapi.ConnectLaunchIssueRequest) (any, *kmapi.ErrorDetail) {
+	if d.connectMgr == nil {
+		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
+	}
+	if isAppCaller(ctx) {
+		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权签发启动令牌")
+	}
+	if e := d.needInit(); e != nil {
+		return nil, e
+	}
+	if e := d.needRunning(); e != nil {
+		return nil, e
+	}
+	if e := d.needUnlocked(); e != nil {
+		return nil, e
+	}
+	origin := strings.TrimSpace(p.Origin)
+	if !isExactHttpOrigin(origin) {
+		return nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
+	}
+	info, _, err := d.store.Snapshot()
+	if err != nil {
+		return nil, errDetail(kmapi.ErrInternal, err.Error())
+	}
+	d.mu.Lock()
+	walletPub := d.publicKey
+	d.mu.Unlock()
+	// 钱包主动启动即用户授权：签发前独立解析应用发布的身份证明，
+	// 绑定发布者公钥、应用标识、身份摘要与许可范围；消费时 proof 必须
+	// 与之完全一致，应用不能在消费时替换身份或扩大权限。
+	verified, err := connect.FetchAppProof(ctx, origin)
+	if err != nil {
+		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
+	}
+	rec, err := d.connectMgr.LaunchStore().Issue(origin, info.BsvNetwork, walletPub, d.connectMgr.Generation(), verified, connect.LaunchTTL)
+	if err != nil {
+		return nil, errDetail(kmapi.ErrInternal, "签发启动令牌失败")
+	}
+	return map[string]any{
+		"launchToken": rec.Token,
+		"expiresAt":   rec.ExpiresAt,
+		"appIdentity": map[string]any{
+			"publisherPublicKeyHex": rec.AppPublicKey,
+			"appId":                 rec.AppID,
+			"appName":               rec.AppName,
+			"identityDigestHex":     rec.IdentityDigestHex,
+			"requirements":          append([]string(nil), rec.Requirements...),
+		},
+	}, nil
+}
+
+// execConnectLaunch 消费钱包签发的一次性令牌并直接签发授权。
+// 用户在钱包点击启动即视为同意：不进入审批队列，不弹第二次登录审批。
+// 令牌先消费再校验，重放、错误来源、身份或权限不匹配、过期或运行代际失效一律拒绝。
+// 授权的身份与许可范围以签发时绑定的为准，消费 proof 仅作一致性核对。
+func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecRequest) (any, map[string][]byte, *kmapi.ErrorDetail) {
+	if d.connectMgr == nil {
+		return nil, nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
+	}
+	paramsMap := map[string]any{}
+	if p.Params != nil {
+		b, _ := json.Marshal(p.Params)
+		_ = json.Unmarshal(b, &paramsMap)
+	}
+	token, _ := paramsMap["launchToken"].(string)
+	if strings.TrimSpace(token) == "" {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "launchToken 必填")
+	}
+	origin := ""
+	if p.Origin != nil {
+		origin = *p.Origin
+	}
+	var proofRaw json.RawMessage
+	if p.Proof != nil {
+		b, _ := json.Marshal(p.Proof)
+		proofRaw = b
+	}
+	if len(proofRaw) == 0 {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "proof 必填")
+	}
+	rec, ok := d.connectMgr.LaunchStore().Consume(strings.TrimSpace(token))
+	if !ok {
+		return nil, nil, errDetail(kmapi.ErrNotFound, "启动令牌无效或已使用")
+	}
+	if time.Now().UnixMilli() > rec.ExpiresAt {
+		return nil, nil, errDetail(kmapi.ErrNotFound, "启动令牌已过期")
+	}
+	if strings.TrimSpace(origin) == "" || origin != rec.Origin {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "来源不匹配")
+	}
+	verified, err := connect.VerifyProof(proofRaw)
+	if err != nil {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
+	}
+	// 启动即授权的身份以签发时钱包独立解析的为准：消费 proof 的摘要、
+	// 发布者与应用标识必须与绑定上下文完全一致，不接受替换身份或扩大权限。
+	if !strings.EqualFold(verified.PublisherPublicKey, rec.AppPublicKey) ||
+		verified.AppID != rec.AppID ||
+		!strings.EqualFold(verified.IdentityDigestHex, rec.IdentityDigestHex) {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与启动授权不一致")
+	}
+	if d.store == nil {
+		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
+	}
+	if d.isStopping() {
+		return nil, nil, errDetail(kmapi.ErrStopping, "后台停止中")
+	}
+	d.mu.Lock()
+	locked := d.state != StateUnlocked
+	walletPub := d.publicKey
+	d.mu.Unlock()
+	if locked {
+		return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
+	}
+	info, _, err := d.store.Snapshot()
+	if err != nil {
+		return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
+	}
+	if rec.Generation == "" || rec.Generation != d.connectMgr.Generation() {
+		return nil, nil, errDetail(kmapi.ErrNotFound, "启动上下文已失效，请从钱包重新打开")
+	}
+	if rec.Network != info.BsvNetwork || !strings.EqualFold(rec.WalletPublicKey, walletPub) {
+		return nil, nil, errDetail(kmapi.ErrNotFound, "启动上下文已失效")
+	}
+	now := time.Now().UnixMilli()
+	authorizationID, idErr := newAuthorizationID()
+	if idErr != nil {
+		return nil, nil, errDetail(kmapi.ErrInternal, "生成授权失败")
+	}
+	// 同一 App 同一来源重新启动时替换旧授权，避免僵尸授权堆积。
+	for _, old := range d.connectMgr.AuthStore().FindByApp(verified.PublisherPublicKey) {
+		if old.Origin == origin {
+			_ = d.connectMgr.AuthStore().RevokeByID(old.AuthorizationID)
+		}
+	}
+	if err := d.connectMgr.AuthStore().Save(connect.Auth{
+		AuthorizationID: authorizationID,
+		AppPublicKey:    verified.PublisherPublicKey, AppID: verified.AppID, AppName: verified.AppName,
+		IdentityDigest: verified.IdentityDigestHex, Requirements: append([]string(nil), verified.Requirements...),
+		Origin: origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
+		Generation: d.connectMgr.Generation(),
+	}); err != nil {
+		return nil, nil, errDetail(kmapi.ErrInternal, "保存授权失败")
+	}
+	return map[string]any{
+		"authorizationId": authorizationID,
+		"networkIdentity": map[string]any{
+			"bsvNetwork": info.BsvNetwork, "publicKeyHex": walletPub,
+		},
+		"resolvedClaims": map[string]any{},
+		"resolvedAt":     now,
+		"appIdentity": map[string]any{
+			"version": 1, "publisherPublicKeyHex": verified.PublisherPublicKey,
+			"appId": verified.AppID, "appName": verified.AppName, "identityDigestHex": verified.IdentityDigestHex,
 		},
 	}, nil, nil
 }

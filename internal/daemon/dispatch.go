@@ -315,6 +315,13 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 	return res, nil, perr
 	case kmapi.MethodConnectRequestExec:
 		return d.opConnectExec(ctx, params, attachments)
+	case kmapi.MethodConnectLaunchIssue:
+		var p kmapi.ConnectLaunchIssueRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectLaunchIssue(ctx, p)
+	return res, nil, perr
 	case kmapi.MethodStoragePut:
 		var p kmapi.StoragePutRequest
 		if err := decodeStrict(params, &p); err != nil {

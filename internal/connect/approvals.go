@@ -158,6 +158,22 @@ func (q *Queue) Decide(id, decision string) (Approval, bool, error) {
 	return *a, true, nil
 }
 
+// AbandonApproved 原子终结已批准但尚未认领的审批：仅当 status==approved
+// 且 ExecState 为空（确定未提交认领是执行的唯一入口未认领即未提交）时转为
+// cancelled；已认领或已终态的不动返回 false。调用方负责释放关联冻结。
+// 与 ClaimExecution 共用同一把锁两者有且仅有一者成功。
+func (q *Queue) AbandonApproved(id string) (Approval, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a, ok := q.items[id]
+	if !ok || a.Status != "approved" || a.ExecState != "" {
+		return Approval{}, false
+	}
+	a.Status = "cancelled"
+	a.DecidedAt = time.Now().UnixMilli()
+	return *a, true
+}
+
 // ClaimExecution 认领一次已批准审批的执行权；仅第一次返回 true，调用方负责
 // 执行并随后调用 StoreResult/StoreError。并发认领中仅一者成功。
 func (q *Queue) ClaimExecution(id string) (Approval, bool) {
