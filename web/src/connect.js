@@ -326,6 +326,10 @@ export async function initConnectReceiver(onApproval) {
 function sdkError(method, perr) {
   const code = perr?.code || 'internal_error';
   const message = perr?.message || 'Internal error';
+  // 授权本身失效（非业务对象缺失）：统一回 authorization_expired，调用方按恢复语义处理。
+  if ((code === 'NOT_FOUND' || code === 'BAD_REQUEST') && message.includes('授权')) {
+    return { code: 'authorization_expired', message };
+  }
   if (method.startsWith('storage.')) {
     switch (code) {
       case 'NOT_FOUND': return { code: 'storage_not_found', message };
@@ -397,22 +401,30 @@ async function handleRequest(req, recv) {
       // 并携带 authorizationId；宿主只复核既有授权，不重复审批、不新建授权。
       if (method === 'connect.resume' && req.authorizationId) {
         try {
+          // 刷新恢复附带当前入口 proof（如有），由后台核对原授权绑定身份；心跳无 proof 时按原授权恢复。
+          const resumeProof = req.params?.appIdentity;
           const resumed = await client.call({ signal }, 'connect.request.exec', {
             method, origin, authorizationId: req.authorizationId,
+            ...(resumeProof ? { proof: resumeProof } : {}),
           });
-          // 同一连接的心跳恢复成功：沿用原授权，本连接继续持有，不新建映射到他处。
+          // 同一连接的心跳/刷新恢复成功：沿用原授权，本连接继续持有，不新建映射到他处。
+          // 刷新后的新连接先由后台验证记录中的授权，再建立新映射，不要求新 Receiver 事先已有映射。
           authzOf(recv).set(origin, req.authorizationId);
           recv.replyResult(req, resumed);
         } catch (e) {
-          const stale = e?.code === 'NOT_FOUND' || e?.code === 'BAD_REQUEST';
-          if (stale) {
-            // 与官方钱包一致：失效授权要显式收回，App 才能停止心跳并重新登录。
+          const message = e?.message || '恢复连接失败，请重新登录';
+          // 授权已不存在/过期/代际失效：显式收回并回 authorization_expired，调用方清除本地记录。
+          // proof 无效或身份不匹配：回 invalid_request，保留原记录，不创建新授权。
+          if (e?.code === 'NOT_FOUND') {
             try {
               req.source.postMessage({ v: 1, type: 'revoked', authorizationId: req.authorizationId }, origin);
             } catch { /* 窗口关闭时静默 */ }
+            recv.replyError(req, { code: 'authorization_expired', message });
+          } else if (e?.code === 'BAD_REQUEST') {
+            recv.replyError(req, { code: 'invalid_request', message });
+          } else {
+            recv.replyError(req, { code: 'internal_error', message });
           }
-          const code = stale ? 'connection_expired' : 'internal_error';
-          recv.replyError(req, { code, message: e?.message || '恢复连接失败，请重新登录' });
         }
         return;
       }

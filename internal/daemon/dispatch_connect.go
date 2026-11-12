@@ -267,13 +267,19 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	}
 	// 建立连接类方法：proof 必填，每次调用都需用户确认绑定。
 	// 例外：Receiver 已把持有授权的 reconnect 心跳转成 resume；此时只复核
-	// 既有授权，不重复弹审批，也不改变授权内容。
+	// 既有授权，不重复弹审批，也不改变授权内容。刷新恢复可附带当前入口 proof，
+	// 由后台核对与原授权绑定的应用身份一致，不替换身份或扩大许可。
 	if isEstablishingConnectMethod(method) {
-		if method == "connect.resume" && p.AuthorizationID != nil && *p.AuthorizationID != "" && p.Proof == nil {
+		if method == "connect.resume" && p.AuthorizationID != nil && *p.AuthorizationID != "" {
 			if strings.TrimSpace(origin) == "" {
 				return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 缺失")
 			}
-			return d.resumeConnect(*p.AuthorizationID, origin)
+			var proofRaw json.RawMessage
+			if p.Proof != nil {
+				b, _ := json.Marshal(p.Proof)
+				proofRaw = b
+			}
+			return d.resumeConnect(*p.AuthorizationID, origin, proofRaw)
 		}
 		var proofRaw json.RawMessage
 		if p.Proof != nil {
@@ -357,12 +363,23 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 }
 
 // resumeConnect 复核既有授权并返回与登录同形的 resume 结果。
-// 只由 Receiver 的 reconnect 心跳路径调用；授权、来源、网络、钱包、代际
+// 只由 Receiver 的 reconnect 心跳/刷新路径调用；授权、来源、网络、钱包、代际
 // 任一不匹配都拒绝，不静默降级为新的审批或新的授权。
-func (d *Daemon) resumeConnect(authorizationID, origin string) (any, map[string][]byte, *kmapi.ErrorDetail) {
+func (d *Daemon) resumeConnect(authorizationID, origin string, proofRaw json.RawMessage) (any, map[string][]byte, *kmapi.ErrorDetail) {
 	auth, perr := d.validateConnectAuth(authorizationID, origin)
 	if perr != nil {
 		return nil, nil, perr
+	}
+	if len(proofRaw) > 0 {
+		verified, err := connect.VerifyProof(proofRaw)
+		if err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
+		}
+		if !strings.EqualFold(verified.PublisherPublicKey, auth.AppPublicKey) ||
+			verified.AppID != auth.AppID ||
+			!strings.EqualFold(verified.IdentityDigestHex, auth.IdentityDigest) {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
+		}
 	}
 	info, _, err := d.store.Snapshot()
 	if err != nil {
