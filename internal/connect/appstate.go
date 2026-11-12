@@ -14,6 +14,13 @@ import (
 // APPROVAL_METHODS 为需要用户逐次确认的五类操作，与 keymaster.cc applicationPermissions 一致。
 var ApprovalMethods = []string{"identity.get", "intent.sign", "cipher.encrypt", "cipher.decrypt", "payment.pay"}
 
+// copyStrings 返回非 nil 副本，确保 JSON 将空集合编码为 [] 而不是 null。
+func copyStrings(in []string) []string {
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
 func IsApprovalMethod(method string) bool {
 	for _, m := range ApprovalMethods {
 		if m == method {
@@ -73,11 +80,11 @@ type HistoryEvent struct {
 const maxHistoryEvents = 2000
 
 type AppState struct {
-	mu    sync.Mutex
-	path  string
-	perms map[string]*PermissionEntry
+	mu     sync.Mutex
+	path   string
+	perms  map[string]*PermissionEntry
 	events []HistoryEvent
-	seq   int64
+	seq    int64
 }
 
 type appStateFile struct {
@@ -114,7 +121,7 @@ func (s *AppState) Load() error {
 			continue
 		}
 		cp := e
-		cp.Methods = append([]string(nil), e.Methods...)
+		cp.Methods = copyStrings(e.Methods)
 		m[e.AppKey] = &cp
 	}
 	s.perms = m
@@ -149,7 +156,7 @@ func (s *AppState) migrateLocked() error {
 			continue
 		}
 		cp := e
-		cp.Methods = append([]string(nil), e.Methods...)
+		cp.Methods = copyStrings(e.Methods)
 		m[e.AppKey] = &cp
 	}
 	s.perms = m
@@ -167,7 +174,7 @@ func (s *AppState) saveLocked() error {
 	plist := make([]PermissionEntry, 0, len(s.perms))
 	for _, e := range s.perms {
 		cp := *e
-		cp.Methods = append([]string(nil), e.Methods...)
+		cp.Methods = copyStrings(e.Methods)
 		sort.Strings(cp.Methods)
 		plist = append(plist, cp)
 	}
@@ -194,7 +201,7 @@ func (s *AppState) Methods(appKey string) ([]string, error) {
 	if !ok {
 		return []string{}, nil
 	}
-	return append([]string(nil), e.Methods...), nil
+	return copyStrings(e.Methods), nil
 }
 
 func (s *AppState) Has(appKey, method string) (bool, error) {
@@ -217,7 +224,7 @@ func (s *AppState) Snapshot() []PermissionEntry {
 	out := make([]PermissionEntry, 0, len(s.perms))
 	for _, e := range s.perms {
 		cp := *e
-		cp.Methods = append([]string(nil), e.Methods...)
+		cp.Methods = copyStrings(e.Methods)
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AppKey < out[j].AppKey })
@@ -290,7 +297,7 @@ func (s *AppState) GrantWithEvent(origin, pubkey, appID, method string, event Hi
 			return fmt.Errorf("already granted")
 		}
 	}
-	prevMethods := append([]string(nil), e.Methods...)
+	prevMethods := copyStrings(e.Methods)
 	prevUpdated := e.UpdatedAt
 	prevEvents := append([]HistoryEvent(nil), s.events...)
 	e.Methods = append(e.Methods, method)
@@ -343,7 +350,7 @@ func (s *AppState) RevokeWithEvent(appKey, method string, event HistoryEvent) er
 	if !found {
 		return nil
 	}
-	prevMethods := append([]string(nil), e.Methods...)
+	prevMethods := copyStrings(e.Methods)
 	prevUpdated := e.UpdatedAt
 	prevEvents := append([]HistoryEvent(nil), s.events...)
 	next := make([]string, 0, len(prevMethods))

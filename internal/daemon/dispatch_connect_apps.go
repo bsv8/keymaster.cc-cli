@@ -22,7 +22,7 @@ func (d *Daemon) opConnectPermissionsList(ctx context.Context, p kmapi.ConnectPe
 		}
 		out = append(out, map[string]any{
 			"applicationKey": e.AppKey, "origin": e.Origin, "appId": e.AppID, "appPublicKey": e.AppPublicKey,
-			"methods": append([]string(nil), e.Methods...), "updatedAt": e.UpdatedAt,
+			"methods": append([]string{}, e.Methods...), "updatedAt": e.UpdatedAt,
 		})
 	}
 	if out == nil {
@@ -161,7 +161,7 @@ func (d *Daemon) opConnectAppsList(ctx context.Context) (any, *kmapi.ErrorDetail
 	}
 	perms := map[string][]string{}
 	for _, e := range d.connectMgr.Permissions().Snapshot() {
-		perms[e.AppKey] = append([]string(nil), e.Methods...)
+		perms[e.AppKey] = append([]string{}, e.Methods...)
 	}
 	if apps == nil {
 		apps = []map[string]any{}
