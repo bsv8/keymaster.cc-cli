@@ -37,7 +37,7 @@ const (
 	// SettingsVersion is the settings.json format version.
 	SettingsVersion = 1
 	// DefaultPort is the daemon HTTP port default.
-	DefaultPort = 8790
+	DefaultPort = 2100
 )
 
 var (

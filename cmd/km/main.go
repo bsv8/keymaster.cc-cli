@@ -165,7 +165,7 @@ func usage(w io.Writer) {
 
 全局选项:
   --data-dir DIR   数据目录（默认 ~/.km；系统服务建议 /var/lib/km）
-  --api URL        后台 HTTP 地址，如 http://127.0.0.1:8790（默认读本机 settings.json，无后台时本地命令内嵌启动）
+  --api URL        后台 HTTP 地址，如 http://127.0.0.1:2100（默认读本机 settings.json，无后台时本地命令内嵌启动）
 
 说明:
   后台仅监听 127.0.0.1，无 token；远程访问由用户反向代理与认证负责，远程解锁请用 HTTPS。

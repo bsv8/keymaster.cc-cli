@@ -25,7 +25,7 @@ import (
 
 // Options configures the admin server.
 type Options struct {
-	// Address is the listen address, for example 127.0.0.1:8790.
+	// Address is the listen address, for example 127.0.0.1:2100.
 	Address string
 	// APIKey is the required bearer token; empty disables the server.
 	APIKey string
@@ -93,7 +93,7 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 		return nil, errors.New("admin: api key is required")
 	}
 	if options.Address == "" {
-		options.Address = "127.0.0.1:8790"
+		options.Address = "127.0.0.1:2100"
 	}
 	// The admin surface must never be exposed beyond this machine; Host header
 	// validation is defence in depth, not a substitute for the listen address.

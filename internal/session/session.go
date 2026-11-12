@@ -160,7 +160,7 @@ func settingsAddr(dataDir string) (string, error) {
 		return "", fmt.Errorf("读取本机配置失败: %w", err)
 	}
 	if settings.Port == 0 {
-		settings.Port = 8790
+		settings.Port = 2100
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", settings.Port), nil
 }
