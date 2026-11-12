@@ -4,8 +4,8 @@ import './styles.css';
 import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
-import { initConnectReceiver, decideApproval, issueLaunchToken, registerLaunchedApp, teardownLaunchedApp, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup } from './connect.js';
-import { interpretLockingScript } from 'keymaster-connect/script';
+import { initConnectReceiver, issueLaunchToken, registerLaunchedApp, teardownLaunchedApp, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
+import { GlobalApproval, AppCenter } from './approvalCenter.jsx';
 
 const TABS = [
   { id: 'overview', label: '概览' },
@@ -406,9 +406,6 @@ function SettingsPage({ onTheme }) {
 }
 
 function ConnectPanel() {
-  const [approvals, setApprovals] = React.useState([]);
-  const [bindings, setBindings] = React.useState([]);
-  const [auths, setAuths] = React.useState([]);
   const [err, setErr] = React.useState('');
   const [demoUrl, setDemoUrl] = React.useState('');
   const [walletReady, setWalletReady] = React.useState(false);
@@ -420,32 +417,20 @@ function ConnectPanel() {
   const load = React.useCallback(async () => {
     try {
       const c = await getClient();
-      const a = await c.approvalsList().catch(() => ({ approvals: [] }));
-      setApprovals(a.approvals || []);
-      const b = await c.bindingsList().catch(() => ({ bindings: [] }));
-      setBindings(b.bindings || []);
-      const au = await c.authList().catch(() => ({ authorizations: [] }));
-      setAuths(au.authorizations || []);
       const st = await c.status().catch(() => null);
       setWalletReady(!!(st && st.initialized && !st.locked));
       setErr('');
     } catch (e) { setErr(String(e?.message || e)); }
   }, []);
-  React.useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t); }, [load]);
+  // 订阅替代轮询：Connect 状态变化时重载；不长期维护两套状态来源。
+  React.useEffect(() => watchTopics(['connect'], () => load()), [load]);
+  React.useEffect(() => { load(); }, [load]);
   // 独立窗口的连接管理归钱包整体生命周期（App 根 effect 定期收殓已关闭窗口，
   // 卸载时 teardown 全部启动连接）；面板卸载只处理随展示销毁的 iframe，
   // 页面导航不得误终止仍在运行的独立窗口。
   React.useEffect(() => () => {
     if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
   }, []);
-  const decide = async (id, decision) => {
-    try { await decideApproval(id, decision); await load(); }
-    catch (e) { setErr(String(e?.message || e)); }
-  };
-  const revoke = async (appPublicKey) => {
-    try { await (await getClient()).authRevoke(appPublicKey); await load(); }
-    catch (e) { setErr(String(e?.message || e)); }
-  };
   const demoOriginOf = (value) => {
     const trimmed = String(value || '').trim();
     const u = new URL(trimmed);
@@ -518,63 +503,10 @@ function ConnectPanel() {
           <iframe data-testid="launch-iframe-view" ref={iframeRef} src={iframeSrc} title="launched-app" style={{ width: '100%', height: 560, border: '1px solid var(--border, #ccc)' }} />
         </div>}
       </section>
-      <section className="card" style={{ marginTop: 12 }}><h2>待审批</h2>{err && <p className="error">{err}</p>}
-        {(approvals.length === 0) ? <p className="hint">无待办</p> : approvals.map((a) => (
-          <div key={a.id} className="card" data-testid={`approval-${a.id}`} style={{ marginBottom: 8 }}>
-            <p className="mono">{a.method} · {a.appId} · {a.origin}</p>
-            {a.method === 'payment.pay' ? <PaymentApprovalPreview params={a.params} /> : null}
-            <div className="row"><button data-testid={`approve-${a.id}`} onClick={() => decide(a.id, 'approve')}>批准</button><button data-testid={`reject-${a.id}`} className="danger" onClick={() => decide(a.id, 'reject')}>拒绝</button></div>
-          </div>))}
-      </section>
-      <section className="card" style={{ marginTop: 12 }}><h2>应用连接</h2>
-        {(bindings.length === 0) ? <p className="hint">无连接</p> : bindings.map((b, i) => <p key={i} className="mono">{b.appPublicKey} · {b.origin}</p>)}
-      </section>
-      <section className="card" style={{ marginTop: 12 }}><h2>应用授权</h2>
-        {(auths.length === 0) ? <p className="hint">无授权</p> : auths.map((a) => (
-          <div key={a.appPublicKey} className="row"><span className="mono">{a.appId} · {a.appPublicKey.slice(0, 12)}…</span><button className="danger" onClick={() => revoke(a.appPublicKey)}>撤销</button></div>))}
-      </section>
-    </div>
-  );
-}
-
-function PaymentApprovalPreview({ params }) {
-  const outputs = Array.isArray(params?.outputs) ? params.outputs : [];
-  let total = 0n;
-  try {
-    for (const o of outputs) total += BigInt(o.amount || 0);
-  } catch { /* ignore */ }
-  let fee = 0n;
-  let change = 0n;
-  try { fee = BigInt(params?.feeSatoshis || 0); } catch { /* ignore */ }
-  try { change = BigInt(params?.changeSatoshis || 0); } catch { /* ignore */ }
-  let spend = total;
-  try { spend = total + fee; } catch { /* ignore */ }
-  return (
-    <div className="mono" style={{ marginTop: 8 }}>
-      <p>业务输出总额 {total.toString()} sat · 矿工费 {fee.toString()} sat · 找零 {change.toString()} sat · 实际支出 {spend.toString()} sat（含费）</p>
-      <p>批准绑定已保存计划，不重新选币；计划改变需重新确认。</p>
-      <ol>
-        {outputs.map((o, i) => {
-          const scriptHex = String(o.script || '').toLowerCase();
-          const amount = Number(o.amount || 0);
-          let label = '未知脚本';
-          let detail = '不认识此脚本，无法解释其用途';
-          try {
-            const it = interpretLockingScript(scriptHex, Number.isSafeInteger(amount) ? amount : 0);
-            if (it.kind === 'p2pkh') { label = 'P2PKH'; detail = `收款地址 ${it.addressMainnet} / ${it.addressTestnet}，金额 ${o.amount} sat`; }
-            else if (it.kind === 'p2pk') { label = 'P2PK'; detail = `收款公钥 ${it.publicKeyHex}，金额 ${o.amount} sat`; }
-            else if (it.kind === 'multisig') { label = `标准多签 ${it.m}/${it.n}`; detail = `所需签名数 ${it.m}，公钥 ${it.publicKeysHex.join(', ')}，金额 ${o.amount} sat`; }
-            else if (it.kind === 'op_return') { label = '数据输出'; detail = `数据 ${it.dataHex || '(空)'}${it.dataText ? `（文本：${it.dataText}）` : ''}，金额 ${o.amount} sat`; }
-          } catch { /* 按未知展示 */ }
-          return (
-            <li key={i}>
-              <div>#{i} [{label}] {String(o.amount)} sat</div>
-              <div>{detail}</div>
-              <div>完整脚本 <code>{scriptHex}</code></div>
-            </li>
-          );
-        })}
-      </ol>
+      <div style={{ marginTop: 12 }}>
+        {err && <p className="error">{err}</p>}
+        <AppCenter />
+      </div>
     </div>
   );
 }
@@ -651,6 +583,9 @@ function App() {
     window.addEventListener('pagehide', onHide);
     return () => { clearInterval(t); window.removeEventListener('pagehide', onHide); };
   }, []);
+  // 原请求窗口订阅后台 connect 变化，收到决定后复核 Receiver 上下文再认领执行。
+  // 重连后读完整快照再触发认领，不依赖某一页内存或仅依赖通知消息；无固定轮询兜底。
+  useEffect(() => watchTopics(['connect'], () => { pumpPendingApprovals().catch(() => {}); }), []);
 
   const load = useCallback(async () => {
     try {
@@ -795,6 +730,7 @@ function App() {
           <span className="spacer" />
           <span className="badge" data-testid="connection-state" data-state={conn}>{conn === 'connected' ? t('已连接') : conn === 'connecting' ? t('连接中') : conn === 'protocol-incompatible' ? t('协议不兼容') : t('已断开')}</span>
           {conn === 'disconnected' && <button type="button" className="ghost" onClick={() => retryConnection()}>{t('重试')}</button>}
+          <GlobalApproval wallet={{ network: info?.network, address: info?.address || status?.address }} onNavigateConnect={() => setPage('connect')} />
           <StateBadge state={conn === 'connected' ? status?.state : undefined} locked={status?.locked ?? info?.locked} />
           {info?.network && <span className="badge">{info.network} · {info?.address ? `${info.address.slice(0, 8)}…` : ''}</span>}
         </header>

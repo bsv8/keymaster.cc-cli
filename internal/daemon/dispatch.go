@@ -322,6 +322,37 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 		}
 		res, perr := d.opConnectLaunchIssue(ctx, p)
 	return res, nil, perr
+	case kmapi.MethodConnectPermissionsList:
+		var p kmapi.ConnectPermissionsListRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectPermissionsList(ctx, p)
+	return res, nil, perr
+	case kmapi.MethodConnectPermissionsRevoke:
+		var p kmapi.ConnectPermissionsRevokeRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectPermissionsRevoke(ctx, p)
+	return res, nil, perr
+	case kmapi.MethodConnectHistoryList:
+		var p kmapi.ConnectHistoryListRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectHistoryList(ctx, p)
+	return res, nil, perr
+	case kmapi.MethodConnectAppsList:
+		res, perr := d.opConnectAppsList(ctx)
+	return res, nil, perr
+	case kmapi.MethodConnectConnectionPause:
+		var p kmapi.ConnectConnectionPauseRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectConnectionPause(ctx, p)
+	return res, nil, perr
 	case kmapi.MethodStoragePut:
 		var p kmapi.StoragePutRequest
 		if err := decodeStrict(params, &p); err != nil {

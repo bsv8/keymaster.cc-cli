@@ -171,3 +171,57 @@ tbody tr:last-child td { border-bottom: 0; }
   .layout { flex-direction: column; }
   .brand { padding: 0 8px 0 0; }
 }
+
+/* 全局待办条与审批顶层面板：对齐 keymaster.cc ApplicationCenter */
+.application-alert {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; align-items: center; gap: 12px;
+  background: var(--warn-soft); border: 1px solid var(--warn);
+  color: var(--text); border-radius: 10px; padding: 10px 14px; margin: 0 0 14px;
+}
+.application-alert strong { display: inline-flex; align-items: center; gap: 8px; }
+.application-alert strong i {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--warn);
+  animation: app-pulse 2s ease-in-out infinite;
+}
+.application-alert.is-unseen { border-width: 2px; }
+.application-automatic {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--ok-soft); border: 1px solid var(--ok);
+  border-radius: 10px; padding: 8px 12px; margin: 0 0 14px; font-size: 13px;
+}
+@keyframes app-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .application-alert strong i { animation: none; }
+}
+body[data-application-pending] .topbar { box-shadow: 0 0 0 2px var(--warn) inset; }
+dialog.application-drawer {
+  border: 1px solid var(--border); border-radius: 12px; padding: 0;
+  max-width: 640px; width: calc(100% - 32px);
+  background: var(--card); color: var(--text);
+}
+dialog.application-drawer::backdrop { background: rgba(10, 15, 30, 0.55); }
+.application-drawer header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.application-drawer-body { padding: 16px 18px; max-height: 70vh; overflow: auto; }
+.application-identity { margin-bottom: 12px; }
+.application-identity h3 { margin: 0; }
+.application-identity code { display: block; }
+.application-note { color: var(--muted); font-size: 12px; }
+.application-queue-item {
+  display: block; width: 100%; text-align: left; margin: 6px 0;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); font-weight: 400;
+}
+.application-tabs { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+.application-tabs button.selected { outline: 2px solid var(--accent); }
+.application-session, .application-setting, .application-history {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0;
+}
+.application-setting { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.application-setting small.application-warning { color: var(--danger); }
+.application-filter { width: 100%; margin: 8px 0; }

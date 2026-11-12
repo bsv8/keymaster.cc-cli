@@ -147,6 +147,10 @@ func (d *Daemon) buildSnapshot(topics []string) (kmapi.SnapshotEvent, error) {
 		topicList = append(topicList, kmapi.TopicBalance)
 		state[kmapi.TopicBalance] = d.balanceState()
 	}
+	if wants(topics, kmapi.TopicConnect) {
+		topicList = append(topicList, kmapi.TopicConnect)
+		state[kmapi.TopicConnect] = d.connectSnapshot()
+	}
 	snap.Topics = topicList
 	if len(revs) > 0 {
 		snap.Revisions = revs

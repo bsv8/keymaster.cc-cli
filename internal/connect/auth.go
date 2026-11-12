@@ -93,8 +93,17 @@ func (s *AuthStore) Save(a Auth) error {
 	if a.CreatedAt == 0 {
 		a.CreatedAt = time.Now().UnixMilli()
 	}
+	prev, hadPrev := s.auths[a.AuthorizationID]
 	s.auths[a.AuthorizationID] = a
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		if hadPrev {
+			s.auths[a.AuthorizationID] = prev
+		} else {
+			delete(s.auths, a.AuthorizationID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *AuthStore) List() []Auth {
@@ -128,30 +137,83 @@ func (s *AuthStore) FindByApp(appPubKey string) []Auth {
 	return out
 }
 
-// Revoke 撤销指定 App 公钥的全部授权。
+// Revoke 保留仅供内部精确替换旧授权使用；对外 API 不再暴露按公钥粗粒度撤销。
+// 新代码优先使用 RevokeExact，避免误撤同一发行人其他应用。
 func (s *AuthStore) Revoke(appPubKey string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	found := false
-	for id, a := range s.auths {
-		if a.AppPublicKey == appPubKey {
-			delete(s.auths, id)
-			found = true
-		}
-	}
-	if !found {
-		return fmt.Errorf("授权不存在")
-	}
-	return s.saveLocked()
+	return s.revokeLocked(func(a Auth) bool { return a.AppPublicKey == appPubKey }, true)
 }
 
-// RevokeByID 撤销单条授权。
+func (s *AuthStore) revokeLocked(match func(Auth) bool, needFound bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed []Auth
+	for id, a := range s.auths {
+		if match(a) {
+			removed = append(removed, a)
+			delete(s.auths, id)
+		}
+	}
+	if needFound && len(removed) == 0 {
+		return fmt.Errorf("授权不存在")
+	}
+	if err := s.saveLocked(); err != nil {
+		for _, a := range removed {
+			s.auths[a.AuthorizationID] = a
+		}
+		return err
+	}
+	return nil
+}
+
+// RevokeExact 按精确应用身份撤销该应用全部连接，不影响同发行人其他 App 或其他来源。
+func (s *AuthStore) RevokeExact(origin, appPubKey, appID string) error {
+	return s.revokeLocked(func(a Auth) bool {
+		if a.Origin != origin {
+			return false
+		}
+		if appPubKey != "" && !equalFold(a.AppPublicKey, appPubKey) {
+			return false
+		}
+		if appID != "" && a.AppID != appID {
+			return false
+		}
+		return true
+	}, true)
+}
+
+// FindExact 按精确应用身份查找有效授权。
+
+// RevokeByID 撤销单条授权；落盘失败回滚内存。
 func (s *AuthStore) RevokeByID(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.auths[id]; !ok {
+	prev, ok := s.auths[id]
+	if !ok {
 		return fmt.Errorf("授权不存在")
 	}
 	delete(s.auths, id)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.auths[id] = prev
+		return err
+	}
+	return nil
+}
+
+func equalFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }

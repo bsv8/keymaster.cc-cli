@@ -287,7 +287,7 @@ func paymentResultFromRecord(r connect.PaymentRecord) map[string]any {
 
 // opConnectPaymentPay 实现 payment.pay：幂等落库 → 冻结输入和保存预览 → 审批 → 提交。
 // 首次调用冻结并创建审批返回 approvalId；批准后经 approvalId 认领执行原计划，不重新选币。
-func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, params map[string]any, origin string) (any, map[string][]byte, *kmapi.ErrorDetail) {
+func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, params map[string]any, origin, requestID string) (any, map[string][]byte, *kmapi.ErrorDetail) {
 	if d.store == nil {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
@@ -471,11 +471,12 @@ func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, par
 	// 先创建暂存审批（不可见、不可决定），持久化绑定成功后再发布可见。
 	// 审批 params 绑定 paymentKey、requestDigest 与冻结值，执行时复核一致，
 	// 计划被替换则拒绝，要求重新确认。
-	staged := d.connectMgr.Queue().CreateStaged(
+	staged := d.connectMgr.Queue().CreateStagedFull(
+		auth.AuthorizationID, requestID,
 		auth.AppPublicKey, auth.AppID, auth.AppName,
 		"payment.pay",
 		map[string]any{"clientRequestId": clientRequestID, "paymentKey": key, "requestDigest": digest, "outputs": outputsToMaps(outputs), "feeSatoshis": spend.Fee, "changeSatoshis": spend.Change, "txid": spend.TxID},
-		origin, auth.Requirements, auth.IdentityDigest,
+		origin, auth.Requirements, auth.IdentityDigest, nil,
 	)
 	// 回写 ApprovalID，使重启收敛可区分“审批从未创建”与“审批可能已执行”。
 	// 条件更新：期间记录被改写则放弃本次审批，禁止旧快照覆盖后续状态。
@@ -626,7 +627,12 @@ func (d *Daemon) execPaymentApproved(ctx context.Context, approval connect.Appro
 	if rawHex == "" {
 		return nil, nil, errDetail(kmapi.ErrInternal, "冻结计划缺失")
 	}
-	// 广播前复核已完成；此处不再重新选币。
+	// 广播前提交点复核：授权在执行入口校验后被撤销则收敛为未提交并释放冻结，
+	// 绝不在撤销后广播。此处不再重新选币。
+	if _, rerr := d.recheckAuthLive(rec.AuthorizationID); rerr != nil {
+		d.convergePaymentNotSigned(rec, "auth-invalid")
+		return nil, nil, rerr
+	}
 	var broadcastErr error
 	var broadcastTxid string
 	if hasHeld && held != nil && held.spend != nil {
@@ -782,6 +788,24 @@ func (d *Daemon) validatePaymentAuth(rec connect.PaymentRecord, approval connect
 	}
 	if a.Network != rec.Network || !strings.EqualFold(a.WalletPublicKey, rec.OwnerPublicKeyHex) {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
+	}
+	if d.connectMgr != nil && d.connectMgr.Connections() != nil {
+		if !d.connectMgr.Connections().IsOnline(a.AuthorizationID) {
+			// 缺记录视为存量授权首次补建在线；已暂停/关闭则拒绝广播。
+			found := false
+			for _, c := range d.connectMgr.Connections().List() {
+				if c.AuthID == a.AuthorizationID {
+					found = true
+					break
+				}
+			}
+			if found {
+				return connect.Auth{}, errDetail(kmapi.ErrNotFound, "连接已暂停或关闭，授权需重新握手")
+			}
+			d.connectMgr.Connections().UpsertActive(a)
+		} else {
+			d.connectMgr.Connections().Touch(a.AuthorizationID)
+		}
 	}
 	return a, nil
 }

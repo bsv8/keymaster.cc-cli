@@ -35,6 +35,8 @@ func connectRequirement(method string) (requirement string, ok bool) {
 		return "storage", true
 	case method == "cipher.encrypt" || method == "cipher.decrypt":
 		return "private-key", true
+	case method == "identity.get" || method == "intent.sign":
+		return "private-key", true
 	case method == "payment.pay" || method == "payment.status":
 		return "private-key", true
 	default:
@@ -55,33 +57,36 @@ func (d *Daemon) opConnectApprovalsList(ctx context.Context) (any, *kmapi.ErrorD
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
 	}
+	d.sweepExpiredApprovals()
 	list := d.connectMgr.Queue().List()
 	out := make([]map[string]any, 0, len(list))
 	for _, a := range list {
-		out = append(out, map[string]any{
-			"id": a.ID, "appPublicKey": a.AppPublicKey, "appId": a.AppID,
-			"method": a.Method, "params": a.Params, "origin": a.Origin,
-			"requirements": a.Requirements, "status": a.Status, "createdAt": a.CreatedAt,
-		})
+		out = append(out, a.View())
 	}
 	return map[string]any{"approvals": out}, nil
 }
 
-// opConnectBindingsList 返回当前有效的应用连接视图（由有效授权派生）。
-// 后台不维护独立的 binding 注册表：授权即连接，撤销即断开。
+// opConnectBindingsList 返回当前在线的应用连接视图（未关闭且未暂停的实际运行连接）。
+// 连接由登录/启动/恢复建立，退出/撤销关闭，暂停保留授权；不用持久授权条数代替。
 func (d *Daemon) opConnectBindingsList(ctx context.Context) (any, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
 	}
+	byID := map[string]connect.Auth{}
+	for _, a := range d.connectMgr.AuthStore().List() {
+		byID[a.AuthorizationID] = a
+	}
 	gen := d.connectMgr.Generation()
 	out := make([]map[string]any, 0)
-	for _, a := range d.connectMgr.AuthStore().List() {
-		if a.Generation == "" || a.Generation != gen {
+	for _, c := range d.connectMgr.Connections().Online() {
+		a, ok := byID[c.AuthID]
+		if !ok || a.Generation == "" || a.Generation != gen {
 			continue
 		}
 		out = append(out, map[string]any{
-			"id": a.AuthorizationID, "appPublicKey": a.AppPublicKey,
+			"id": a.AuthorizationID, "appPublicKey": a.AppPublicKey, "appId": a.AppID, "appName": a.AppName,
 			"origin": a.Origin, "network": a.Network, "generation": a.Generation,
+			"applicationKey": connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID),
 		})
 	}
 	return map[string]any{"bindings": out}, nil
@@ -101,7 +106,8 @@ func (d *Daemon) opConnectAuthList(ctx context.Context) (any, *kmapi.ErrorDetail
 		out = append(out, map[string]any{
 			"appPublicKey": a.AppPublicKey, "appId": a.AppID, "appName": a.AppName,
 			"network": a.Network, "origin": a.Origin, "generation": a.Generation,
-			"createdAt": a.CreatedAt,
+			"createdAt": a.CreatedAt, "authorizationId": a.AuthorizationID,
+			"applicationKey": connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID),
 		})
 	}
 	return map[string]any{"authorizations": out}, nil
@@ -111,18 +117,36 @@ func (d *Daemon) opConnectAuthRevoke(ctx context.Context, p kmapi.ConnectAuthRev
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
 	}
-	if strings.TrimSpace(p.AppPublicKey) == "" {
-		return nil, errDetail(kmapi.ErrBadRequest, "appPublicKey 必填")
+	if strings.TrimSpace(p.Origin) == "" || strings.TrimSpace(p.AppPublicKey) == "" || strings.TrimSpace(p.AppID) == "" {
+		return nil, errDetail(kmapi.ErrBadRequest, "origin/appPublicKey/appId 必填")
 	}
-	if err := d.connectMgr.AuthStore().Revoke(p.AppPublicKey); err != nil {
+	if !isExactHttpOrigin(strings.TrimSpace(p.Origin)) {
+		return nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
+	}
+	appKey := connect.ApplicationKey(p.Origin, p.AppPublicKey, p.AppID)
+	var revErr error
+	d.connectMgr.SerializedAuthChange(func() {
+		revErr = d.connectMgr.AuthStore().RevokeExact(p.Origin, p.AppPublicKey, p.AppID)
+		if revErr == nil && d.connectMgr.Connections() != nil {
+			d.connectMgr.Connections().CloseByApp(p.Origin, p.AppPublicKey, p.AppID)
+		}
+	})
+	if revErr != nil {
 		return nil, errDetail(kmapi.ErrNotFound, "授权不存在")
 	}
+	d.connectMgr.History().Append(connect.HistoryEvent{
+		AppKey: appKey, Origin: p.Origin, AppID: p.AppID, AppPublicKey: p.AppPublicKey,
+		Kind: "disconnected", Detail: "disconnect-app",
+	})
+	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
 
 // opConnectApprovalsDecide 只做终态转换，不执行原请求。
 // 批准后的执行由 connect.request.exec（approvalId 轮询）认领一次并返回结果，
 // 避免决定响应塞不下二进制附件，也避免重复执行。
+// 只有批准时才可保存自动许可（grantAuto）；拒绝/取消不保存。
+// 许可写入失败时返回 INTERNAL，不显示“已开启自动同意”。
 func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectApprovalDecideRequest) (any, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
@@ -134,8 +158,83 @@ func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectAp
 	if isAppCaller(ctx) {
 		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权决定审批")
 	}
+	d.sweepExpiredApprovals()
+	if p.GrantAuto != nil && *p.GrantAuto && p.Decision != "approve" {
+		return nil, errDetail(kmapi.ErrBadRequest, "只有批准时才可保存自动许可")
+	}
+	// 批准并授予自动许可走统一串行路径：原授权复核＋pending→approved＋许可提交
+	// 在授权生命周期锁内按统一顺序完成，撤销/替换（同样经该锁）与本段互斥：
+	// 撤销先到则复核失败、旧待办被终结且不授予；授予先到则撤销随后只删授权、
+	// 保留此次明确授予的许可（断开与取消许可是分离的操作）。失败不留下可执行状态。
+	if p.GrantAuto != nil && *p.GrantAuto && p.Decision == "approve" {
+		pre, ok := d.connectMgr.Queue().Get(p.ApprovalID)
+		if !ok {
+			return nil, errDetail(kmapi.ErrNotFound, "审批不存在")
+		}
+		if pre.Status == "staged" {
+			return nil, errDetail(kmapi.ErrBadRequest, "审批尚未发布")
+		}
+		if pre.Status == "pending" {
+			if !connect.IsApprovalMethod(pre.Method) {
+				return nil, errDetail(kmapi.ErrBadRequest, "该操作不支持自动许可")
+			}
+			var approval connect.Approval
+			var first bool
+			var derr error
+			// 复核与提交同处授权生命周期临界区：与撤销/替换按统一顺序串行，
+			// 杜绝“先校验后撤销”窗口；锁顺序为 authMu → queue → {authstore, appstate}。
+			d.connectMgr.SerializedAuthChange(func() {
+				if strings.TrimSpace(pre.AuthorizationID) != "" {
+					if _, verr := d.validateConnectAuth(pre.AuthorizationID, pre.Origin); verr != nil {
+						// 原授权已撤销/失效：终结该旧待办，不授予许可。
+						if cancelled, _, cerr := d.connectMgr.Queue().Decide(p.ApprovalID, "cancel"); cerr == nil {
+							if cancelled.Method == "payment.pay" {
+								d.rejectPaymentByApproval(cancelled, "auth-invalid")
+							}
+							d.recordApprovalHistory(cancelled, "user-canceled", false, "auth-invalid")
+							d.publishConnect()
+						}
+						derr = verr
+						return
+					}
+				}
+				var gerr error
+				approval, first, gerr = d.connectMgr.Queue().DecideApproveWithGrant(p.ApprovalID, func(a connect.Approval) error {
+					if perr := d.grantAutoPermission(a.Origin, a.AppPublicKey, a.AppID, a.Method); perr != nil {
+						return fmt.Errorf("%s", perr.Message)
+					}
+					return nil
+				})
+				if gerr != nil {
+					derr = gerr
+				}
+			})
+			if derr != nil {
+				if derr.Error() == "审批已过期" {
+					d.sweepExpiredApprovals()
+					return nil, errDetail(kmapi.ErrStateConflict, "审批已过期")
+				}
+				if ed, ok := derr.(*kmapi.ErrorDetail); ok {
+					return nil, ed
+				}
+				d.publishConnect()
+				return nil, errDetail(kmapi.ErrInternal, "自动许可保存失败")
+			}
+			if !first {
+				return map[string]any{"ok": true, "status": approval.Status, "deduped": true}, nil
+			}
+			d.recordApprovalHistory(approval, "manual-approved", false, "")
+			d.publishConnect()
+			return map[string]any{"ok": true, "status": approval.Status}, nil
+		}
+		// 已终态：走下方的重复决定路径（幂等），不再重复授予。
+	}
 	approval, first, err := d.connectMgr.Queue().Decide(p.ApprovalID, p.Decision)
 	if err != nil {
+		if err.Error() == "审批已过期" {
+			d.sweepExpiredApprovals()
+			return nil, errDetail(kmapi.ErrStateConflict, "审批已过期")
+		}
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
 	if !first {
@@ -147,10 +246,19 @@ func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectAp
 				if abandoned.Method == "payment.pay" {
 					d.rejectPaymentByApproval(abandoned, "abandoned")
 				}
+				d.recordApprovalHistory(abandoned, "user-canceled", false, "abandoned")
+				d.publishConnect()
 				return map[string]any{"ok": true, "status": abandoned.Status}, nil
 			}
 		}
 		return map[string]any{"ok": true, "status": approval.Status, "deduped": true}, nil
+	}
+	if approval.Status == "approved" {
+		d.recordApprovalHistory(approval, "manual-approved", false, "")
+	} else if approval.Status == "rejected" {
+		d.recordApprovalHistory(approval, "user-canceled", false, "user-rejected")
+	} else if approval.Status == "cancelled" {
+		d.recordApprovalHistory(approval, "user-canceled", false, "cancelled")
 	}
 	// 付款拒绝/取消：明确未提交，释放冻结输入，不广播。
 	if approval.Method == "payment.pay" && (approval.Status == "rejected" || approval.Status == "cancelled") {
@@ -160,6 +268,7 @@ func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectAp
 		}
 		d.rejectPaymentByApproval(approval, reason)
 	}
+	d.publishConnect()
 	return map[string]any{"ok": true, "status": approval.Status}, nil
 }
 
@@ -177,6 +286,10 @@ func (d *Daemon) validateConnectAuth(authorizationID, origin string) (connect.Au
 	}
 	a, ok := d.connectMgr.AuthStore().FindByID(authorizationID)
 	if !ok {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
+	}
+	// 缺少必要身份字段的存量记录不能获得执行权，也不猜测归属。
+	if strings.TrimSpace(a.AppID) == "" || strings.TrimSpace(a.IdentityDigest) == "" || strings.TrimSpace(a.AppPublicKey) == "" {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
 	}
 	if a.Origin != origin {
@@ -199,6 +312,85 @@ func (d *Daemon) validateConnectAuth(authorizationID, origin string) (connect.Au
 	if a.Network != info.BsvNetwork || !strings.EqualFold(a.WalletPublicKey, walletPub) {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
 	}
+	// 连接生命周期：已关闭/已暂停的连接即使授权记录仍在也不得执行业务，
+	// 由原应用 resume 重新握手恢复；缺连接记录的存量授权首次视为在线并补建。
+	if d.connectMgr != nil && d.connectMgr.Connections() != nil {
+		found := false
+		for _, c := range d.connectMgr.Connections().List() {
+			if c.AuthID == a.AuthorizationID {
+				found = true
+				break
+			}
+		}
+		if found {
+			if !d.connectMgr.Connections().IsOnline(a.AuthorizationID) {
+				return connect.Auth{}, errDetail(kmapi.ErrNotFound, "连接已暂停或关闭，授权需重新握手")
+			}
+			d.connectMgr.Connections().Touch(a.AuthorizationID)
+		} else {
+			d.connectMgr.Connections().UpsertActive(a)
+		}
+	}
+	return a, nil
+}
+
+// lookupValidAuth 复核授权本身（不含连接在线检查），供 resume 等需处理暂停态的路径使用。
+func (d *Daemon) lookupValidAuth(authorizationID, origin string) (connect.Auth, *kmapi.ErrorDetail) {
+	if d.connectMgr == nil {
+		return connect.Auth{}, errDetail(kmapi.ErrInternal, "Connect 未就绪")
+	}
+	if strings.TrimSpace(authorizationID) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrBadRequest, "authorizationId 必填")
+	}
+	if strings.TrimSpace(origin) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrBadRequest, "origin 缺失")
+	}
+	a, ok := d.connectMgr.AuthStore().FindByID(authorizationID)
+	if !ok {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
+	}
+	if strings.TrimSpace(a.AppID) == "" || strings.TrimSpace(a.IdentityDigest) == "" || strings.TrimSpace(a.AppPublicKey) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
+	}
+	if a.Origin != origin {
+		return connect.Auth{}, errDetail(kmapi.ErrBadRequest, "来源不匹配")
+	}
+	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
+	}
+	if d.store == nil {
+		return connect.Auth{}, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
+	}
+	info, _, err := d.store.Snapshot()
+	if err != nil {
+		return connect.Auth{}, errDetail(kmapi.ErrInternal, err.Error())
+	}
+	d.mu.Lock()
+	walletPub := d.publicKey
+	d.mu.Unlock()
+	if a.Network != info.BsvNetwork || !strings.EqualFold(a.WalletPublicKey, walletPub) {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
+	}
+	return a, nil
+}
+
+// recheckAuthLive 在不可逆提交点前轻量复核授权记录仍然存在、身份完整且
+// 运行代际一致（不重读网络快照；完整复核由执行入口的 validate 完成）。
+// 用于签名/广播前缩小“校验后撤销”窗口；失败按授权失效处理。
+func (d *Daemon) recheckAuthLive(authorizationID string) (connect.Auth, *kmapi.ErrorDetail) {
+	if d.connectMgr == nil {
+		return connect.Auth{}, errDetail(kmapi.ErrInternal, "Connect 未就绪")
+	}
+	a, ok := d.connectMgr.AuthStore().FindByID(authorizationID)
+	if !ok {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
+	}
+	if strings.TrimSpace(a.AppID) == "" || strings.TrimSpace(a.IdentityDigest) == "" || strings.TrimSpace(a.AppPublicKey) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
+	}
+	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
+	}
 	return a, nil
 }
 
@@ -213,8 +405,9 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		}
 	}
 	// 已审批执行的认领：approvalId 指向已批准的审批，执行一次并返回结果。
-	// 重复认领返回已保存的结果，不重复执行。
+	// 重复认领返回已保存的结果，不重复执行。多页同时批准仅执行一次（条件转换保证）。
 	if p.ApprovalID != nil && *p.ApprovalID != "" && p.Method == nil {
+		d.sweepExpiredApprovals()
 		a, ok := d.connectMgr.Queue().Get(*p.ApprovalID)
 		if !ok {
 			return nil, nil, errDetail(kmapi.ErrNotFound, "审批不存在")
@@ -241,11 +434,21 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		}
 		res, binaries, perr := d.execConnectMethod(ctx, claimed)
 		if perr != nil {
-			// 失败也要缓存成明确终态，重复查询不能变成空成功。
+			// 失败也要缓存成明确终态，重复查询不能变成空成功；区分人工与自动、业务失败。
 			d.connectMgr.Queue().StoreError(a.ID, perr.Code, perr.Message)
+			d.recordApprovalHistory(a, "failed", isAuto(ctx), perr.Code)
+			d.publishConnect()
+			// 超时与取消后的附件清理：失败终态丢弃请求附件引用，避免无限占用内存。
+			// （StoreError 保留错误码，ReqBinaries 由后台异步清理；此处不删终态记录。）
 			return nil, nil, perr
 		}
 		d.connectMgr.Queue().StoreResult(a.ID, res, binaries)
+		d.recordApprovalHistory(a, "executed", isAuto(ctx), "")
+		// 登录/恢复执行成功即建立连接：记录 connected 事件。
+		if a.Method == "connect.login" || a.Method == "connect.resume" {
+			d.recordApprovalHistory(a, "connected", false, "")
+		}
+		d.publishConnect()
 		return res, binaries, nil
 	}
 	method := ""
@@ -305,10 +508,12 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 			verified.PublisherPublicKey, verified.AppID, verified.AppName,
 			method, paramsMap, origin, verified.Requirements, verified.IdentityDigestHex,
 		)
+		d.publishConnect()
 		return map[string]any{"approvalId": a.ID, "status": "pending"}, nil, nil
 	}
 
 	// 登出：需有效授权，自动执行（撤销），不经审批队列。
+	// 断开连接与取消持久操作许可分开：此处仅撤销连接授权，不删历史与资金责任。
 	if method == "connect.logout" {
 		var authorizationID string
 		if p.AuthorizationID != nil {
@@ -318,10 +523,22 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		if perr != nil {
 			return nil, nil, perr
 		}
-		_ = a
-		if err := d.connectMgr.AuthStore().RevokeByID(authorizationID); err != nil {
+		var logoutErr error
+		d.connectMgr.SerializedAuthChange(func() {
+			logoutErr = d.connectMgr.AuthStore().RevokeByID(authorizationID)
+			if logoutErr == nil && d.connectMgr.Connections() != nil {
+				d.connectMgr.Connections().Close(authorizationID)
+			}
+		})
+		if logoutErr != nil {
 			return nil, nil, errDetail(kmapi.ErrNotFound, "授权不存在")
 		}
+		appKey := connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID)
+		_, _ = d.connectMgr.History().Append(connect.HistoryEvent{
+			AppKey: appKey, Origin: a.Origin, AppID: a.AppID, AppPublicKey: a.AppPublicKey,
+			Kind: "disconnected", Detail: "logout",
+		})
+		d.publishConnect()
 		return map[string]any{"revokedAt": time.Now().UnixMilli()}, nil, nil
 	}
 
@@ -341,18 +558,63 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	if req != "" && !hasRequirement(auth, req) {
 		return nil, nil, errDetail(kmapi.ErrForbidden, "无 "+req+" 操作许可")
 	}
+	// 统一流程：校验参数生成不可变快照 → 查自动许可 → 无许可建待办，有许可走同一业务路径。
+	// 能力声明（Requirements）仅限制 App 可请求范围，不等同于自动许可。
+	paramsSnap := d.paramsMapOf(p)
+	transportReqID := ""
+	if p.RequestID != nil {
+		transportReqID = *p.RequestID
+	}
+	if connect.IsApprovalMethod(method) {
+		snap, verr := validateBusinessParams(method, paramsSnap)
+		if verr != nil {
+			return nil, nil, verr
+		}
+		hasAuto, aerr := d.hasAutoPermission(origin, auth.AppPublicKey, auth.AppID, method)
+		if aerr != nil {
+			return nil, nil, aerr
+		}
+		if hasAuto {
+			// 自动许可：进入同一业务执行路径，直接执行并记录自动历史。
+			autoCtx := withAuto(WithAppCaller(ctx))
+			res, bins, perr := d.execApprovedBusiness(autoCtx, auth, method, snap, attachments, origin, transportReqID)
+			if perr != nil {
+				d.recordApprovalHistory(connect.Approval{
+					ID: "", AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
+					Method: method, Origin: origin,
+				}, "failed", true, perr.Code)
+				return nil, nil, perr
+			}
+			d.recordApprovalHistory(connect.Approval{
+				ID: "", AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
+				Method: method, Origin: origin,
+			}, "executed", true, "")
+			// 人工与自动使用不同提醒：自动执行经 connect 事件通知前端合并提醒。
+			d.publishConnect()
+			return res, bins, nil
+		}
+		// 无许可：创建待办。付款沿用冻结+持久绑定路径；其余直接建 pending。
+		if method == "payment.pay" {
+			appCtx := WithAppCaller(ctx)
+			res, _, perr := d.opConnectPaymentPayWithAuth(appCtx, auth, snap, origin, transportReqID)
+			if perr != nil {
+				return nil, nil, perr
+			}
+			d.publishConnect()
+			return res, nil, nil
+		}
+		// 其余四类：一次装配完整待办（原授权引用、原传输请求 ID、期限、参数快照与
+		// 二进制附件同一锁内深拷贝），返回前即进入可批准队列，无“先可见后补齐”窗口。
+		appr := d.connectMgr.Queue().CreateFull(auth.AuthorizationID, transportReqID, auth.AppPublicKey, auth.AppID, auth.AppName, method, snap, origin, auth.Requirements, auth.IdentityDigest, attachments)
+		d.publishConnect()
+		return map[string]any{"approvalId": appr.ID, "status": "pending"}, nil, nil
+	}
 	appCtx := WithAppCaller(ctx)
 	switch {
-	case method == "identity.get":
-		return nil, nil, errDetail(kmapi.ErrInternal, "identity.get 尚未实现（需 CBOR 信封 v2）")
 	case strings.HasPrefix(method, "storage."):
-		return d.execConnectStorage(appCtx, auth, method, d.paramsMapOf(p), attachments)
-	case method == "cipher.encrypt" || method == "cipher.decrypt":
-		return d.execConnectCipher(appCtx, auth, method, d.paramsMapOf(p), attachments, origin)
-	case method == "payment.pay":
-		return d.opConnectPaymentPay(appCtx, auth, d.paramsMapOf(p), origin)
+		return d.execConnectStorage(appCtx, auth, method, paramsSnap, attachments)
 	case method == "payment.status":
-		res, perr := d.opConnectPaymentStatus(appCtx, auth, d.paramsMapOf(p), origin)
+		res, perr := d.opConnectPaymentStatus(appCtx, auth, paramsSnap, origin)
 		if perr != nil {
 			return nil, nil, perr
 		}
@@ -366,20 +628,37 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 // 只由 Receiver 的 reconnect 心跳/刷新路径调用；授权、来源、网络、钱包、代际
 // 任一不匹配都拒绝，不静默降级为新的审批或新的授权。
 func (d *Daemon) resumeConnect(authorizationID, origin string, proofRaw json.RawMessage) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	auth, perr := d.validateConnectAuth(authorizationID, origin)
-	if perr != nil {
-		return nil, nil, perr
-	}
-	if len(proofRaw) > 0 {
-		verified, err := connect.VerifyProof(proofRaw)
-		if err != nil {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
+	// resume 允许暂停态连接；查找、proof 核验与恢复在线在授权生命周期锁内
+	// 按统一顺序完成，proof 不匹配/无效时保持原暂停状态，不提前复活连接。
+	var auth connect.Auth
+	var resumeErr *kmapi.ErrorDetail
+	d.connectMgr.SerializedAuthChange(func() {
+		a, perr := d.lookupValidAuth(authorizationID, origin)
+		if perr != nil {
+			resumeErr = perr
+			return
 		}
-		if !strings.EqualFold(verified.PublisherPublicKey, auth.AppPublicKey) ||
-			verified.AppID != auth.AppID ||
-			!strings.EqualFold(verified.IdentityDigestHex, auth.IdentityDigest) {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
+		if len(proofRaw) > 0 {
+			verified, err := connect.VerifyProof(proofRaw)
+			if err != nil {
+				resumeErr = errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
+				return
+			}
+			if !strings.EqualFold(verified.PublisherPublicKey, a.AppPublicKey) ||
+				verified.AppID != a.AppID ||
+				!strings.EqualFold(verified.IdentityDigestHex, a.IdentityDigest) {
+				resumeErr = errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
+				return
+			}
 		}
+		auth = a
+		if d.connectMgr.Connections() != nil {
+			d.connectMgr.Connections().Resume(authorizationID)
+			d.connectMgr.Connections().Touch(authorizationID)
+		}
+	})
+	if resumeErr != nil {
+		return nil, nil, resumeErr
 	}
 	info, _, err := d.store.Snapshot()
 	if err != nil {
@@ -548,21 +827,35 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if idErr != nil {
 		return nil, nil, errDetail(kmapi.ErrInternal, "生成授权失败")
 	}
-	// 同一 App 同一来源重新启动时替换旧授权，避免僵尸授权堆积。
-	for _, old := range d.connectMgr.AuthStore().FindByApp(verified.PublisherPublicKey) {
-		if old.Origin == origin {
-			_ = d.connectMgr.AuthStore().RevokeByID(old.AuthorizationID)
-		}
-	}
-	if err := d.connectMgr.AuthStore().Save(connect.Auth{
+	// 同一应用同一来源重新启动时替换旧授权，避免僵尸授权堆积；按精确身份撤销。
+	// 替换与授予按统一顺序串行，避免旧授权的待办在替换间隙产生新许可。
+	savedAuth := connect.Auth{
 		AuthorizationID: authorizationID,
 		AppPublicKey:    verified.PublisherPublicKey, AppID: verified.AppID, AppName: verified.AppName,
 		IdentityDigest: verified.IdentityDigestHex, Requirements: append([]string(nil), verified.Requirements...),
 		Origin: origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
 		Generation: d.connectMgr.Generation(),
-	}); err != nil {
+	}
+	var launchSaveErr error
+	d.connectMgr.SerializedAuthChange(func() {
+		_ = d.connectMgr.AuthStore().RevokeExact(origin, verified.PublisherPublicKey, verified.AppID)
+		if d.connectMgr.Connections() != nil {
+			d.connectMgr.Connections().CloseByApp(origin, verified.PublisherPublicKey, verified.AppID)
+		}
+		launchSaveErr = d.connectMgr.AuthStore().Save(savedAuth)
+		if launchSaveErr == nil && d.connectMgr.Connections() != nil {
+			d.connectMgr.Connections().UpsertActive(savedAuth)
+		}
+	})
+	if launchSaveErr != nil {
 		return nil, nil, errDetail(kmapi.ErrInternal, "保存授权失败")
 	}
+	appKey := connect.ApplicationKey(origin, verified.PublisherPublicKey, verified.AppID)
+	_, _ = d.connectMgr.History().Append(connect.HistoryEvent{
+		AppKey: appKey, Origin: origin, AppID: verified.AppID, AppPublicKey: verified.PublisherPublicKey,
+		Kind: "connected", Detail: "launch",
+	})
+	d.publishConnect()
 	return map[string]any{
 		"authorizationId": authorizationID,
 		"networkIdentity": map[string]any{
@@ -587,10 +880,17 @@ func (d *Daemon) paramsMapOf(p kmapi.ConnectExecRequest) map[string]any {
 }
 
 // execConnectMethod 执行已批准审批保存的原请求。只被 approvalId 认领路径调用一次。
+// 执行前再次复核原授权和生命周期；保存实际执行结果，区分人工/自动与业务失败。
 func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any, map[string][]byte, *kmapi.ErrorDetail) {
 	switch {
 	case a.Method == "payment.pay":
 		return d.execPaymentApproved(ctx, a)
+	case a.Method == "identity.get":
+		return d.execIdentityGet(ctx, a)
+	case a.Method == "intent.sign":
+		return d.execIntentSign(ctx, a)
+	case a.Method == "cipher.encrypt" || a.Method == "cipher.decrypt":
+		return d.execCipherApproved(ctx, a)
 	case a.Method == "connect.login" || a.Method == "connect.resume":
 		if d.store == nil {
 			return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
@@ -610,19 +910,27 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 		d.mu.Lock()
 		walletPub := d.publicKey
 		d.mu.Unlock()
-		// 同一 App 同一来源重新登录时替换旧授权，避免僵尸授权堆积。
-		for _, old := range d.connectMgr.AuthStore().FindByApp(a.AppPublicKey) {
-			if old.Origin == a.Origin {
-				_ = d.connectMgr.AuthStore().RevokeByID(old.AuthorizationID)
-			}
-		}
-		if err := d.connectMgr.AuthStore().Save(connect.Auth{
+		// 同一应用同一来源重新登录时替换旧授权，避免僵尸授权堆积；
+		// 按精确身份撤销，不影响同发行人其他 App；替换与授予按统一顺序串行。
+		savedLoginAuth := connect.Auth{
 			AuthorizationID: authorizationID,
 			AppPublicKey:    a.AppPublicKey, AppID: a.AppID, AppName: a.AppName,
 			IdentityDigest: a.IdentityDigest, Requirements: append([]string(nil), a.Requirements...),
 			Origin: a.Origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
 			Generation: d.connectMgr.Generation(),
-		}); err != nil {
+		}
+		var loginSaveErr error
+		d.connectMgr.SerializedAuthChange(func() {
+			_ = d.connectMgr.AuthStore().RevokeExact(a.Origin, a.AppPublicKey, a.AppID)
+			if d.connectMgr.Connections() != nil {
+				d.connectMgr.Connections().CloseByApp(a.Origin, a.AppPublicKey, a.AppID)
+			}
+			loginSaveErr = d.connectMgr.AuthStore().Save(savedLoginAuth)
+			if loginSaveErr == nil && d.connectMgr.Connections() != nil {
+				d.connectMgr.Connections().UpsertActive(savedLoginAuth)
+			}
+		})
+		if loginSaveErr != nil {
 			return nil, nil, errDetail(kmapi.ErrInternal, "保存授权失败")
 		}
 		return map[string]any{

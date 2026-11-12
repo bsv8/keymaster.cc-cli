@@ -672,6 +672,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		defer d.watchWg.Done()
 		d.watchReload(lifecycle)
 	}()
+	d.watchWg.Add(1)
+	go func() {
+		defer d.watchWg.Done()
+		d.watchApprovalExpiry(lifecycle)
+	}()
 	return nil
 }
 
