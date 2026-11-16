@@ -64,8 +64,8 @@ type PaymentStore struct {
 	byKey map[string]PaymentRecord
 }
 
-func NewPaymentStore(walletDir string) *PaymentStore {
-	return &PaymentStore{path: filepath.Join(walletDir, "connect", "payments.json"), byKey: map[string]PaymentRecord{}}
+func NewPaymentStore(pluginDir string) *PaymentStore {
+	return &PaymentStore{path: filepath.Join(pluginDir, "payments.json"), byKey: map[string]PaymentRecord{}}
 }
 
 func (s *PaymentStore) Load() error {

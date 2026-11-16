@@ -109,7 +109,7 @@ func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // tasksFile is the persisted task registry: identity, target root binding and
 // lifecycle survive daemon restarts so queries and resume entries keep working.
 func (m *taskManager) tasksFile() string {
-	return filepath.Join(m.layout.ClientDir, "tasks.json")
+	return filepath.Join(m.layout.DownloadDir, "tasks.json")
 }
 
 func (m *taskManager) list() []Task {

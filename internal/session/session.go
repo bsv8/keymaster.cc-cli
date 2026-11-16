@@ -146,7 +146,7 @@ func settingsAddr(dataDir string) (string, error) {
 		}
 		dir = filepath.Join(home, ".km")
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	raw, err := os.ReadFile(filepath.Join(dir, "background", "settings.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil

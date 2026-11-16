@@ -80,7 +80,7 @@ type DirectoryStore struct {
 }
 
 func NewDirectoryStore(dir string) *DirectoryStore {
-	return &DirectoryStore{path: filepath.Join(dir, "connect", "directory.json"), state: directoryFile{Version: 2, Market: MarketCache{Entries: []DirectoryEntry{}}, Local: map[string]DirectoryEntry{}, Favorites: map[string]bool{}, Pending: map[string]DirectoryPending{}, Selection: map[string]DirectorySelection{}}}
+	return &DirectoryStore{path: filepath.Join(dir, "directory.json"), state: directoryFile{Version: 2, Market: MarketCache{Entries: []DirectoryEntry{}}, Local: map[string]DirectoryEntry{}, Favorites: map[string]bool{}, Pending: map[string]DirectoryPending{}, Selection: map[string]DirectorySelection{}}}
 }
 
 // CanonicalEntryURL 保留完整路径、查询和片段，来源仅作传输边界。

@@ -79,7 +79,7 @@ func apiPlugin(id string, methods map[string]apiHandler) webloom.Plugin {
 func (d *Daemon) finishOpen() (*Daemon, error) {
 	runtime, err := webloom.Start(context.Background(), []webloom.Plugin{
 		d.vaultAPIPlugin(), d.sellAPIPlugin(), d.collectorAPIPlugin(), d.downloadAPIPlugin(),
-		d.storageAPIPlugin(), d.appsAPIPlugin(), d.protocolAPIPlugin(), d.backgroundAPIPlugin(),
+		d.appsAPIPlugin(), d.protocolAPIPlugin(), d.backgroundAPIPlugin(),
 	})
 	if err != nil {
 		_ = d.Close()

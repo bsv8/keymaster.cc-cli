@@ -57,9 +57,8 @@ const (
 
 // Options configures one daemonrun execution.
 type Options struct {
-	DataDir    string
-	StorageDir string
-	Tray       TrayMode
+	DataDir string
+	Tray    TrayMode
 	// Logf receives lifecycle diagnostics (stderr in practice).
 	Logf func(format string, args ...any)
 	// ExitCodeOnSignal is returned after an orderly shutdown triggered by
@@ -144,7 +143,7 @@ func (c *Controller) runOne(ctx context.Context, sighup <-chan os.Signal) (int, 
 		}
 		return exitError, false
 	}
-	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir, StorageDir: c.opts.StorageDir})
+	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir})
 	if err != nil {
 		if errors.Is(err, dlock.ErrActive) {
 			c.opts.Logf("km: 数据目录已有后台在运行")

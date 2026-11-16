@@ -34,15 +34,15 @@ type Options struct {
 	// Address_ is the wallet receiving address shown in the status view.
 	WalletAddress string
 	// Catalog 统一查询磁盘目录和持久内容映射，不持有扫描快照。
-	// 纯买方模式（ClientDir 已配置、Catalog 为空）下目录与定价接口不可用，
+	// 纯买方模式（DownloadDir 已配置、Catalog 为空）下目录与定价接口不可用，
 	// 下载管理接口仍可用。
 	Catalog *catalog.Catalog
 	Pricing *pricing.Pricing
-	// ClientDir is the client data directory (~/.km/client) that owns one
+	// DownloadDir is the client data directory (~/.km/client) that owns one
 	// subdirectory per seed. When set, the admin serves download execution
 	// management (/api/downloads/*) alongside the seller surface. A pure
 	// buyer without a server directory sets only this field.
-	ClientDir string
+	DownloadDir string
 	// StartDownload drives one seed's pinned execution to completion in the
 	// background (headless: no TUI, auto filename, plain stderr log) and
 	// reports its process exit code. It is invoked by the redownload and
@@ -103,11 +103,11 @@ func Start(ctx context.Context, options Options) (*Server, error) {
 		return nil, fmt.Errorf("admin: listen address must be loopback, got %q", host)
 	}
 	if options.Catalog == nil || options.Pricing == nil {
-		if options.ClientDir == "" {
+		if options.DownloadDir == "" {
 			return nil, errors.New("admin: index and pricing are required")
 		}
 		// Pure-buyer mode: no seller catalog, only download management.
-	} else if options.ClientDir == "" {
+	} else if options.DownloadDir == "" {
 		// Seller-only mode keeps the previous behaviour; downloads endpoints
 		// simply report that no client directory is configured.
 	}
@@ -248,7 +248,7 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 	}
 	if s.options.Catalog == nil {
 		status["catalog"] = "unavailable"
-		status["clientDir"] = s.options.ClientDir != ""
+		status["clientDir"] = s.options.DownloadDir != ""
 		if s.options.Status != nil {
 			for key, value := range s.options.Status() {
 				status[key] = value

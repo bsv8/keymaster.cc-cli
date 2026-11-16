@@ -140,7 +140,7 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 	// below is owned by download.Run for the whole run; taking it here too
 	// would self-conflict inside this process.
 
-	clientRoot := filepath.Join(d.layout.ClientDir, seed)
+	clientRoot := filepath.Join(d.layout.DownloadDir, seed)
 	wocClient := woc.New(wocBaseURL(info.BsvNetwork), settings.WOCAPIKey)
 	initialHeight, err := wocClient.ChainHeight(ctx)
 	if err != nil {
@@ -182,7 +182,7 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 		Wallet: w, Ledger: l, Store: workStore, Signer: signerInstance,
 		Facts: facts, MinerFeeRate: protocol.SatoshisPerKilobyte(taskFeeRate),
 		WalletFeeRateSatoshisPerKb: taskFeeRate,
-		Chain:                      wocClient, UnresolvedDir: filepath.Join(d.layout.ClientDir, "unresolved"),
+		Chain:                      wocClient, UnresolvedDir: filepath.Join(d.layout.DownloadDir, "unresolved"),
 	}
 	// Fast path: already finalized.
 	if assembler, err := output.New(workStore, rootPath); err == nil {

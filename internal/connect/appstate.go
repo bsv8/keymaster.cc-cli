@@ -78,8 +78,8 @@ type appStateFile struct {
 	Events      []HistoryEvent    `json:"events"`
 }
 
-func NewAppState(walletDir string) *AppState {
-	return &AppState{path: filepath.Join(walletDir, "connect", "apps.json"), perms: map[string]*PermissionEntry{}}
+func NewAppState(pluginDir string) *AppState {
+	return &AppState{path: filepath.Join(pluginDir, "apps.json"), perms: map[string]*PermissionEntry{}}
 }
 
 func (s *AppState) Load() error {

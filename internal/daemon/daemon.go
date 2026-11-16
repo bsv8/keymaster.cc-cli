@@ -30,7 +30,6 @@ import (
 	"github.com/bsv8/WebLoom/go/webloom"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/appdeployment"
-	"github.com/bsv8/keymaster.cc-cli/internal/appstorage"
 	"github.com/bsv8/keymaster.cc-cli/internal/connect"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
@@ -54,8 +53,6 @@ type Options struct {
 	DataDir string
 	// PortOverride forces the listen port (0 = from settings).
 	PortOverride int
-	// StorageDir 独立指定 App Storage 根；为空时默认钱包根同级 <目录名>-storage。
-	StorageDir string
 	// 独立后台统一提供完整 Web；CLI 内嵌后台不监听端口。
 }
 
@@ -103,10 +100,6 @@ type Daemon struct {
 
 	wsMu    sync.Mutex
 	wsConns map[*wsConn]struct{}
-
-	storageLayout appstorage.Layout
-	storage       *appstorage.Store
-	storageGuard  *dlock.Guard
 
 	deployments *appdeployment.Manager
 	connectMgr  *connect.Manager
@@ -198,48 +191,15 @@ func Open(opts Options) (*Daemon, error) {
 		return nil, err
 	}
 	d := &Daemon{layout: layout, state: StateUninitialized, lockGuard: guard, events: events.New()}
-	// 独立 Storage 根：与钱包根完全分开，独立加锁，禁止重叠。
-	storageLayout, err := appstorage.Resolve(layout.Dir, opts.StorageDir)
-	if err != nil {
-		_ = guard.Release()
-		return nil, err
-	}
-	if err := appstorage.CheckOverlap(layout.Dir, storageLayout.Dir); err != nil {
-		_ = guard.Release()
-		return nil, err
-	}
-	storageGuard, err := dlock.Acquire(storageLayout.Dir)
-	if err != nil {
-		_ = guard.Release()
-		if errors.Is(err, dlock.ErrActive) {
-			return nil, fmt.Errorf("Storage 目录已有后台在运行，不启动第二个钱包实例")
-		}
-		return nil, err
-	}
-	storageStore, err := appstorage.Open(storageLayout)
-	if err != nil {
-		_ = storageGuard.Release()
-		_ = guard.Release()
-		return nil, fmt.Errorf("daemon: 打开 App Storage 失败: %w", err)
-	}
-	d.storageLayout = storageLayout
-	d.storageGuard = storageGuard
-	d.storage = storageStore
-	d.connectMgr = connect.NewManager(layout.Dir)
+	d.connectMgr = connect.NewManager(filepath.Join(layout.Dir, "protocol"), filepath.Join(layout.Dir, "apps"))
 	d.deployments = appdeployment.New(filepath.Join(layout.Dir, "apps", "deployments"), d.downloadDeploymentFile, d.invalidateDeployment)
 	d.connectMgr.SetGeneration(d.events.InstanceID())
 	if err := d.connectMgr.Load(); err != nil {
-		_ = storageStore.Close()
-		_ = storageGuard.Release()
 		_ = guard.Release()
 		return nil, fmt.Errorf("daemon: 加载 App 授权失败: %w", err)
 	}
 	store := appconfig.New(layout.Dir)
 	releaseAll := func() {
-		if storageStore != nil {
-			_ = storageStore.Close()
-		}
-		_ = storageGuard.Release()
 		_ = guard.Release()
 	}
 	if layout.HasInitMarkers() {
@@ -283,16 +243,10 @@ func Open(opts Options) (*Daemon, error) {
 		}
 		return d.finishOpen()
 	}
-	// No new markers: legacy or fresh.
+	// Only the plugin-owned layout is live. Partial new-layout files are damage.
 	if layout.HasAnyWallet() {
-		// Legacy files or damage exist; never treat as fresh. Daemon cannot
-		// migrate without a password, so report uninitialized with a hint.
-		// The caller renders "请先运行 km init".
-		d.store = nil
-		d.state = StateUninitialized
-		d.tasks = nil
-		d.roots = nil
-		return d.finishOpen()
+		_ = guard.Release()
+		return nil, fmt.Errorf("daemon: 插件目录中的钱包数据不完整，请从备份恢复")
 	}
 	d.store = nil
 	d.state = StateUninitialized
@@ -459,41 +413,13 @@ func (d *Daemon) close() error {
 	if d.roots != nil {
 		d.roots.closeAll()
 	}
-	// Storage 独立收尾预算 5s：先拒绝新操作，再等待在途排空，最后关闭数据库。
-	// 超时则视为异常收尾：不释放独占锁（避免新实例与仍在使用的数据库重叠），
-	// 调用者（daemonrun）据此报告异常退出；进程退出时由 OS 回收锁。
-	storageErr := error(nil)
-	if d.storage != nil {
-		d.storage.BeginClose()
-		done := make(chan struct{})
-		go func() {
-			d.storage.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			storageErr = fmt.Errorf("daemon: App Storage 在途操作未在预算内排空")
-		}
-		if storageErr == nil {
-			if err := d.storage.Close(); err != nil {
-				storageErr = fmt.Errorf("daemon: 关闭 App Storage 失败: %w", err)
-			} else {
-				d.storage = nil
-			}
-		}
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	clearKey(d.privateKey)
 	d.privateKey = nil
 	// Break the seller cancel reference so a later Unlock cannot reuse it.
 	d.sellerCancel = nil
-	if storageErr == nil && drainErr == nil {
-		if d.storageGuard != nil {
-			_ = d.storageGuard.Release()
-			d.storageGuard = nil
-		}
+	if drainErr == nil {
 		if d.lockGuard != nil {
 			_ = d.lockGuard.Release()
 			d.lockGuard = nil
@@ -501,7 +427,7 @@ func (d *Daemon) close() error {
 		return nil
 	}
 	// 异常收尾：保留文件锁（由进程退出释放），但已清理内存密钥。
-	return errors.Join(storageErr, drainErr)
+	return drainErr
 }
 
 // Unlock decrypts the pure KeyHold with password and moves to unlocked.

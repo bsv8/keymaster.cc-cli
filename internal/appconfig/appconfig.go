@@ -57,13 +57,13 @@ type Root struct {
 // Info is the info.json document. Roots and the default download root are
 // mutable; network identity fields are not.
 type Info struct {
-	Version                 int    `json:"version"`
-	Revision                int64  `json:"revision"`
-	BsvNetwork              string `json:"bsvNetwork"`
-	PublicKeyHex            string `json:"publicKeyHex"`
+	Version                  int    `json:"version"`
+	Revision                 int64  `json:"revision"`
+	BsvNetwork               string `json:"bsvNetwork"`
+	PublicKeyHex             string `json:"publicKeyHex"`
 	NetworkAuthenticationHex string `json:"networkAuthenticationHex"`
-	Roots                   []Root `json:"roots"`
-	DefaultDownloadRootID   string `json:"defaultDownloadRootID,omitempty"`
+	Roots                    []Root `json:"roots"`
+	DefaultDownloadRootID    string `json:"defaultDownloadRootID,omitempty"`
 }
 
 // Scheduler holds buyer scheduling settings.
@@ -120,9 +120,9 @@ type Collector struct {
 // ServerDefaults holds seller defaults. Per-file prices live in the pricing
 // table, never as directory inheritance.
 type ServerDefaults struct {
-	DefaultSeedPriceSatoshis      string   `json:"defaultSeedPriceSatoshis"`
-	DefaultFullBlockPriceSatoshis string   `json:"defaultFullBlockPriceSatoshis"`
-	ArbiterPublicKeys             []string `json:"arbiterPublicKeys,omitempty"`
+	DefaultSeedPriceSatoshis      string    `json:"defaultSeedPriceSatoshis"`
+	DefaultFullBlockPriceSatoshis string    `json:"defaultFullBlockPriceSatoshis"`
+	ArbiterPublicKeys             []string  `json:"arbiterPublicKeys,omitempty"`
 	Collector                     Collector `json:"collector"`
 }
 
@@ -191,8 +191,8 @@ type Store struct {
 func New(dir string) *Store {
 	return &Store{
 		dir:          dir,
-		infoPath:     filepath.Join(dir, "info.json"),
-		settingsPath: filepath.Join(dir, "settings.json"),
+		infoPath:     filepath.Join(dir, "vault", "info.json"),
+		settingsPath: filepath.Join(dir, "background", "settings.json"),
 	}
 }
 
@@ -489,7 +489,7 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 	// Recoverable two-file commit: write info first with a pending marker,
 	// then settings, then clear the marker. A crash leaves the marker so the
 	// next startup reports damage instead of a half-complete wallet.
-	marker := filepath.Join(s.dir, ".init-pending")
+	marker := filepath.Join(s.dir, "vault", ".init-pending")
 	if err := writeFileAtomic(marker, []byte("init\n")); err != nil {
 		return err
 	}
@@ -513,7 +513,7 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := os.Stat(filepath.Join(s.dir, ".init-pending")); err == nil {
+	if _, err := os.Stat(filepath.Join(s.dir, "vault", ".init-pending")); err == nil {
 		return errors.New("初始化未完成（存在 .init-pending），请重新执行 init 或从备份恢复")
 	}
 	infoRaw, err := os.ReadFile(s.infoPath)

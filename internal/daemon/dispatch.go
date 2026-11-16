@@ -251,7 +251,7 @@ func (d *Daemon) opRootsAdd(ctx context.Context, p kmapi.AddRootRequest) (any, *
 	if err != nil {
 		return nil, errDetail(kmapi.ErrInternal, err.Error())
 	}
-	cleaned, err := appconfig.ValidateNewRootProtected(d.layout.Dir, []string{d.storageLayout.Dir}, p.Path, info.Roots)
+	cleaned, err := appconfig.ValidateNewRootProtected(d.layout.Dir, nil, p.Path, info.Roots)
 	if err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}

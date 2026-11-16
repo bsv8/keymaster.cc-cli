@@ -83,16 +83,6 @@
     ]
   },
   {
-    "pluginId": "storage",
-    "unitId": "storage.daemon",
-    "methods": [
-      "storage.put",
-      "storage.get",
-      "storage.list",
-      "storage.delete"
-    ]
-  },
-  {
     "pluginId": "vault",
     "unitId": "vault.daemon",
     "methods": [

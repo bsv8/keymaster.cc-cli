@@ -5,14 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
-	"github.com/bsv8/keymaster.cc-cli/internal/appstorage"
 	"github.com/bsv8/keymaster.cc-cli/internal/connect"
 )
 
@@ -30,8 +27,6 @@ func isEstablishingConnectMethod(method string) bool {
 // 在本后台未实现（明确拒绝，不静默）。能力声明已删除，不做 requirements 门禁。
 func connectRequirement(method string) (requirement string, ok bool) {
 	switch {
-	case strings.HasPrefix(method, "storage."):
-		return "", true
 	case method == "cipher.encrypt" || method == "cipher.decrypt":
 		return "", true
 	case method == "identity.get" || method == "intent.sign":
@@ -603,8 +598,6 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	}
 	appCtx := WithAppCaller(ctx)
 	switch {
-	case strings.HasPrefix(method, "storage."):
-		return d.execConnectStorage(appCtx, auth, method, paramsSnap, attachments)
 	case method == "payment.status":
 		res, perr := d.opConnectPaymentStatus(appCtx, auth, paramsSnap, origin)
 		if perr != nil {
@@ -938,24 +931,6 @@ func newAuthorizationID() (string, error) {
 	return "auth_" + hex.EncodeToString(b), nil
 }
 
-// storageErrDetail 将存储层错误映射为协议错误，条件写冲突不伪装成内部错误。
-func storageErrDetail(err error) *kmapi.ErrorDetail {
-	switch {
-	case errors.Is(err, appstorage.ErrConflict):
-		return errDetail(kmapi.ErrConflict, "条件写冲突")
-	case errors.Is(err, appstorage.ErrTooLarge):
-		return errDetail(kmapi.ErrTooLarge, "对象过大")
-	case errors.Is(err, appstorage.ErrInvalidPath):
-		return errDetail(kmapi.ErrBadRequest, "路径非法")
-	case errors.Is(err, appstorage.ErrInvalidCursor):
-		return errDetail(kmapi.ErrBadRequest, "游标非法")
-	case errors.Is(err, appstorage.ErrNotEmpty):
-		return errDetail(kmapi.ErrConflict, "目录非空")
-	default:
-		return errDetail(kmapi.ErrInternal, err.Error())
-	}
-}
-
 func toInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case float64:
@@ -970,340 +945,6 @@ func toInt64(v any) (int64, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func isoMillis(ms int64) string {
-	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
-}
-
-func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, method string, params map[string]any, attachments map[string][]byte) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	if d.store == nil {
-		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
-	}
-	if d.isStopping() {
-		return nil, nil, errDetail(kmapi.ErrStopping, "后台停止中")
-	}
-	d.mu.Lock()
-	locked := d.state != StateUnlocked
-	wallet := d.publicKey
-	d.mu.Unlock()
-	if locked {
-		return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
-	}
-	info, _, err := d.store.Snapshot()
-	if err != nil {
-		return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
-	}
-	network := info.BsvNetwork
-	path := ""
-	if method != "storage.list" {
-		rawPath, _ := params["path"].(string)
-		var perr error
-		path, perr = normalizeStoragePath(rawPath)
-		if perr != nil {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-		}
-	}
-	switch method {
-	case "storage.put", "storage.encrypted.put":
-		if path == ".dir" || strings.HasSuffix(path, appstorage.DirectoryMarkerSuffix) {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-		}
-		content, ok := attachments["content"]
-		if !ok {
-			for _, v := range attachments {
-				content = v
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "附件缺失")
-		}
-		// 明文上限与 Connect SDK 一致；加密信封的十六进制体积由存储层上限
-		// 单独覆盖，不能把信封大小误当成明文大小。
-		if int64(len(content)) > kmapi.DefaultLimits().StoragePlainMaxBytes {
-			return nil, nil, errDetail(kmapi.ErrTooLarge, "对象过大")
-		}
-		mime, _ := params["mime"].(string)
-		if mime == "" {
-			if mt, ok := params["contentType"].(string); ok {
-				mime = mt
-			}
-		}
-		// overwrite=false 走存储层唯一约束的条件创建，不先读后写。
-		ifNone := ""
-		if ow, present := params["overwrite"]; present && ow == false {
-			ifNone = "*"
-		}
-		if method == "storage.encrypted.put" {
-			d.mu.Lock()
-			priv := append([]byte(nil), d.privateKey...)
-			pub := d.publicKey
-			d.mu.Unlock()
-			if len(priv) == 0 {
-				return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
-			}
-			scope, serr := connect.ScopeFor(network, wallet, auth.AppPublicKeyHex, path)
-			if serr != nil {
-				for i := range priv {
-					priv[i] = 0
-				}
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-			}
-			env, encMIME, serr := connect.Seal(priv, pub, scope, content, mime)
-			for i := range priv {
-				priv[i] = 0
-			}
-			if serr != nil {
-				return nil, nil, errDetail(kmapi.ErrInternal, serr.Error())
-			}
-			rev, updatedAt, serr := d.storage.Put(network, wallet, auth.AppPublicKeyHex, path, env, encMIME, ifNone, 0)
-			if serr != nil {
-				return nil, nil, storageErrDetail(serr)
-			}
-			return map[string]any{
-				"path": path, "size": len(content),
-				"revision": strconv.FormatInt(rev, 10), "updatedAt": updatedAt,
-			}, nil, nil
-		}
-		rev, updatedAt, err := d.storage.Put(network, wallet, auth.AppPublicKeyHex, path, content, mime, ifNone, 0)
-		if err != nil {
-			return nil, nil, storageErrDetail(err)
-		}
-		return map[string]any{
-			"path": path, "size": len(content),
-			"revision": strconv.FormatInt(rev, 10), "updatedAt": updatedAt,
-		}, nil, nil
-	case "storage.get", "storage.encrypted.get":
-		var offset int64
-		if raw, present := params["offset"]; present && raw != nil {
-			n, ok := toInt64(raw)
-			if !ok || n < 0 {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "offset 非法")
-			}
-			offset = n
-		}
-		length := int64(-1)
-		if raw, present := params["length"]; present && raw != nil {
-			n, ok := toInt64(raw)
-			if !ok || n < 0 {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "length 非法")
-			}
-			length = n
-		}
-		if method == "storage.encrypted.get" {
-			// 范围作用于解密后的明文；必须读取同一版本的完整信封，不能先截断密文。
-			full, err := d.storage.Get(network, wallet, auth.AppPublicKeyHex, path, 0, -1)
-			if err != nil {
-				switch {
-				case err == appstorage.ErrNotFound:
-					return nil, nil, errDetail(kmapi.ErrNotFound, "对象不存在")
-				case strings.Contains(err.Error(), "路径非法"):
-					return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-				default:
-					return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
-				}
-			}
-			if raw, present := params["ifMatch"]; present && raw != nil {
-				if want, _ := raw.(string); want != "" && want != strconv.FormatInt(full.Revision, 10) {
-					return nil, nil, errDetail(kmapi.ErrConflict, "版本已变化")
-				}
-			}
-			d.mu.Lock()
-			priv := append([]byte(nil), d.privateKey...)
-			pub := d.publicKey
-			d.mu.Unlock()
-			if len(priv) == 0 {
-				return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
-			}
-			scope, serr := connect.ScopeFor(network, wallet, auth.AppPublicKeyHex, path)
-			if serr != nil {
-				for i := range priv {
-					priv[i] = 0
-				}
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-			}
-			plain, ctype, serr := connect.Open(priv, pub, scope, full.Content)
-			for i := range priv {
-				priv[i] = 0
-			}
-			if serr != nil {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "加密对象无法打开")
-			}
-			total := int64(len(plain))
-			if offset > total {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "范围越界")
-			}
-			end := total
-			if length >= 0 && length < total-offset {
-				end = offset + length
-			}
-			chunk := plain[offset:end]
-			return map[string]any{
-				"path": path, "contentType": ctype, "offset": offset,
-				"totalSize": total, "eof": end >= total,
-				"revision":     strconv.FormatInt(full.Revision, 10),
-				"lastModified": isoMillis(full.Updated),
-			}, map[string][]byte{"content": chunk}, nil
-		}
-		obj, err := d.storage.Get(network, wallet, auth.AppPublicKeyHex, path, offset, length)
-		if err != nil {
-			switch {
-			case err == appstorage.ErrNotFound:
-				return nil, nil, errDetail(kmapi.ErrNotFound, "对象不存在")
-			case strings.Contains(err.Error(), "范围越界"):
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "范围越界")
-			case strings.Contains(err.Error(), "路径非法"):
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-			default:
-				return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
-			}
-		}
-		// ifMatch：期望版本标签不一致则冲突，不返回内容。
-		if raw, present := params["ifMatch"]; present && raw != nil {
-			if want, _ := raw.(string); want != "" && want != strconv.FormatInt(obj.Revision, 10) {
-				return nil, nil, errDetail(kmapi.ErrConflict, "版本已变化")
-			}
-		}
-		eof := offset+int64(len(obj.Content)) >= obj.Total
-		return map[string]any{
-			"path": path, "contentType": obj.MIME, "offset": offset,
-			"totalSize": obj.Total, "eof": eof,
-			"revision":     strconv.FormatInt(obj.Revision, 10),
-			"lastModified": isoMillis(obj.Updated),
-		}, map[string][]byte{"content": obj.Content}, nil
-	case "storage.list":
-		rawPrefix, _ := params["prefix"].(string)
-		prefix, perr := normalizeStoragePrefix(rawPrefix)
-		if perr != nil {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "路径非法")
-		}
-		storagePrefix := ""
-		if prefix != "" {
-			storagePrefix = prefix + "/"
-		}
-		cursor := ""
-		if raw, present := params["cursor"]; present && raw != nil {
-			cursor, _ = raw.(string)
-		}
-		limit := 0
-		if raw, present := params["limit"]; present && raw != nil {
-			n, ok := toInt64(raw)
-			if !ok || n < 0 {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "limit 非法")
-			}
-			limit = int(n)
-		}
-		entries, next, err := d.storage.List(network, wallet, auth.AppPublicKeyHex, storagePrefix, cursor, limit)
-		if err != nil {
-			return nil, nil, storageErrDetail(err)
-		}
-		dirs, files := splitConnectList(storagePrefix, entries)
-		res := map[string]any{
-			"prefix": storagePrefix, "parentPrefix": parentPrefixOf(storagePrefix),
-			"directories": dirs, "files": files,
-		}
-		if next != "" {
-			res["nextCursor"] = next
-		}
-		return res, nil, nil
-	case "storage.directory.create":
-		overwrite, _ := params["overwrite"].(bool)
-		if _, _, err := d.storage.CreateDirectory(network, wallet, auth.AppPublicKeyHex, path, overwrite); err != nil {
-			return nil, nil, storageErrDetail(err)
-		}
-		return map[string]any{"path": path, "created": true}, nil, nil
-	case "storage.directory.delete":
-		if err := d.storage.DeleteDirectory(network, wallet, auth.AppPublicKeyHex, path); err != nil {
-			return nil, nil, storageErrDetail(err)
-		}
-		return map[string]any{"path": path, "deleted": true}, nil, nil
-	case "storage.delete":
-		if err := d.storage.Delete(network, wallet, auth.AppPublicKeyHex, path); err != nil {
-			if err == appstorage.ErrNotFound {
-				return nil, nil, errDetail(kmapi.ErrNotFound, "对象不存在")
-			}
-			return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
-		}
-		return map[string]any{"path": path, "deleted": true, "updatedAt": time.Now().UnixMilli()}, nil, nil
-	default:
-		return nil, nil, errDetail(kmapi.ErrInternal, "未实现")
-	}
-}
-
-// normalizeStoragePath 规范化 App 相对路径：允许一个前导/末尾斜杠，拒绝空段、
-// . / ..、反斜杠和 NUL；返回不带前导/末尾斜杠的规范形式。
-func normalizeStoragePath(raw string) (string, error) {
-	p := strings.TrimSpace(raw)
-	p = strings.TrimPrefix(p, "/")
-	p = strings.TrimSuffix(p, "/")
-	if p == "" {
-		return "", fmt.Errorf("路径为空")
-	}
-	if strings.ContainsAny(p, "\\\x00") {
-		return "", fmt.Errorf("路径非法")
-	}
-	for _, part := range strings.Split(p, "/") {
-		if part == "" || part == "." || part == ".." {
-			return "", fmt.Errorf("路径非法")
-		}
-	}
-	return strings.Join(strings.Split(p, "/"), "/"), nil
-}
-
-// normalizeStoragePrefix 与路径规范一致，但空前缀表示 App 根。
-func normalizeStoragePrefix(raw string) (string, error) {
-	p := strings.TrimSpace(raw)
-	if p == "" {
-		return "", nil
-	}
-	return normalizeStoragePath(p)
-}
-
-// splitConnectList 将扁平前缀列举折叠为 SDK 的 directories/files 两层视图。
-func splitConnectList(prefix string, entries []appstorage.Entry) (dirs []map[string]any, files []map[string]any) {
-	dirs = []map[string]any{}
-	files = []map[string]any{}
-	seen := map[string]bool{}
-	for _, en := range entries {
-		rest := strings.TrimPrefix(en.Path, prefix)
-		if rest == "" || rest == ".dir" {
-			// 当前目录自身的 marker 是实现细节，不出现在文件列表。
-			continue
-		}
-		if i := strings.Index(rest, "/"); i > 0 {
-			seg := rest[:i]
-			if !seen[seg] {
-				seen[seg] = true
-				// cc 的目录 path 不带末尾斜杠（prefix 本身仍以 / 结尾）。
-				dirPath := strings.TrimSuffix(prefix, "/")
-				if dirPath != "" {
-					dirPath += "/"
-				}
-				dirPath += seg
-				dirs = append(dirs, map[string]any{"path": dirPath, "name": seg})
-			}
-			continue
-		}
-		if rest == "" || strings.Contains(rest, "/") {
-			continue
-		}
-		files = append(files, map[string]any{
-			"path": en.Path, "name": rest, "size": en.Size,
-			"revision":     strconv.FormatInt(en.Revision, 10),
-			"lastModified": isoMillis(en.Updated),
-		})
-	}
-	return dirs, files
-}
-
-func parentPrefixOf(prefix string) string {
-	p := strings.TrimSuffix(prefix, "/")
-	if i := strings.LastIndex(p, "/"); i >= 0 {
-		return p[:i+1]
-	}
-	return ""
 }
 
 func (d *Daemon) execConnectCipher(ctx context.Context, auth connect.Auth, method string, params map[string]any, attachments map[string][]byte, origin string) (any, map[string][]byte, *kmapi.ErrorDetail) {

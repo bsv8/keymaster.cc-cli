@@ -2,7 +2,6 @@ package connect
 
 import (
 	"github.com/bsv8/keymaster.cc-cli/connectorigin"
-	"github.com/bsv8/keymaster.cc-cli/walletcrypto"
 )
 
 // parseOriginInternal 委托公共 WHATWG 实现；保留内部测试接缝。
@@ -26,14 +25,4 @@ func ParseEntryOrigin(raw string) (string, error) {
 // OriginKey 返回 originKey = lowercase hex SHA256(UTF8(canonicalOrigin))。
 func OriginKey(canonical string) string {
 	return connectorigin.OriginKey(canonical)
-}
-
-// StorageRoot 返回 <network>/<walletPublicKeyLower>/<appPublicKeyHex>/files/。
-func StorageRoot(network, walletHex, canonical string) (string, error) {
-	return walletcrypto.AppStorageRoot(network, walletHex, canonical)
-}
-
-// StorageScope 构造路径绑定的加密 scope。
-func StorageScope(root, path string) string {
-	return walletcrypto.AppStorageScope(root, path)
 }

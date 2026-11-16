@@ -15,9 +15,8 @@ type Layout struct {
 	KeyPath      string
 	InfoPath     string
 	SettingsPath string
-	LegacyConfig string
-	ClientDir    string
-	ServerDir    string
+	DownloadDir  string
+	SellDir      string
 	RootsDir     string
 	SessionsDir  string
 	LockPath     string
@@ -38,21 +37,20 @@ func Resolve(dir string) (Layout, error) {
 	}
 	return Layout{
 		Dir:          abs,
-		KeyPath:      filepath.Join(abs, "key.json"),
-		InfoPath:     filepath.Join(abs, "info.json"),
-		SettingsPath: filepath.Join(abs, "settings.json"),
-		LegacyConfig: filepath.Join(abs, "config.json"),
-		ClientDir:    filepath.Join(abs, "client"),
-		ServerDir:    filepath.Join(abs, "server"),
-		RootsDir:     filepath.Join(abs, "server", "roots"),
-		SessionsDir:  filepath.Join(abs, "server", "sessions"),
+		KeyPath:      filepath.Join(abs, "vault", "key.json"),
+		InfoPath:     filepath.Join(abs, "vault", "info.json"),
+		SettingsPath: filepath.Join(abs, "background", "settings.json"),
+		DownloadDir:  filepath.Join(abs, "download"),
+		SellDir:      filepath.Join(abs, "sell"),
+		RootsDir:     filepath.Join(abs, "sell", "roots"),
+		SessionsDir:  filepath.Join(abs, "sell", "sessions"),
 		LockPath:     filepath.Join(abs, "lock"),
 	}, nil
 }
 
 // EnsureDirs creates the data directory skeleton with restrictive perms.
 func (l Layout) EnsureDirs() error {
-	for _, dir := range []string{l.Dir, l.ClientDir, l.ServerDir, l.RootsDir, l.SessionsDir} {
+	for _, dir := range []string{filepath.Dir(l.KeyPath), filepath.Dir(l.SettingsPath), l.DownloadDir, l.SellDir, l.RootsDir, l.SessionsDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("datadir: 创建目录失败 %s: %w", dir, err)
 		}
@@ -78,7 +76,7 @@ func (l Layout) HasInitMarkers() bool {
 // Corrupt or half-written files still count as "exists" so callers never
 // mistake damage for a fresh install.
 func (l Layout) HasAnyWallet() bool {
-	for _, p := range []string{l.KeyPath, l.InfoPath, l.SettingsPath, l.LegacyConfig} {
+	for _, p := range []string{l.KeyPath, l.InfoPath, l.SettingsPath} {
 		if _, statErr := os.Stat(p); statErr == nil {
 			return true
 		} else if !errors.Is(statErr, os.ErrNotExist) {

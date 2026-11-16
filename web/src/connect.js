@@ -5,6 +5,11 @@
 import { KeymasterConnectReceiver } from 'keymaster-connect/server';
 import { getClient, getInstanceId } from './client.js';
 
+// 开发诊断不记录正文、附件、来源或授权凭据。
+function traceApproval(stage, details) {
+  if (import.meta.env.DEV) console.debug('[connect.approval]', stage, details);
+}
+
 const pendingApproval = new Map(); // approvalId -> { approvalId, ctx, method, origin, reqId, receiver }
 // 授权与在途请求按 Receiver（具体连接上下文）隔离：同源多连接不得串用。
 // popup 有独立单例 Receiver；钱包启动的每个窗口/iframe 各有一个官方 Receiver。
@@ -342,23 +347,6 @@ function sdkError(method, perr) {
   if ((code === 'NOT_FOUND' || code === 'BAD_REQUEST') && message.includes('授权')) {
     return { code: 'authorization_expired', message };
   }
-  if (method.startsWith('storage.')) {
-    switch (code) {
-      case 'NOT_FOUND': return { code: 'storage_not_found', message };
-      case 'CONFLICT': return { code: 'storage_conflict', message };
-      case 'TOO_LARGE': return { code: 'storage_limit_exceeded', message };
-      case 'BAD_REQUEST':
-        return message.includes('路径')
-          ? { code: 'storage_invalid_path', message }
-          : { code: 'invalid_request', message };
-      case 'LOCKED':
-      case 'STOPPING': return { code: 'storage_unavailable', message };
-      case 'NOT_INITIALIZED': return { code: 'storage_not_configured', message };
-      case 'FORBIDDEN': return { code: 'storage_forbidden', message };
-      case 'VERSION_MISMATCH': return { code: 'invalid_request', message };
-      default: return { code: 'internal_error', message };
-    }
-  }
   if (method.startsWith('cipher.')) {
     if (code === 'BAD_REQUEST' && message === 'Decrypt failed') return { code: 'decrypt_failed', message };
     switch (code) {
@@ -455,6 +443,7 @@ async function handleRequest(req, recv) {
       });
       if (res && res.approvalId) {
         pendingApproval.set(res.approvalId, { approvalId: res.approvalId, ctx: req, method, origin, reqId: req.id, receiver: recv });
+        await pumpPendingApprovals(res.approvalId);
       } else if (res) {
         // launch 直接返回授权结果（发起即授权，不经审批），只绑定本次连接；
         // 登录/恢复的心跳恢复同样直接回执。旧连接不得借新连接的授权执行业务。
@@ -482,7 +471,7 @@ async function handleRequest(req, recv) {
     // 旧连接的已失效授权在此被拒绝，不能借新连接的授权继续执行业务。
     const authorizationId = authzOf(recv).get(origin);
     if (!authorizationId) {
-      const code = method.startsWith('storage.') ? 'storage_identity_required' : 'identity_required';
+      const code = 'identity_required';
       recv.replyError(req, { code, message: '需要先登录授权' });
       return;
     }
@@ -497,9 +486,7 @@ async function handleRequest(req, recv) {
       }
       return b;
     };
-    if (method === 'storage.put' || method === 'storage.encrypted.put') {
-      takeBinary(params, 'content', 'content');
-    } else if (method === 'cipher.encrypt') {
+    if (method === 'cipher.encrypt') {
       takeBinary(params, 'content', 'content');
     } else if (method === 'cipher.decrypt') {
       takeBinary(params, 'nonce', 'nonce');
@@ -514,7 +501,11 @@ async function handleRequest(req, recv) {
     const raw = await client.callWithBinary({ signal }, 'connect.request.exec', execParams, attachments);
     // payment.pay 冻结后返回 approvalId，需经用户批准后认领执行；其他业务直接返回结果。
     if (raw && raw.result && raw.result.approvalId) {
+      traceApproval("queued", { method });
       pendingApproval.set(raw.result.approvalId, { approvalId: raw.result.approvalId, ctx: req, method, origin, reqId: req.id, receiver: recv });
+      // 后台的审批事件可能先于请求响应到达；登记映射后再认领一次，避免漏掉
+      // 在登记前已经批准的终态。仍由后台决定是否可执行，不自动批准。
+      await pumpPendingApprovals(raw.result.approvalId);
       return;
     }
     recv.replyResult(req, toSdkResult(method, raw.result, raw.binaries || {}));
@@ -543,33 +534,6 @@ function toSdkResult(method, result, binaries) {
     return toBinaryField(b, mime);
   };
   switch (method) {
-    case 'storage.put':
-    case 'storage.encrypted.put':
-      return {
-        path: result.path,
-        size: result.size,
-        ...(result.revision !== undefined ? { revision: String(result.revision) } : {}),
-        updatedAt: result.updatedAt,
-      };
-    case 'storage.get':
-    case 'storage.encrypted.get': {
-      const content = bf('content', result.contentType);
-      if (!content) throw new Error('后台未返回内容');
-      return {
-        path: result.path,
-        content,
-        ...(result.contentType ? { contentType: result.contentType } : {}),
-        offset: result.offset ?? 0,
-        totalSize: result.totalSize ?? 0,
-        eof: result.eof ?? true,
-        ...(result.revision !== undefined ? { revision: String(result.revision) } : {}),
-        ...(result.lastModified ? { lastModified: result.lastModified } : {}),
-      };
-    }
-    case 'storage.list':
-      return result;
-    case 'storage.delete':
-      return result;
     case 'cipher.encrypt': {
       const nonce = bf('nonce');
       const cipherbytes = bf('cipherbytes');
@@ -611,61 +575,103 @@ export async function decideApproval(approvalId, decision, grantAuto) {
   const params = grantAuto === undefined ? { approvalId, decision } : { approvalId, decision, grantAuto };
   const res = await client.call(undefined, 'connect.approvals.decide', params);
   // 本页若恰好持有原请求，触发一次认领泵；多页同时批准仅后台条件转换保证执行一次。
-  try { await pumpPendingApprovals(); } catch { /* 事件会再次触发 */ }
+  try { await pumpPendingApprovals(approvalId); } catch { /* 事件会再次触发 */ }
   return res;
 }
 
 // 原请求窗口的认领泵：由后台事件触发（重连后读完整快照再触发），复核原 Receiver 上下文后认领执行并回复 App。
 // 审批面板不直接回复；本函数仅处理本页 pendingApproval 持有项。
-export async function pumpPendingApprovals() {
-  if (pendingApproval.size === 0) return;
+const approvalClaims = new Map(); // approvalId -> 当前认领任务；不同审批彼此独立。
+
+/** 每个审批独立防重；指定 ID 的调用只等待自己的结果，事件则并行推动全部待办。 */
+export function pumpPendingApprovals(onlyApprovalId) {
+  const jobs = [];
+  const entries = onlyApprovalId === undefined
+    ? [...pendingApproval.entries()]
+    : pendingApproval.has(onlyApprovalId) ? [[onlyApprovalId, pendingApproval.get(onlyApprovalId)]] : [];
+  for (const [approvalId, entry] of entries) {
+    const active = approvalClaims.get(approvalId);
+    if (active) {
+      active.requested = true;
+      if (onlyApprovalId !== undefined) jobs.push(active.promise);
+      continue;
+    }
+    const task = { requested: false, promise: null };
+    // 先登记再异步认领，后台事件不能在同一 ID 上开启第二个执行任务。
+    approvalClaims.set(approvalId, task);
+    task.promise = (async () => {
+      try {
+        do {
+          task.requested = false;
+          await claimPendingApproval(approvalId, entry);
+        } while (task.requested && pendingApproval.get(approvalId) === entry);
+      } finally {
+        if (approvalClaims.get(approvalId) === task) approvalClaims.delete(approvalId);
+      }
+    })();
+    jobs.push(task.promise);
+  }
+  return Promise.all(jobs);
+}
+
+/** 只认领原待办对象；跨异步边界后也不得回复已被撤下或替换的请求。 */
+async function claimPendingApproval(approvalId, entry) {
   let client = null;
   try { client = await getClient(); } catch { return; }
-  for (const [approvalId, entry] of [...pendingApproval.entries()]) {
-    // 上下文失效：原窗口关闭、来源窗口关闭或 Receiver 已 teardown。
-    // 后台终结未认领申请（付款释放确定未提交冻结）；本页丢弃映射并尽力通知 App。
-    if (!isContextAlive(entry)) {
-      try { await client.call(undefined, 'connect.approvals.decide', { approvalId, decision: 'cancel' }); } catch { /* Backend keeps its terminal state. */ }
-      pendingApproval.delete(approvalId);
-      try { entry.receiver.replyError(entry.ctx, { code: 'user_rejected', message: '连接已失效' }); } catch { /* ignore */ }
-      continue;
-    }
-    let exec = null;
-    try {
-      exec = await client.callWithBinary(undefined, 'connect.request.exec', { approvalId }, {});
-    } catch (e) {
-      const code = e?.code;
-      // 仅两种情况保留映射等待下次事件：传输故障（无错误码）与另一页正在执行。
-      // 后台已缓存业务终态并会重复返回同一失败，保留只会导致 Demo 一直等到超时。
-      if (!code || (code === 'STATE_CONFLICT' && String(e?.message || '').includes('正在执行'))) {
-        continue;
-      }
-      pendingApproval.delete(approvalId);
-      try { entry.receiver.replyError(entry.ctx, sdkError(entry.method, e)); } catch { /* ignore */ }
-      continue;
-    }
-    if (!exec || !exec.result) continue;
-    // 状态响应（{approvalId, status}）与业务结果区分：仅状态响应含 approvalId。
-    // 成功业务结果（授权/付款/身份/意图/加解密）均不含 approvalId 字段。
-    if (exec.result && typeof exec.result.approvalId === 'string' && typeof exec.result.status === 'string') {
-      const st = exec.result.status;
-      if (st !== 'approved' && st !== 'pending') {
-        pendingApproval.delete(approvalId);
-        try {
-          if (st === 'rejected') entry.receiver.replyError(entry.ctx, { code: 'user_rejected', message: '用户拒绝' });
-          else entry.receiver.replyError(entry.ctx, { code: 'user_rejected', message: '请求已取消' });
-        } catch { /* ignore */ }
-      }
-      continue;
+  if (pendingApproval.get(approvalId) !== entry) return;
+  // 上下文失效：原窗口关闭、来源窗口关闭或 Receiver 已 teardown。
+  // 后台终结未认领申请（付款释放确定未提交冻结）；本页丢弃映射并尽力通知 App。
+  traceApproval("claim.start", { method: entry.method, alive: isContextAlive(entry) });
+  if (!isContextAlive(entry)) {
+    try { await client.call(undefined, 'connect.approvals.decide', { approvalId, decision: 'cancel' }); } catch { /* Backend keeps its terminal state. */ }
+    if (pendingApproval.get(approvalId) !== entry) return;
+    pendingApproval.delete(approvalId);
+    try { entry.receiver.replyError(entry.ctx, { code: 'user_rejected', message: '连接已失效' }); } catch { /* ignore */ }
+    return;
+  }
+  let exec = null;
+  try {
+    exec = await client.callWithBinary(undefined, 'connect.request.exec', { approvalId }, {});
+  } catch (e) {
+    if (pendingApproval.get(approvalId) !== entry) return;
+    const code = e?.code;
+    // 仅两种情况保留映射等待下次事件：传输故障（无错误码）与另一页正在执行。
+    // 后台已缓存业务终态并会重复返回同一失败，保留只会导致 Demo 一直等到超时。
+    if (!code || (code === 'STATE_CONFLICT' && String(e?.message || '').includes('正在执行'))) {
+      return;
     }
     pendingApproval.delete(approvalId);
-    try {
-      entry.receiver.replyResult(entry.ctx, toSdkResult(entry.method, exec.result, exec.binaries || {}));
-      if (entry.method === 'connect.login' || entry.method === 'connect.resume' || entry.method === 'connect.launch') {
-        const authorizationId = exec.result?.authorizationId;
-        if (authorizationId) authzOf(entry.receiver).set(entry.origin, authorizationId);
-      }
-    } catch { /* ignore */ }
+    try { entry.receiver.replyError(entry.ctx, sdkError(entry.method, e)); } catch { /* ignore */ }
+    return;
+  }
+  if (pendingApproval.get(approvalId) !== entry) return;
+  traceApproval("claim.result", { method: entry.method, status: exec?.result?.status, binaries: Object.keys(exec?.binaries || {}) });
+  if (!exec || !exec.result) return;
+  // 状态响应（{approvalId, status}）与业务结果区分：仅状态响应含 approvalId。
+  // 成功业务结果（授权/付款/身份/意图/加解密）均不含 approvalId 字段。
+  if (exec.result && typeof exec.result.approvalId === 'string' && typeof exec.result.status === 'string') {
+    const st = exec.result.status;
+    if (st !== 'approved' && st !== 'pending') {
+      pendingApproval.delete(approvalId);
+      try {
+        if (st === 'rejected') entry.receiver.replyError(entry.ctx, { code: 'user_rejected', message: '用户拒绝' });
+        else entry.receiver.replyError(entry.ctx, { code: 'user_rejected', message: '请求已取消' });
+      } catch { /* ignore */ }
+    }
+    return;
+  }
+  pendingApproval.delete(approvalId);
+  try {
+    traceApproval("reply.start", { method: entry.method });
+    entry.receiver.replyResult(entry.ctx, toSdkResult(entry.method, exec.result, exec.binaries || {}));
+    if (entry.method === 'connect.login' || entry.method === 'connect.resume' || entry.method === 'connect.launch') {
+      const authorizationId = exec.result?.authorizationId;
+      if (authorizationId) authzOf(entry.receiver).set(entry.origin, authorizationId);
+    }
+  } catch (error) {
+    traceApproval("reply.failed", { method: entry.method, code: error?.code, name: error?.name });
+    // 转换或发送失败也要结束原请求，不能删掉映射后让 App 永久等待。
+    try { entry.receiver.replyError(entry.ctx, { code: 'internal_error', message: 'Approval result could not be delivered' }); } catch { /* 对端已关闭时尽力回复。 */ }
   }
 }
 

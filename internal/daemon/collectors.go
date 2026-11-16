@@ -33,11 +33,11 @@ func newCollectorsManager(dir string, store *appconfig.Store, sign collector.Sig
 }
 
 // collectorStateDir resolves a per-collector state file strictly inside
-// server/collector. IDs are validated at the settings layer, but the join is
+// collector/. IDs are validated at the settings layer, but the join is
 // still verified so a hostile or hand-edited settings file can never escape
 // into config, wallet or business files (e.g. id="../../info").
 func collectorStateDir(dataDir, id string) (string, error) {
-	base, err := filepath.Abs(filepath.Join(dataDir, "server", "collector"))
+	base, err := filepath.Abs(filepath.Join(dataDir, "collector"))
 	if err != nil {
 		return "", err
 	}

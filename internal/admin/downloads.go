@@ -181,13 +181,13 @@ func (s *Server) startJob(seed, execID, outDir string) (snapshot downloadJob, ok
 }
 
 func (s *Server) seedStore(seed string) (*store.Store, error) {
-	if s.options.ClientDir == "" {
+	if s.options.DownloadDir == "" {
 		return nil, errors.New("client directory is not configured")
 	}
 	if !validSeedHash(seed) {
 		return nil, fmt.Errorf("invalid seed hash %q", seed)
 	}
-	return openSeedStore(s.options.ClientDir, seed)
+	return openSeedStore(s.options.DownloadDir, seed)
 }
 
 func (s *Server) handleDownloads(writer http.ResponseWriter, request *http.Request) {
@@ -195,18 +195,18 @@ func (s *Server) handleDownloads(writer http.ResponseWriter, request *http.Reque
 		methodNotAllowed(writer)
 		return
 	}
-	if s.options.ClientDir == "" {
+	if s.options.DownloadDir == "" {
 		http.Error(writer, "client directory is not configured", http.StatusNotFound)
 		return
 	}
-	seeds, err := listClientSeeds(s.options.ClientDir)
+	seeds, err := listClientSeeds(s.options.DownloadDir)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	views := make([]downloadView, 0, len(seeds))
 	for _, seed := range seeds {
-		st, err := openSeedStore(s.options.ClientDir, seed)
+		st, err := openSeedStore(s.options.DownloadDir, seed)
 		if err != nil {
 			continue
 		}
@@ -354,7 +354,7 @@ func (s *Server) handleRedownload(writer http.ResponseWriter, request *http.Requ
 		http.Error(writer, "invalid seed hash", http.StatusBadRequest)
 		return
 	}
-	if s.options.ClientDir == "" {
+	if s.options.DownloadDir == "" {
 		http.Error(writer, "client directory is not configured", http.StatusNotFound)
 		return
 	}
@@ -389,7 +389,7 @@ func (s *Server) handleRedownload(writer http.ResponseWriter, request *http.Requ
 		http.Error(writer, "a download for this seed is currently active; stop it before redownloading", http.StatusConflict)
 		return
 	}
-	guard, err := lock.Acquire(filepath.Join(clientSeedDir(s.options.ClientDir, seed), "scheduler", ".active.lock"))
+	guard, err := lock.Acquire(filepath.Join(clientSeedDir(s.options.DownloadDir, seed), "scheduler", ".active.lock"))
 	if err != nil {
 		http.Error(writer, "a download for this seed is currently active; stop it before redownloading", http.StatusConflict)
 		return
@@ -478,7 +478,7 @@ func (s *Server) handleSwitch(writer http.ResponseWriter, request *http.Request)
 		http.Error(writer, "invalid seed hash", http.StatusBadRequest)
 		return
 	}
-	if s.options.ClientDir == "" {
+	if s.options.DownloadDir == "" {
 		http.Error(writer, "client directory is not configured", http.StatusNotFound)
 		return
 	}
@@ -516,7 +516,7 @@ func (s *Server) handleSwitch(writer http.ResponseWriter, request *http.Request)
 		http.Error(writer, "a download for this seed is currently active; stop it before switching", http.StatusConflict)
 		return
 	}
-	guard, err := lock.Acquire(filepath.Join(clientSeedDir(s.options.ClientDir, seed), "scheduler", ".active.lock"))
+	guard, err := lock.Acquire(filepath.Join(clientSeedDir(s.options.DownloadDir, seed), "scheduler", ".active.lock"))
 	if err != nil {
 		http.Error(writer, "a download for this seed is currently active; stop it before switching", http.StatusConflict)
 		return

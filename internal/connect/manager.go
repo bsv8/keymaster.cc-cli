@@ -30,8 +30,8 @@ func (m *Manager) SerializedAuthChange(fn func()) {
 	fn()
 }
 
-func NewManager(walletDir string) *Manager {
-	return &Manager{auth: NewAuthStore(walletDir), queue: NewQueue(), payments: NewPaymentStore(walletDir), launch: NewLaunchStore(), apps: NewAppState(walletDir), conns: NewConnectionStore(), directory: NewDirectoryStore(walletDir)}
+func NewManager(protocolDir, appsDir string) *Manager {
+	return &Manager{auth: NewAuthStore(protocolDir), queue: NewQueue(), payments: NewPaymentStore(protocolDir), launch: NewLaunchStore(), apps: NewAppState(protocolDir), conns: NewConnectionStore(), directory: NewDirectoryStore(appsDir)}
 }
 
 func (m *Manager) AuthStore() *AuthStore     { return m.auth }

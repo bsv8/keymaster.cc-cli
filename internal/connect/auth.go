@@ -31,8 +31,8 @@ type AuthStore struct {
 	auths map[string]Auth // key: AuthorizationID
 }
 
-func NewAuthStore(walletDir string) *AuthStore {
-	return &AuthStore{path: filepath.Join(walletDir, "connect", "auth.json"), auths: map[string]Auth{}}
+func NewAuthStore(pluginDir string) *AuthStore {
+	return &AuthStore{path: filepath.Join(pluginDir, "auth.json"), auths: map[string]Auth{}}
 }
 
 // Load 只读取完整的公钥授权快照；无效记录使整个加载失败。

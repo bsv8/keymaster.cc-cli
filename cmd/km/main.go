@@ -37,7 +37,6 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/daemonrun"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
-	"github.com/bsv8/keymaster.cc-cli/internal/migrate"
 	"github.com/bsv8/keymaster.cc-cli/internal/session"
 	"github.com/bsv8/keymaster.cc-cli/internal/tray"
 )
@@ -156,7 +155,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `用法:
   km install [--data-dir DIR]   安装程序、检查初始化状态、生成系统服务
   km init [--data-dir DIR]      独立初始化钱包和设置，不启动长期业务
-  km daemon [--data-dir DIR] [--storage-dir DIR] [--no-tray]
+  km daemon [--data-dir DIR] [--no-tray]
                          运行后台，已有钱包时以锁定状态启动；默认启用 Web Admin 与托盘
   km unlock [--api URL] [--data-dir DIR]
   km info [--api URL] [--data-dir DIR]
@@ -302,34 +301,9 @@ func cmdInit(g globalFlags, args []string) int {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return exitError
 	}
-	if layout.HasInitMarkers() && !migrate.HasPending(layout) {
+	if layout.HasInitMarkers() {
 		fmt.Fprintln(os.Stderr, "km: 已经初始化（存在 key.json/info.json/settings.json），不覆盖")
 		return exitError
-	}
-	if migrate.NeedsMigration(layout) {
-		// Legacy migration path (also resumes an interrupted migration).
-		if migrate.HasPending(layout) {
-			fmt.Fprintln(os.Stderr, "检测到未完成的迁移，继续恢复（验证后原样保留密文，不重加密）。")
-		} else if _, err := os.Stat(layout.LegacyConfig); err == nil {
-			fmt.Fprintln(os.Stderr, "检测到旧版数据（config.json），开始迁移（验证后原样保留密文，不重加密）。")
-		} else {
-			fmt.Fprintln(os.Stderr, "检测到旧钱包外壳，开始迁移。")
-		}
-		password, err := readHiddenPassword("钱包密码: ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		if password == "" {
-			fmt.Fprintln(os.Stderr, "km: 密码不能为空")
-			return exitError
-		}
-		if err := migrate.MigrateLegacy(layout, password); err != nil {
-			fmt.Fprintln(os.Stderr, "km: 迁移失败:", err)
-			return exitError
-		}
-		fmt.Println("迁移完成：key.json 已为纯 KeyHold，网络绑定移入 info.json")
-		return exitOK
 	}
 	if layout.HasAnyWallet() {
 		fmt.Fprintln(os.Stderr, "km: 数据目录存在半套或损坏文件，不能当成首次安装；请从备份恢复后重试")
@@ -517,25 +491,15 @@ func cmdInit(g globalFlags, args []string) int {
 
 func cmdDaemon(g globalFlags, args []string) int {
 	noTray := false
-	storageDir := ""
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if a == "--storage-dir" && i+1 < len(args) {
-			storageDir = args[i+1]
-			i++
-			continue
-		}
-		if strings.HasPrefix(a, "--storage-dir=") {
-			storageDir = strings.TrimPrefix(a, "--storage-dir=")
-			continue
-		}
 		switch a {
 		case "--no-tray", "--no-tray=true":
 			noTray = true
 		case "--no-tray=false":
 			noTray = false
 		default:
-			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--storage-dir DIR] [--no-tray]")
+			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--no-tray]")
 			return exitUsage
 		}
 	}
@@ -561,7 +525,6 @@ func cmdDaemon(g globalFlags, args []string) int {
 	// are reported there with the same messages as before.
 	return daemonrun.Run(ctx, daemonrun.Options{
 		DataDir:          layout.Dir,
-		StorageDir:       storageDir,
 		Tray:             mode,
 		ExitCodeOnSignal: exitCancelled,
 	})
