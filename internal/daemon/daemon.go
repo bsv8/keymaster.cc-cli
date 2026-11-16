@@ -27,6 +27,7 @@ import (
 	"time"
 
 	keyhold "github.com/bsv8/KeyHold/go/v2"
+	"github.com/bsv8/WebLoom/go/webloom"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/appdeployment"
 	"github.com/bsv8/keymaster.cc-cli/internal/appstorage"
@@ -60,6 +61,8 @@ type Options struct {
 
 // Daemon is the background owner.
 type Daemon struct {
+	// plugins 拥有后台 API 单元；前台断线不关闭后台实例。
+	plugins    *webloom.Runtime
 	supplierMu sync.Mutex
 	suppliers  map[string]*supplierConnection
 	layout     datadir.Layout
@@ -278,7 +281,7 @@ func Open(opts Options) (*Daemon, error) {
 			// for the next restart unless updated through the API.
 			_ = port
 		}
-		return d, nil
+		return d.finishOpen()
 	}
 	// No new markers: legacy or fresh.
 	if layout.HasAnyWallet() {
@@ -289,11 +292,11 @@ func Open(opts Options) (*Daemon, error) {
 		d.state = StateUninitialized
 		d.tasks = nil
 		d.roots = nil
-		return d, nil
+		return d.finishOpen()
 	}
 	d.store = nil
 	d.state = StateUninitialized
-	return d, nil
+	return d.finishOpen()
 }
 
 // State returns the current lifecycle state.
@@ -426,6 +429,11 @@ func (d *Daemon) close() error {
 	// 完成责任记录，见执行路径），之后才释放钱包目录锁。
 	// 排空失败保留文件锁并报告关闭失败；预算覆盖单次付款执行的最坏网络等待。
 	drainErr := d.waitDispatchDrain(45 * time.Second)
+	if d.plugins != nil {
+		pluginWait, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		drainErr = errors.Join(drainErr, d.plugins.Close(pluginWait))
+		cancel()
+	}
 	if d.tasks != nil {
 		d.tasks.stopAllAndWait(10 * time.Second)
 	}

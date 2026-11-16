@@ -6,6 +6,7 @@ import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
 import { initConnectReceiver, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
 import { ApplicationWorkspace, ApplicationLaunchDialog, WorkspaceTabs, useWorkspace, useApplicationWorkspace } from './workspace.jsx';
+import { OverviewApps } from './overviewApps.jsx';
 import { GlobalApproval, AppCenter, DirectoryCenter } from './approvalCenter.jsx';
 
 const TABS = [
@@ -657,7 +658,6 @@ function App() {
         </header>
       <div className="workspace-body">
       <aside id="workspace-menu" className="sidebar" hidden={!sidebarOpen}>
-        <div className="workspace-menu-caption">菜单</div>
         {workspace.views.length > 0 && <nav className="workspace-app-menu" aria-label="已打开应用">
           <div className="workspace-menu-caption">应用</div>
           {workspace.views.map(view => <div className="workspace-app-menu-row" key={view.id}>
@@ -665,6 +665,7 @@ function App() {
             <button type="button" className="workspace-close" aria-label={`关闭 ${view.title}`} onClick={() => workspace.close(view.id)}>×</button>
           </div>)}
         </nav>}
+        <div className="workspace-menu-caption">菜单</div>
         <nav className="nav" aria-label="钱包功能">
           {TABS.map(tab => <button key={tab.id} type="button" data-testid={`nav-${tab.id}`} className={!workspace.active && page === tab.id ? 'active' : ''} onClick={() => setPage(tab.id)}>{t(tab.label)}</button>)}
         </nav>
@@ -683,6 +684,8 @@ function App() {
         </section>)}
 
       {page === 'overview' && (
+        <>
+        <OverviewApps onBrowse={() => setPage('apps')} />
         <div className="grid">
           <section className="card">
             <h2>{t('钱包')}</h2>
@@ -721,6 +724,7 @@ function App() {
             )}
           </section>
         </div>
+        </>
       )}
 
       {page === 'sell' && (

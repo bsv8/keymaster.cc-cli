@@ -6,6 +6,7 @@ import { decideApproval, pumpPendingApprovals } from './connect.js';
 import { interpretLockingScript } from 'keymaster-connect/script';
 import { useApplicationWorkspace } from './workspace.jsx';
 import { t } from './i18n.js';
+import { prepareDirectoryEntry, directoryLaunchTarget } from './directoryLaunch.js';
 
 const METHOD_LABELS = {
   'identity.get': '身份凭证',
@@ -390,24 +391,11 @@ export function DirectoryCenter() {
   React.useEffect(() => { load(); }, [load]);
   // Files 下载与验证只调用后台已声明的方法；商店不读取或写入部署文件。
   const prepareEntry = async entry => {
-    const selected = entry.selected || (entry.url ? {url:entry.url} : entry.urls?.length ? {url:entry.urls[0].url} : {indexseedhashhex:entry.indexseedhashhex||entry.files?.[0]?.indexseedhashhex});
-    if (selected.url) return {url:selected.url,expectedAppPublicKeyHex:entry.appPublicKeyHex};
-    if (!selected.indexseedhashhex) throw new Error('请选择有效入口');
-    const list = await call('connect.deployment.list',{});
-    let installed = list.deployments.find(d=>d.indexseedhashhex===selected.indexseedhashhex);
-    if (!installed) installed = await call('connect.deployment.install',{indexseedhashhex:selected.indexseedhashhex});
-    if (entry.appPublicKeyHex && installed.appPublicKeyHex!==entry.appPublicKeyHex) throw new Error('部署公钥与目录目标不一致');
-    const running = await call('connect.deployment.start',{deploymentId:installed.deploymentId});
+    const target = await prepareDirectoryEntry(entry, call);
     await load();
-    return {url:running.url,expectedAppPublicKeyHex:running.appPublicKeyHex,deploymentId:running.deploymentId};
+    return target;
   };
-  // 目录仅准备目标，URL 与 Files 都走工作区的同一确认和启动流程。
-  const launch = entry => workspace.requestLaunch({
-    title: entry.name || entry.url || entry.appPublicKeyHex || 'Files App',
-    url: entry.selected?.url || entry.url || entry.urls?.[0]?.url,
-    description: entry.indexseedhashhex || entry.selected?.indexseedhashhex,
-    prepare: () => prepareEntry(entry), testId: 'directory-iframe-view',
-  });
+  const launch = entry => workspace.requestLaunch(directoryLaunchTarget(entry, () => prepareEntry(entry)));
   const add = async () => {
     setErr('');
     try {

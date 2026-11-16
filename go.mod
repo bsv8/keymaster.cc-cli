@@ -42,6 +42,7 @@ require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bsv8/MultisigPool/v4 v4.0.0
+	github.com/bsv8/WebLoom/go v0.0.0
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
@@ -127,3 +128,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
+
+replace github.com/bsv8/WebLoom/go => ../WebLoom/go

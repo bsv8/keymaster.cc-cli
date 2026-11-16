@@ -1,0 +1,106 @@
+[
+  {
+    "pluginId": "apps",
+    "unitId": "apps.daemon",
+    "methods": [
+      "connect.launch.issue",
+      "connect.directory.list",
+      "connect.directory.add",
+      "connect.directory.remove",
+      "connect.directory.favorite",
+      "connect.directory.select",
+      "connect.deployment.install",
+      "connect.deployment.start",
+      "connect.deployment.stop",
+      "connect.deployment.list"
+    ]
+  },
+  {
+    "pluginId": "background",
+    "unitId": "background.daemon",
+    "methods": [
+      "settings.get",
+      "settings.update",
+      "settings.reset",
+      "events.subscribe"
+    ]
+  },
+  {
+    "pluginId": "collector",
+    "unitId": "collector.daemon",
+    "methods": [
+      "collector.status",
+      "collector.history",
+      "collector.describe",
+      "collector.config",
+      "collector.flush",
+      "collector.retry"
+    ]
+  },
+  {
+    "pluginId": "download",
+    "unitId": "download.daemon",
+    "methods": [
+      "tasks.list",
+      "tasks.create",
+      "tasks.get",
+      "tasks.cancel",
+      "tasks.subscribe"
+    ]
+  },
+  {
+    "pluginId": "protocol",
+    "unitId": "protocol.daemon",
+    "methods": [
+      "connect.approvals.list",
+      "connect.bindings.list",
+      "connect.auth.list",
+      "connect.auth.revoke",
+      "connect.approvals.decide",
+      "connect.request.exec",
+      "connect.permissions.list",
+      "connect.permissions.revoke",
+      "connect.history.list",
+      "connect.apps.list",
+      "connect.connection.pause"
+    ]
+  },
+  {
+    "pluginId": "sell",
+    "unitId": "sell.daemon",
+    "methods": [
+      "roots.list",
+      "roots.add",
+      "roots.remove",
+      "roots.setDefault",
+      "files.list",
+      "files.browse",
+      "catalog.refresh",
+      "pricing.setDefaults",
+      "pricing.batch",
+      "pricing.setFile",
+      "pricing.clearFile"
+    ]
+  },
+  {
+    "pluginId": "storage",
+    "unitId": "storage.daemon",
+    "methods": [
+      "storage.put",
+      "storage.get",
+      "storage.list",
+      "storage.delete"
+    ]
+  },
+  {
+    "pluginId": "vault",
+    "unitId": "vault.daemon",
+    "methods": [
+      "status.get",
+      "info.get",
+      "wallet.unlock",
+      "wallet.create",
+      "wallet.import"
+    ]
+  }
+]

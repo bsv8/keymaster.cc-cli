@@ -14,6 +14,13 @@ Keymaster CLI（命令 `km`）：单二进制 Go 程序，下载与售卖 BitFS 
 
 ## 构建
 
+当前后台 API 和 Web 连接已接入 WebLoom 插件运行时，前后台共享
+`pluginmanifest/catalog.json` 的方法归属。Go 框架尚未发布，因此本地构建要求相邻
+`../WebLoom/go`；Web 使用相邻 WebLoom 的 file 依赖，构建 Web 前先在 WebLoom
+运行 `pnpm install --frozen-lockfile && pnpm build`，再在本项目 `web/` 执行
+`npm ci && npm run build`。Go 构建将已生成的 Web dist 嵌入二进制。
+业务对象与存储尚未全部从 Daemon 收回所属插件，不能将 API 接入视为完整存储改造。
+
 ```sh
 go build -o km ./cmd/km
 
