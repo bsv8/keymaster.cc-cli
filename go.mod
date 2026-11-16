@@ -19,12 +19,14 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/libp2p/go-libp2p v0.50.0
 	github.com/multiformats/go-multiaddr v0.16.1
+	github.com/nlnwa/whatwg-url v0.6.2
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/term v0.47.0
 	modernc.org/sqlite v1.61.0
 )
 
 require (
+	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect

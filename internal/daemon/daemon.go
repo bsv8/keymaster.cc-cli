@@ -28,6 +28,7 @@ import (
 
 	keyhold "github.com/bsv8/KeyHold/go/v2"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
+	"github.com/bsv8/keymaster.cc-cli/internal/appdeployment"
 	"github.com/bsv8/keymaster.cc-cli/internal/appstorage"
 	"github.com/bsv8/keymaster.cc-cli/internal/connect"
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
@@ -104,7 +105,8 @@ type Daemon struct {
 	storage       *appstorage.Store
 	storageGuard  *dlock.Guard
 
-	connectMgr *connect.Manager
+	deployments *appdeployment.Manager
+	connectMgr  *connect.Manager
 
 	// paymentHeld 为冻结的付款计划（批准前冻结，批准后原样广播）。
 	// 仅内存持有，重启后按持久 rawHex 直接广播，不重新选币。
@@ -221,6 +223,7 @@ func Open(opts Options) (*Daemon, error) {
 	d.storageGuard = storageGuard
 	d.storage = storageStore
 	d.connectMgr = connect.NewManager(layout.Dir)
+	d.deployments = appdeployment.New(filepath.Join(layout.Dir, "apps", "deployments"), d.downloadDeploymentFile, d.invalidateDeployment)
 	d.connectMgr.SetGeneration(d.events.InstanceID())
 	if err := d.connectMgr.Load(); err != nil {
 		_ = storageStore.Close()
@@ -380,6 +383,9 @@ func (d *Daemon) close() error {
 	// 停止接收新的分派请求（WS 与进程内共用 Dispatch 入口）；
 	// 与在途统计 Add 在同一把锁下配对，保证排空等待开始后不会再有新请求溜入。
 	d.stopDispatchAccepting()
+	if d.deployments != nil {
+		d.deployments.Close()
+	}
 	// Stop the transport-independent lifecycle (periodic refresh) first so
 	// no new background work starts while we drain.
 	d.startMu.Lock()

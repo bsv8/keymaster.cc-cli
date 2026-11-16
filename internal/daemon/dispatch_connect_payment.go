@@ -321,7 +321,7 @@ func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, par
 			priv[i] = 0
 		}
 	}()
-	identityKey := connect.PaymentIdentityKey(network, origin, auth.WalletPublicKey, auth.AppID, auth.AppPublicKey)
+	identityKey := connect.PaymentIdentityKey(network, auth.AppPublicKeyHex, auth.WalletPublicKey)
 	key := connect.PaymentRequestKey(identityKey, clientRequestID)
 	assetID := paymentAssetID(network)
 	digest := connect.PaymentRequestDigest(identityKey, clientRequestID, outputs, assetID)
@@ -329,12 +329,10 @@ func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, par
 	// 不重复创建计划，不覆盖先占者的付款计划。
 	claimedPlaceholder := connect.PaymentRecord{
 		Key: key, PaymentID: newPaymentID(), ClientRequestID: clientRequestID,
-		Origin: origin, OwnerPublicKeyHex: auth.WalletPublicKey, Network: network,
-		AppID: auth.AppID, AppPublicKey: auth.AppPublicKey,
-		AuthorizationID: auth.AuthorizationID, IdentityDigest: auth.IdentityDigest,
-		Requirements: append([]string(nil), auth.Requirements...),
-		Generation: d.connectMgr.Generation(),
-		RequestDigest: digest, Outputs: outputs,
+		Origin: origin, AppPublicKeyHex: auth.AppPublicKeyHex, OwnerPublicKeyHex: auth.WalletPublicKey, Network: network,
+		AuthorizationID: auth.AuthorizationID,
+		Generation:      d.connectMgr.Generation(),
+		RequestDigest:   digest, Outputs: outputs,
 		Status: connect.PaymentPending,
 	}
 	created, existing, claimErr := d.connectMgr.Payments().Claim(claimedPlaceholder, 64)
@@ -473,10 +471,9 @@ func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, par
 	// 计划被替换则拒绝，要求重新确认。
 	staged := d.connectMgr.Queue().CreateStagedFull(
 		auth.AuthorizationID, requestID,
-		auth.AppPublicKey, auth.AppID, auth.AppName,
 		"payment.pay",
 		map[string]any{"clientRequestId": clientRequestID, "paymentKey": key, "requestDigest": digest, "outputs": outputsToMaps(outputs), "feeSatoshis": spend.Fee, "changeSatoshis": spend.Change, "txid": spend.TxID},
-		origin, auth.Requirements, auth.IdentityDigest, nil,
+		origin, nil, auth.AppPublicKeyHex, auth.DeploymentID,
 	)
 	// 回写 ApprovalID，使重启收敛可区分“审批从未创建”与“审批可能已执行”。
 	// 条件更新：期间记录被改写则放弃本次审批，禁止旧快照覆盖后续状态。
@@ -729,8 +726,7 @@ func (d *Daemon) convergePaymentNotSigned(rec connect.PaymentRecord, reason stri
 }
 
 // validatePaymentAuth 复核原授权及运行代际，不借新授权继续旧申请。
-// 必须精确绑定创建时的 authorizationId，并核对 AppID、身份摘要、requirements、
-// 来源、网络、钱包与代际；任一变化都拒绝，原申请责任仍保留，需重新登录后用新 ID 申请。
+// 必须精确绑定创建时的 authorizationId，并核对来源、网络、钱包与代际；任一变化都拒绝，原申请责任仍保留，需重新登录后用新 ID 申请。
 func (d *Daemon) validatePaymentAuth(rec connect.PaymentRecord, approval connect.Approval) (connect.Auth, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
 		return connect.Auth{}, errDetail(kmapi.ErrInternal, "Connect 未就绪")
@@ -743,29 +739,12 @@ func (d *Daemon) validatePaymentAuth(rec connect.PaymentRecord, approval connect
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
 	}
 	// 审批必须属于同一授权与来源。
-	if approval.AppPublicKey != a.AppPublicKey || approval.Origin != a.Origin || approval.AppID != a.AppID {
+	if approval.Origin != a.Origin {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
 	}
-	if approval.IdentityDigest != "" && approval.IdentityDigest != a.IdentityDigest {
+	// 付款记录必须属于原授权来源。
+	if rec.Origin != a.Origin {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
-	}
-	// 付款记录必须属于原授权身份。
-	if rec.Origin != a.Origin || !strings.EqualFold(rec.AppPublicKey, a.AppPublicKey) || rec.AppID != a.AppID {
-		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
-	}
-	if rec.IdentityDigest != "" && rec.IdentityDigest != a.IdentityDigest {
-		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
-	}
-	// requirements：付款需要 private-key，原授权必须仍具备。
-	hasPrivateKey := false
-	for _, r := range a.Requirements {
-		if r == "private-key" {
-			hasPrivateKey = true
-			break
-		}
-	}
-	if !hasPrivateKey {
-		return connect.Auth{}, errDetail(kmapi.ErrForbidden, "无 private-key 操作许可")
 	}
 	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
@@ -909,14 +888,14 @@ func (d *Daemon) opConnectPaymentStatus(ctx context.Context, auth connect.Auth, 
 		return nil, errDetail(kmapi.ErrInternal, err.Error())
 	}
 	network := info.BsvNetwork
-	identityKey := connect.PaymentIdentityKey(network, origin, auth.WalletPublicKey, auth.AppID, auth.AppPublicKey)
+	identityKey := connect.PaymentIdentityKey(network, auth.AppPublicKeyHex, auth.WalletPublicKey)
 	key := connect.PaymentRequestKey(identityKey, clientRequestID)
 	rec, ok := d.connectMgr.Payments().Get(key)
 	if !ok {
 		return nil, errDetail(kmapi.ErrNotFound, "付款不存在")
 	}
 	// 身份隔离：记录必须属于当前授权身份，否则视为不存在。
-	if rec.Origin != origin || !strings.EqualFold(rec.OwnerPublicKeyHex, auth.WalletPublicKey) || rec.Network != network || rec.AppID != auth.AppID || !strings.EqualFold(rec.AppPublicKey, auth.AppPublicKey) {
+	if rec.AppPublicKeyHex != auth.AppPublicKeyHex || !strings.EqualFold(rec.OwnerPublicKeyHex, auth.WalletPublicKey) || rec.Network != network {
 		return nil, errDetail(kmapi.ErrNotFound, "付款不存在")
 	}
 	return paymentResultFromRecord(rec), nil

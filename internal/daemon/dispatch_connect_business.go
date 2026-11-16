@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/hex"
-	"strings"
 
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/connectenvelope"
@@ -24,8 +23,9 @@ func (d *Daemon) execIdentityGet(ctx context.Context, a connect.Approval) (any, 
 	if perr != nil {
 		return nil, nil, perr
 	}
-	if !strings.EqualFold(auth.AppPublicKey, a.AppPublicKey) || auth.AppID != a.AppID || !strings.EqualFold(auth.IdentityDigest, a.IdentityDigest) {
-		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
+	// 执行仍核对创建时的具体授权与连接；同一 origin 共享数据不代表新连接可接管旧待办。
+	if auth.Origin != a.Origin {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "来源与原授权不一致")
 	}
 	params := a.Params
 	aud, _ := params["aud"].(string)
@@ -97,8 +97,9 @@ func (d *Daemon) execIntentSign(ctx context.Context, a connect.Approval) (any, m
 	if perr != nil {
 		return nil, nil, perr
 	}
-	if !strings.EqualFold(auth.AppPublicKey, a.AppPublicKey) || auth.AppID != a.AppID || !strings.EqualFold(auth.IdentityDigest, a.IdentityDigest) {
-		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
+	// 执行仍核对创建时的具体授权与连接；同一 origin 共享数据不代表新连接可接管旧待办。
+	if auth.Origin != a.Origin {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "来源与原授权不一致")
 	}
 	params := a.Params
 	aud, _ := params["aud"].(string)
@@ -157,8 +158,8 @@ func (d *Daemon) execCipherApproved(ctx context.Context, a connect.Approval) (an
 	if perr != nil {
 		return nil, nil, perr
 	}
-	if !strings.EqualFold(auth.AppPublicKey, a.AppPublicKey) || auth.AppID != a.AppID {
-		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
+	if auth.Origin != a.Origin {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "来源与原授权不一致")
 	}
 	// 同一业务执行路径：直接复用现有加解密实现，附件来自审批快照。
 	appCtx := WithAppCaller(ctx)
@@ -167,6 +168,7 @@ func (d *Daemon) execCipherApproved(ctx context.Context, a connect.Approval) (an
 	}
 	return d.execConnectCipher(appCtx, auth, a.Method, a.Params, a.ReqBinaries, a.Origin)
 }
+
 // execApprovedBusiness 为自动许可的直接执行入口：与审批认领走同一业务函数。
 // 调用方已完成授权、能力、参数与许可校验；此处不再建待办，直接执行业务。
 func (d *Daemon) execApprovedBusiness(ctx context.Context, auth connect.Auth, method string, snap map[string]any, attachments map[string][]byte, origin, requestID string) (any, map[string][]byte, *kmapi.ErrorDetail) {
@@ -176,28 +178,25 @@ func (d *Daemon) execApprovedBusiness(ctx context.Context, auth connect.Auth, me
 	switch method {
 	case "identity.get":
 		tmp := connect.Approval{
-			ID: "auto-" + requestID, TransportRequestID: requestID, AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
+			ID: "auto-" + requestID, TransportRequestID: requestID,
 			Method: method, Params: snap, Origin: origin,
-			Requirements: append([]string(nil), auth.Requirements...),
-			IdentityDigest: auth.IdentityDigest, AuthorizationID: auth.AuthorizationID,
+			AuthorizationID: auth.AuthorizationID,
 		}
 		return d.execIdentityGet(withAuto(ctx), tmp)
 	case "intent.sign":
 		tmp := connect.Approval{
-			ID: "auto-" + requestID, TransportRequestID: requestID, AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
+			ID: "auto-" + requestID, TransportRequestID: requestID,
 			Method: method, Params: snap, Origin: origin,
-			Requirements: append([]string(nil), auth.Requirements...),
-			IdentityDigest: auth.IdentityDigest, AuthorizationID: auth.AuthorizationID,
-			ReqBinaries: copyBinaries(attachments),
+			AuthorizationID: auth.AuthorizationID,
+			ReqBinaries:     copyBinaries(attachments),
 		}
 		return d.execIntentSign(withAuto(ctx), tmp)
 	case "cipher.encrypt", "cipher.decrypt":
 		tmp := connect.Approval{
-			ID: "auto-" + requestID, TransportRequestID: requestID, AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
+			ID: "auto-" + requestID, TransportRequestID: requestID,
 			Method: method, Params: snap, Origin: origin,
-			Requirements: append([]string(nil), auth.Requirements...),
-			IdentityDigest: auth.IdentityDigest, AuthorizationID: auth.AuthorizationID,
-			ReqBinaries: copyBinaries(attachments),
+			AuthorizationID: auth.AuthorizationID,
+			ReqBinaries:     copyBinaries(attachments),
 		}
 		return d.execCipherApproved(withAuto(ctx), tmp)
 	case "payment.pay":

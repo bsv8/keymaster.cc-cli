@@ -111,65 +111,65 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 	switch method {
 	case kmapi.MethodStatusGet:
 		res, perr := d.opStatus(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodInfoGet:
 		res, perr := d.opInfo(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodWalletUnlock:
 		var p kmapi.UnlockRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opUnlock(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodWalletCreate:
 		var p kmapi.WalletCreateRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opWalletCreate(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodWalletImport:
 		var p kmapi.WalletImportRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opWalletImport(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodRootsList:
 		res, perr := d.opRootsList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodRootsAdd:
 		var p kmapi.AddRootRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opRootsAdd(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodRootsRemove:
 		var p kmapi.RootRemoveRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opRootsRemove(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodRootsSetDefault:
 		var p kmapi.SetDefaultRootRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opRootsSetDefault(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodFilesList:
 		res, perr := d.opFilesList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodFilesBrowse:
 		var p kmapi.BrowseRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opBrowse(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCatalogRefresh:
 		var p kmapi.CatalogRefreshRequest
 		if len(params) > 0 {
@@ -178,109 +178,109 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 			}
 		}
 		res, perr := d.opCatalogRefresh(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodSettingsGet:
 		res, perr := d.opSettingsGet(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodSettingsUpdate:
 		var p kmapi.SettingsUpdate
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opSettingsUpdate(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodSettingsReset:
 		var p kmapi.RevisionRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opSettingsReset(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCollectorStatus:
 		res, perr := d.opCollectorStatus(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCollectorHistory:
 		res, perr := d.opCollectorHistory(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCollectorDescribe:
 		var p kmapi.CollectorDescriptionRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opCollectorDescribe(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCollectorConfig:
 		var p kmapi.CollectorConfigRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opCollectorConfig(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCollectorFlush:
 		res, perr := d.opCollectorFlush(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodCollectorRetry:
 		res, perr := d.opCollectorRetry(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodPricingSetDefaults:
 		var p kmapi.PricingDefaultsRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opPricingSetDefaults(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodPricingBatch:
 		var p kmapi.PricingBatchRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opPricingBatch(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodPricingSetFile:
 		var p kmapi.PricingFileRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opPricingSetFile(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodPricingClearFile:
 		var p kmapi.PricingClearRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opPricingClearFile(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodTasksList:
 		res, perr := d.opTasksList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodTasksCreate:
 		var p kmapi.CreateTaskRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opTasksCreate(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodTasksGet:
 		var p kmapi.TaskGetRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opTasksGet(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodTasksCancel:
 		var p kmapi.TaskCancelRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opTasksCancel(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodTasksSubscribe:
 		var p kmapi.TaskSubscribeRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opTasksGet(ctx, kmapi.TaskGetRequest{SeedHashHex: p.SeedHashHex})
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodEventsSubscribe:
 		var p kmapi.EventsSubscribeRequest
 		if len(params) > 0 {
@@ -289,30 +289,30 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 			}
 		}
 		res, perr := d.opEventsSubscribe(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectApprovalsList:
 		res, perr := d.opConnectApprovalsList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectBindingsList:
 		res, perr := d.opConnectBindingsList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectAuthList:
 		res, perr := d.opConnectAuthList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectAuthRevoke:
 		var p kmapi.ConnectAuthRevokeRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectAuthRevoke(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectApprovalsDecide:
 		var p kmapi.ConnectApprovalDecideRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectApprovalsDecide(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectRequestExec:
 		return d.opConnectExec(ctx, params, attachments)
 	case kmapi.MethodConnectLaunchIssue:
@@ -321,38 +321,94 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectLaunchIssue(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectPermissionsList:
 		var p kmapi.ConnectPermissionsListRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectPermissionsList(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectPermissionsRevoke:
 		var p kmapi.ConnectPermissionsRevokeRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectPermissionsRevoke(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectHistoryList:
 		var p kmapi.ConnectHistoryListRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectHistoryList(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectAppsList:
 		res, perr := d.opConnectAppsList(ctx)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodConnectConnectionPause:
 		var p kmapi.ConnectConnectionPauseRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opConnectConnectionPause(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
+	case kmapi.MethodConnectDirectoryList:
+		res, perr := d.opConnectDirectoryList(ctx)
+		return res, nil, perr
+	case kmapi.MethodConnectDirectoryAdd:
+		var p kmapi.ConnectDirectoryAddRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectDirectoryAdd(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDirectoryRemove:
+		var p kmapi.ConnectDirectoryRemoveRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectDirectoryRemove(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDirectoryFavorite:
+		var p kmapi.ConnectDirectoryFavoriteRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+		}
+		res, perr := d.opConnectDirectoryFavorite(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDirectorySelect:
+		var p kmapi.ConnectDirectorySelectRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, err.Error())
+		}
+		res, perr := d.opConnectDirectorySelect(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDeploymentInstall:
+		var p kmapi.ConnectDeploymentInstallRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, err.Error())
+		}
+		res, perr := d.opConnectDeploymentInstall(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDeploymentStart:
+		var p kmapi.ConnectDeploymentStartRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, err.Error())
+		}
+		res, perr := d.opConnectDeploymentStart(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDeploymentStop:
+		var p kmapi.ConnectDeploymentStopRequest
+		if err := decodeStrict(params, &p); err != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, err.Error())
+		}
+		res, perr := d.opConnectDeploymentStop(ctx, p)
+		return res, nil, perr
+	case kmapi.MethodConnectDeploymentList:
+		res, perr := d.opConnectDeploymentList(ctx)
+		return res, nil, perr
+
 	case kmapi.MethodStoragePut:
 		var p kmapi.StoragePutRequest
 		if err := decodeStrict(params, &p); err != nil {
@@ -371,14 +427,14 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opStorageList(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	case kmapi.MethodStorageDelete:
 		var p kmapi.StorageDeleteRequest
 		if err := decodeStrict(params, &p); err != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
 		}
 		res, perr := d.opStorageDelete(ctx, p)
-	return res, nil, perr
+		return res, nil, perr
 	default:
 		return nil, nil, errDetail(kmapi.ErrBadRequest, "未知方法")
 	}

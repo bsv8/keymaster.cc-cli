@@ -20,13 +20,17 @@ const (
 )
 
 // ScopeFor 构造路径绑定的加密 scope：storage.encrypted-file.v1|<sha256(root+path)>。
-// root 为 <network>/<wallet>/<app>/files/，与 cc 的 connectS3Root 一致。
+// root 为 <network>/<walletLower>/<appPublicKeyHex>/files/。
+// app 参数必须来自已验证授权，不接受 origin 或请求自报身份。
 func ScopeFor(network, wallet, app, path string) (string, error) {
 	clean := strings.TrimPrefix(strings.TrimSpace(path), "/")
 	if clean == "" {
 		return "", fmt.Errorf("路径非法")
 	}
-	root := network + "/" + strings.ToLower(wallet) + "/" + app + "/files/"
+	root, err := StorageRoot(network, wallet, app)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256([]byte(root + clean))
 	return "storage.encrypted-file.v1|" + hex.EncodeToString(sum[:]), nil
 }

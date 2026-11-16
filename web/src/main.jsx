@@ -5,7 +5,7 @@ import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
 import { initConnectReceiver, issueLaunchToken, registerLaunchedApp, teardownLaunchedApp, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
-import { GlobalApproval, AppCenter } from './approvalCenter.jsx';
+import { GlobalApproval, AppCenter, DirectoryCenter } from './approvalCenter.jsx';
 
 const TABS = [
   { id: 'overview', label: '概览' },
@@ -14,6 +14,7 @@ const TABS = [
   { id: 'files', label: '文件' },
   { id: 'collect', label: '采集' },
   { id: 'settings', label: '设置' },
+  { id: 'apps', label: '应用市场' },
   { id: 'connect', label: '连接' },
 ];
 
@@ -431,25 +432,32 @@ function ConnectPanel() {
   React.useEffect(() => () => {
     if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
   }, []);
-  const demoOriginOf = (value) => {
+  const parseLaunchInput = (value) => {
     const trimmed = String(value || '').trim();
     const u = new URL(trimmed);
-    if (!['http:', 'https:'].includes(u.protocol) || !u.host) throw new Error('应用地址必须为精确 HTTP(S) origin');
-    return u.origin;
+    if (!['http:', 'https:'].includes(u.protocol) || !u.host) throw new Error('应用地址必须为 HTTP(S) URL');
+    return { origin: u.origin, href: u.href };
+  };
+  const withLaunchParams = (href, token, mode) => {
+    const u = new URL(href);
+    u.searchParams.set('launchToken', token);
+    u.searchParams.set('sessionWindowOrigin', window.location.origin);
+    u.searchParams.set('mode', mode === 'iframe' ? 'iframe' : 'appView');
+    return u.href;
   };
   // 窗口方式在点击时预留窗口，避免异步签发后被拦截；签发失败则关闭预留窗口。
+  // 保留完整 URL 的路径/查询/片段，不截成 origin 根路径。
   const launchWindow = async () => {
     setLaunchErr('');
     let child = null;
     try {
-      const origin = demoOriginOf(demoUrl);
+      const { origin, href } = parseLaunchInput(demoUrl);
       setLaunchBusy(true);
       child = window.open('about:blank', '_blank');
       if (!child) throw new Error('应用窗口被拦截');
       const issued = await issueLaunchToken(origin);
       if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
-      const base = origin.replace(/\/+$/, '');
-      const url = `${base}/?mode=appView&launchToken=${encodeURIComponent(issued.launchToken)}&sessionWindowOrigin=${encodeURIComponent(window.location.origin)}`;
+      const url = withLaunchParams(href, issued.launchToken, 'appView');
       const handle = registerLaunchedApp({ origin, getSource: () => child, kind: 'window', child });
       try {
         child.location.href = url;
@@ -468,15 +476,14 @@ function ConnectPanel() {
   const launchIframe = async () => {
     setLaunchErr('');
     try {
-      const origin = demoOriginOf(demoUrl);
+      const { origin, href } = parseLaunchInput(demoUrl);
       setLaunchBusy(true);
       const issued = await issueLaunchToken(origin);
       if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
       if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
-      const base = origin.replace(/\/+$/, '');
       const handle = registerLaunchedApp({ origin, getSource: () => (iframeRef.current ? iframeRef.current.contentWindow : null), kind: 'iframe' });
       iframeHandleRef.current = handle;
-      setIframeSrc(`${base}/?mode=iframe&launchToken=${encodeURIComponent(issued.launchToken)}&sessionWindowOrigin=${encodeURIComponent(window.location.origin)}`);
+      setIframeSrc(withLaunchParams(href, issued.launchToken, 'iframe'));
     } catch (e) {
       setLaunchErr(String(e?.message || e));
     } finally {
@@ -493,7 +500,7 @@ function ConnectPanel() {
         <p className="hint">钱包已初始化并解锁后才能启动；点击启动即授权，应用自动完成登录，不再弹第二次审批。</p>
         {launchErr && <p className="error" data-testid="launch-error">{launchErr}</p>}
         <div className="row">
-          <input data-testid="launch-demo-url" value={demoUrl} onChange={(e) => setDemoUrl(e.target.value)} placeholder="应用地址（精确 origin，如 http://127.0.0.1:4392）" className="mono" style={{ minWidth: 320 }} />
+          <input data-testid="launch-demo-url" value={demoUrl} onChange={(e) => setDemoUrl(e.target.value)} placeholder="应用地址（完整 URL，如 http://127.0.0.1:4392/app?x=1#y）" className="mono" style={{ minWidth: 320 }} />
           <button type="button" data-testid="launch-window" disabled={!walletReady || launchBusy} onClick={launchWindow}>窗口打开</button>
           <button type="button" data-testid="launch-iframe" disabled={!walletReady || launchBusy} onClick={launchIframe}>页内打开</button>
         </div>
@@ -540,7 +547,18 @@ function WalletInit({ onDone }) {
 }
 
 function App() {
-  const [page, setPage] = useState('overview');
+  const pageFromLocation = () => TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? 'overview';
+  const [page, updatePage] = useState(pageFromLocation);
+  const setPage = (next) => {
+    const path = next === 'overview' ? '/' : `/${next}`;
+    if (window.location.pathname !== path) window.history.pushState(null, '', path);
+    updatePage(next);
+  };
+  useEffect(() => {
+    const onPopState = () => updatePage(pageFromLocation());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
   const [theme, setTheme] = useState('system');
   const [lang, setLangUi] = useState('zh');
   const [status, setStatus] = useState(null);
@@ -872,6 +890,7 @@ function App() {
 
       {page === 'settings' && <SettingsPage onTheme={setTheme} />}
 
+      {page === 'apps' && <DirectoryCenter />}
       {page === 'connect' && <ConnectPanel />}
 
           <p className="hint">{t('主题跟随系统或设置页选择（settings 唯一来源，本页不写 localStorage）。远程访问请自备反向代理与认证。')}</p>

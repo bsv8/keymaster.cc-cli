@@ -9,20 +9,19 @@ import (
 
 // LaunchRecord 为钱包主动启动签发的一次性启动上下文。
 // 令牌只在内存有效，不落盘：后台重启后运行代际变化，旧令牌自然失效。
-// 令牌绑定签发时钱包独立解析的应用身份（发布者公钥、应用标识、身份摘要与
-// 许可范围）、来源、网络、钱包与运行代际，不赋予任意来源或任意身份使用的权限。
+// 令牌绑定已确认的目标 URL 推导的 origin、原钱包、来源、启动窗口与运行代际，
+// 保留期限、单次消费及防重放；跨 origin 不能消费。
 type LaunchRecord struct {
-	Token             string
-	Origin            string
-	Network           string
-	WalletPublicKey   string
-	Generation        string
-	AppPublicKey      string
-	AppID             string
-	AppName           string
-	IdentityDigestHex string
-	Requirements      []string
-	ExpiresAt         int64
+	URL                     string
+	DeploymentGeneration    string
+	ExpectedAppPublicKeyHex string
+	DeploymentID            string
+	Token                   string
+	Origin                  string
+	Network                 string
+	WalletPublicKey         string
+	Generation              string
+	ExpiresAt               int64
 }
 
 // LaunchStore 持有未消费的一次性启动令牌。
@@ -39,26 +38,35 @@ func NewLaunchStore() *LaunchStore {
 const LaunchTTL = 5 * time.Minute
 
 // Issue 签发一次性令牌并顺带清理已过期记录。
-// verified 为签发时钱包独立解析并经用户确认启动的应用身份；消费时 proof
-// 必须与之完全一致，不接受替换身份或扩大权限。
-func (s *LaunchStore) Issue(origin, network, walletPub, generation string, verified VerifiedIdentity, ttl time.Duration) (LaunchRecord, error) {
+func (s *LaunchStore) Issue(origin, network, walletPub, generation string, ttl time.Duration, target ...string) (LaunchRecord, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return LaunchRecord{}, err
 	}
 	now := time.Now()
+	canonical, err := CanonicalOrigin(origin)
+	if err != nil {
+		return LaunchRecord{}, err
+	}
 	rec := LaunchRecord{
-		Token:             "launch_" + hex.EncodeToString(b),
-		Origin:            origin,
-		Network:           network,
-		WalletPublicKey:   walletPub,
-		Generation:        generation,
-		AppPublicKey:      verified.PublisherPublicKey,
-		AppID:             verified.AppID,
-		AppName:           verified.AppName,
-		IdentityDigestHex: verified.IdentityDigestHex,
-		Requirements:      append([]string(nil), verified.Requirements...),
-		ExpiresAt:         now.Add(ttl).UnixMilli(),
+		Token:           "launch_" + hex.EncodeToString(b),
+		Origin:          canonical,
+		Network:         network,
+		WalletPublicKey: walletPub,
+		Generation:      generation,
+		ExpiresAt:       now.Add(ttl).UnixMilli(),
+	}
+	if len(target) > 0 {
+		rec.ExpectedAppPublicKeyHex = target[0]
+	}
+	if len(target) > 1 {
+		rec.DeploymentID = target[1]
+	}
+	if len(target) > 2 {
+		rec.URL = target[2]
+	}
+	if len(target) > 3 {
+		rec.DeploymentGeneration = target[3]
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,4 +89,15 @@ func (s *LaunchStore) Consume(token string) (LaunchRecord, bool) {
 		delete(s.records, token)
 	}
 	return rec, ok
+}
+
+// InvalidateDeployment 只撤销该监听代际的令牌，不影响端口复用后的新实例。
+func (s *LaunchStore) InvalidateDeployment(origin, deploymentID, generation string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, record := range s.records {
+		if record.Origin == origin && record.DeploymentID == deploymentID && record.DeploymentGeneration == generation {
+			delete(s.records, token)
+		}
+	}
 }

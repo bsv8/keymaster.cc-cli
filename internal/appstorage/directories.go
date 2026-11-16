@@ -27,6 +27,9 @@ func (s *Store) DeleteDirectory(network, wallet, app, path string) error {
 	if err != nil {
 		return err
 	}
+	if network, wallet, app, err = canonicalApp(network, wallet, app); err != nil {
+		return err
+	}
 	marker := clean + DirectoryMarkerSuffix
 	prefix := clean + "/"
 	if err := s.Begin(); err != nil {
@@ -37,7 +40,7 @@ func (s *Store) DeleteDirectory(network, wallet, app, path string) error {
 	defer s.writeMu.Unlock()
 
 	// 与 List 共用字面前缀规则；LIKE 的 _ / % 会误匹配合法目录名。
-	rows, err := s.db.Query(`SELECT path FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND substr(path,1,length(?))=? LIMIT ?`,
+	rows, err := s.db.Query(`SELECT path FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND substr(path,1,length(?))=? LIMIT ?`,
 		network, wallet, app, prefix, prefix, MaxListLimit+1)
 	if err != nil {
 		return err
@@ -66,7 +69,7 @@ func (s *Store) DeleteDirectory(network, wallet, app, path string) error {
 	}
 	rows.Close()
 
-	res, err := s.db.Exec(`DELETE FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path=?`,
+	res, err := s.db.Exec(`DELETE FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path=?`,
 		network, wallet, app, marker)
 	if err != nil {
 		return err

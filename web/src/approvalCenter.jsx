@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getClient } from './client.js';
 import { watchTopics } from './subscribe.js';
-import { decideApproval, pumpPendingApprovals } from './connect.js';
+import { decideApproval, pumpPendingApprovals, issueLaunchToken, registerLaunchedApp, teardownLaunchedApp } from './connect.js';
 import { interpretLockingScript } from 'keymaster-connect/script';
 import { t } from './i18n.js';
 
@@ -80,9 +80,8 @@ function ApprovalCard({ approval, wallet, onDecide, disabled }) {
   const params = approval.params || {};
   return (
     <div className="card" data-testid={`approval-${approval.id}`} style={{ marginBottom: 8 }}>
-      <p className="mono">{approval.method} · {approval.appId} · {approval.origin}</p>
-      <p className="mono">{t('应用')} {approval.appName || '—'} · {t('来源')} {approval.origin} · {t('发行人')} {(approval.appPublicKey || '').slice(0, 12)}…</p>
-      <p className="mono">{t('能力声明')} {(approval.requirements || []).join(', ') || '—'} · {t('钱包')} {wallet?.network || '—'} {wallet?.address ? wallet.address.slice(0, 8) + '…' : ''}</p>
+      <p className="mono">{approval.method} · {approval.origin}</p>
+      <p className="mono">{t('来源')} {approval.origin} · {t('钱包')} {wallet?.network || '—'} {wallet?.address ? wallet.address.slice(0, 8) + '…' : ''}</p>
       {approval.method === 'identity.get' && (
         <div className="mono">
           <p>{t('请求内容')} {params.text || '—'}</p>
@@ -253,7 +252,7 @@ export function GlobalApproval({ wallet, onNavigateConnect }) {
             {current ? <ApprovalCard approval={current} wallet={wallet} onDecide={decide} disabled={false} /> : <p>{currentEnded ? t('当前申请已结束或连接已失效。没有可批准的请求。') : t('当前申请已结束或连接已失效。没有可批准的请求。')}</p>}
             <p className="application-note">{t('逐项核对；新请求不会替换当前申请。批准不等于执行成功。')}</p>
             <h3>{t('其他待处理申请')}</h3>
-            {approvals.filter((a) => a.id !== current?.id).map((a) => <button type="button" className="application-queue-item" key={a.id} onClick={() => { setReviewing(a.id); setSeen(true); }}>{a.appName || a.appId} · {METHOD_LABELS[a.method] ?? a.method}</button>)}
+            {approvals.filter((a) => a.id !== current?.id).map((a) => <button type="button" className="application-queue-item" key={a.id} onClick={() => { setReviewing(a.id); setSeen(true); }}>{a.origin} · {METHOD_LABELS[a.method] ?? a.method}</button>)}
           </div>
         </dialog>
       </>, document.body)}
@@ -270,13 +269,13 @@ export function AppCenter() {
   const appList = apps.applications || [];
   const app = appList.find((a) => a.applicationKey === selected) ?? appList[0];
   const connections = (apps.connections || []).filter((c) => c.applicationKey === app?.applicationKey);
-  const appApprovals = approvals.filter((a) => a.origin === app?.origin && a.appId === app?.appId);
+  const appApprovals = approvals.filter((a) => a.origin === app?.origin);
 
   const disconnect = async () => {
     if (!app) return;
     setLocalErr('');
     try {
-      await call('connect.auth.revoke', { origin: app.origin, appPublicKey: app.appPublicKey, appId: app.appId });
+      await call('connect.auth.revoke', { appPublicKeyHex: app.applicationKey });
       await reload();
     } catch (e) {
       setLocalErr(t('撤销连接授权失败，请重试。'));
@@ -303,14 +302,14 @@ export function AppCenter() {
         <aside style={{ minWidth: 220 }}>
           {appList.length === 0 ? <p className="hint">{t('还没有应用连接。')}</p> : appList.map((a) => (
             <button key={a.applicationKey} type="button" className={a.applicationKey === app?.applicationKey ? 'ghost' : ''} style={{ display: 'block', marginBottom: 6 }} onClick={() => setSelected(a.applicationKey)}>
-              <strong>{a.appName || a.appId}</strong><br /><code className="mono">{a.origin}</code>
+              <strong>{a.origin}</strong><br /><code className="mono">{a.origin}</code>
             </button>
           ))}
         </aside>
         <article style={{ flex: 1 }}>
           {app && (
             <>
-              <div className="application-identity"><h3>{app.appName}</h3><code className="mono">{app.origin}</code><small>{app.identityDigestHex ? `${t('已验证发行人')} · ${app.appPublicKey}` : t('未提供发行人身份')}</small></div>
+              <div className="application-identity"><h3>{app.origin}</h3><code className="mono">{app.origin}</code><small>{t('应用身份统一使用真实来源')}</small></div>
               <div className="application-tabs">
                 {[['activity', t('活动')], ['sessions', t('会话')], ['settings', t('设置')], ['history', t('日志历史')]].map(([v, label]) => (
                   <button key={v} type="button" className={tab === v ? 'selected' : ''} onClick={() => setTab(v)}>{label}</button>
@@ -319,7 +318,7 @@ export function AppCenter() {
               {tab === 'settings' && (
                 <>
                   <button type="button" data-testid="disconnect-app" onClick={disconnect}>{t('断开应用连接')}</button>
-                  <p className="application-note">{t('许可属于应用，不属于某次会话。按发行人 + App 编号 + 精确来源隔离，刷新和重连后仍有效；不同操作互不通用。')}</p>
+                  <p className="application-note">{t('许可属于来源，不属于某次会话。按精确来源隔离，刷新和重连后仍有效；不同操作互不通用。')}</p>
                   {err.includes('permissions') && <p className="error" role="alert">{t('许可读取失败，不能把未知状态当成未开启。')}</p>}
                   {['identity.get', 'intent.sign', 'cipher.encrypt', 'cipher.decrypt', 'payment.pay'].map((m) => {
                     const entry = permissions.find((p) => p.applicationKey === app.applicationKey);
@@ -363,6 +362,147 @@ export function AppCenter() {
           )}
         </article>
       </div>
+    </section>
+  );
+}
+
+export function DirectoryCenter() {
+  const [entries, setEntries] = React.useState([]);
+  const [deployments,setDeployments]=React.useState([]);
+  const [pending,setPending] = React.useState([]);
+  const [seed,setSeed] = React.useState('');
+  const [adding,setAdding] = React.useState(false);
+  const [url, setUrl] = React.useState('');
+  const [name, setName] = React.useState('');
+  const [err, setErr] = React.useState('');
+  const [marketError, setMarketError] = React.useState('');
+  const [launchErr, setLaunchErr] = React.useState('');
+  const [iframeSrc, setIframeSrc] = React.useState('');
+  const iframeRef = React.useRef(null);
+  const iframeHandleRef = React.useRef(null);
+  const load = React.useCallback(async () => {
+    try {
+      const res = await call('connect.directory.list', {});
+      setEntries(res.entries || []);
+      setPending(res.pending || []);
+      setMarketError(res.marketError || '');
+      const deployed=await call('connect.deployment.list',{});setDeployments(deployed.deployments);
+    } catch (e) { setErr(String(e?.message || e)); }
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => () => {
+    if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
+  }, []);
+  // 从目录直接启动：从完整 entry.url 推导 origin 签发令牌，在原 URL 上经 URL API
+  // 加入启动参数，保留原路径、查询和片段；截成 origin 再开根路径为 bug。
+  const buildLaunchUrl = (entryUrl, token, mode) => {
+    const u = new URL(entryUrl);
+    u.searchParams.set('launchToken', token);
+    u.searchParams.set('sessionWindowOrigin', window.location.origin);
+    u.searchParams.set('mode', mode === 'iframe' ? 'iframe' : 'appView');
+    return u.href;
+  };
+  const originOf = (entryUrl) => {
+    const u = new URL(String(entryUrl || '').trim());
+    if (!['http:', 'https:'].includes(u.protocol) || !u.host) throw new Error('应用地址必须为 HTTP(S) URL');
+    return u.origin;
+  };
+  // Files 下载与验证只调用后台已声明的方法；商店不读取或写入部署文件。
+  const prepareEntry = async entry => {
+    const selected = entry.selected || (entry.url ? {url:entry.url} : entry.urls?.length ? {url:entry.urls[0].url} : {indexseedhashhex:entry.indexseedhashhex||entry.files?.[0]?.indexseedhashhex});
+    if (selected.url) return {url:selected.url,expectedAppPublicKeyHex:entry.appPublicKeyHex};
+    if (!selected.indexseedhashhex) throw new Error('请选择有效入口');
+    const list = await call('connect.deployment.list',{});
+    let installed = list.deployments.find(d=>d.indexseedhashhex===selected.indexseedhashhex);
+    if (!installed) installed = await call('connect.deployment.install',{indexseedhashhex:selected.indexseedhashhex});
+    if (entry.appPublicKeyHex && installed.appPublicKeyHex!==entry.appPublicKeyHex) throw new Error('部署公钥与目录目标不一致');
+    const running = await call('connect.deployment.start',{deploymentId:installed.deploymentId});
+    await load();
+    return {url:running.url,expectedAppPublicKeyHex:running.appPublicKeyHex,deploymentId:running.deploymentId};
+  };
+  const launchWindow = async (entry) => {
+    setLaunchErr('');
+    let child = null;
+    try {
+      child = window.open('about:blank', '_blank');
+      if (!child) throw new Error('应用窗口被拦截');
+      const target = await prepareEntry(entry);
+      const origin = originOf(target.url);
+      const issued = await issueLaunchToken(origin,target);
+      if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
+      const href = buildLaunchUrl(target.url, issued.launchToken, 'appView');
+      const handle = registerLaunchedApp({ origin, getSource: () => child, kind: 'window', child });
+      try {
+        child.location.href = href;
+      } catch (e) {
+        try { teardownLaunchedApp(handle); } catch { /* ignore */ }
+        throw e;
+      }
+    } catch (e) {
+      try { if (child && !child.closed) child.close(); } catch { /* ignore */ }
+      setLaunchErr(String(e?.message || e));
+    }
+  };
+  const launchIframe = async (entry) => {
+    setLaunchErr('');
+    try {
+      const target=await prepareEntry(entry);
+      const origin=originOf(target.url);
+      const issued=await issueLaunchToken(origin,target);
+      if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
+      if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
+      const handle = registerLaunchedApp({ origin, getSource: () => (iframeRef.current ? iframeRef.current.contentWindow : null), kind: 'iframe' });
+      iframeHandleRef.current = handle;
+      setIframeSrc(buildLaunchUrl(target.url, issued.launchToken, 'iframe'));
+    } catch (e) {
+      setLaunchErr(String(e?.message || e));
+    }
+  };
+  const closeIframe = () => {
+    setIframeSrc('');
+    if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
+  };
+  const add = async () => {
+    setErr('');
+    try {
+      setAdding(true);
+      if(Boolean(url)===Boolean(seed))throw new Error('URL 与 seed 必须二选一');
+      await call('connect.directory.add', { ...(url?{url}:{indexseedhashhex:seed}), ...(name ? { name } : {}) });
+      setUrl(''); setSeed(''); setName(''); await load();
+    } catch (e) { setErr(String(e?.message || e)); } finally {setAdding(false)}
+  };
+  const remove = async (target) => {
+    setErr('');
+    try { await call('connect.directory.remove', target); await load(); }
+    catch (e) { setErr(String(e?.message || e)); }
+  };
+  const favorite = async (appPublicKeyHex, favorite) => {
+    setErr('');
+    try { await call('connect.directory.favorite', { appPublicKeyHex, favorite }); await load(); }
+    catch (e) { setErr(String(e?.message || e)); }
+  };
+  return (
+    <section className="card">
+      <h2>应用目录</h2>
+      <p className="hint">市场缓存 + 本地自添加 + 收藏按 App 公钥合并；收藏置顶，市场失败不阻塞本地启动。</p>
+      {err && <p className="error">{err}</p>}
+      {launchErr && <p className="error" data-testid="directory-launch-error">{launchErr}</p>}
+      {marketError && <p className="error">市场更新失败：{marketError} <button type="button" onClick={load}>重试</button></p>}
+      <div className="row">
+        <input aria-label="应用 URL" placeholder="https://app.example/start" value={url} onChange={(e) => setUrl(e.target.value)} />
+        <input aria-label="Files seed" placeholder="indexseedhashhex（与 URL 二选一）" value={seed} onChange={e=>setSeed(e.target.value)} />
+        <input aria-label="展示名称" placeholder="名称（可选）" value={name} onChange={(e) => setName(e.target.value)} />
+        <button type="button" disabled={adding} onClick={add}>{adding?'验证安装中…':'添加'}</button>
+        <button type="button" onClick={load}>刷新</button>
+      </div>
+      {iframeSrc && <div style={{ marginTop: 12 }}>
+        <div className="row"><span className="hint mono">{iframeSrc}</span><button type="button" className="danger" onClick={closeIframe}>关闭页内应用</button></div>
+        <iframe data-testid="directory-iframe-view" ref={iframeRef} src={iframeSrc} title="directory-launched-app" style={{ width: '100%', height: 560, border: '1px solid var(--border, #ccc)' }} />
+      </div>}
+      {entries.length===0&&pending.length===0&&<p className="hint">暂无条目。</p>}
+      {entries.map(e=>{const key=e.appPublicKeyHex;const selected=e.selected?.url?`url:${e.selected.url}`:e.selected?.indexseedhashhex?`files:${e.selected.indexseedhashhex}`:e.urls.length?`url:${e.urls[0].url}`:`files:${e.files[0].indexseedhashhex}`;const display=(e.selected?.indexseedhashhex?e.files.find(f=>f.indexseedhashhex===e.selected.indexseedhashhex):e.urls.find(u=>u.url===(e.selected?.url??e.urls[0]?.url)))?.display??e.files[0]?.display;return <div key={key} className="application-session"><div>{e.selected?.indexseedhashhex&&deployments.find(d=>d.indexseedhashhex===e.selected.indexseedhashhex&&d.status==='serving')?.iconUrl&&<img alt="" width="40" height="40" src={deployments.find(d=>d.indexseedhashhex===e.selected.indexseedhashhex&&d.status==='serving').iconUrl}/>}{<strong>{display?.name||e.name||key}</strong>}<br/><code>{key}</code><p>{e.marketListed?'市场 · ':''}{e.local?'本地 · ':''}{e.favorite?'已收藏':''}</p><select aria-label={`应用入口 ${key}`} value={selected} onChange={async event=>{try{const value=event.target.value;await call('connect.directory.select',{appPublicKeyHex:key,...value.startsWith('url:')?{url:value.slice(4)}:{indexseedhashhex:value.slice(6)}});await load()}catch(error){setErr(String(error.message||error))}}}>{e.urls.map(u=><option key={u.url} value={`url:${u.url}`}>{u.url}</option>)}{e.files.map(f=><option key={f.indexseedhashhex} value={`files:${f.indexseedhashhex}`}>Files {f.indexseedhashhex}</option>)}</select></div><div className="row"><button data-testid={`directory-launch-${key}`} onClick={()=>launchWindow(e)}>窗口打开</button><button onClick={()=>launchIframe(e)}>页内打开</button><button onClick={()=>favorite(key,!e.favorite)}>{e.favorite?'取消收藏':'收藏'}</button>{e.local&&<button onClick={()=>remove({appPublicKeyHex:key})}>删除</button>}{deployments.filter(d=>d.appPublicKeyHex===key&&d.status==='serving').map(d=><button key={d.deploymentId} onClick={async()=>{try{await call('connect.deployment.stop',{deploymentId:d.deploymentId});await load()}catch(error){setErr(String(error.message||error))}}}>停止 {d.indexseedhashhex.slice(0,12)}</button>)}</div></div>})}
+      {pending.map(p=><div className="application-session" key={p.pendingId}><div><strong>{p.name||p.url||p.indexseedhashhex}</strong><p>待验证：{p.url||p.indexseedhashhex}</p>{p.error&&<p className="error">{p.error}</p>}</div><div className="row"><button data-testid={`directory-launch-${p.pendingId}`} onClick={()=>launchWindow(p)}>打开并验证</button><button onClick={()=>remove({pendingId:p.pendingId})}>删除</button></div></div>)}
+
     </section>
   );
 }

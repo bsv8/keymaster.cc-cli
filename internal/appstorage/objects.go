@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bsv8/keymaster.cc-cli/walletcrypto"
 )
 
 // Object 为 App 对象行。
@@ -55,11 +57,28 @@ func validatePath(p string) (string, error) {
 	return strings.Join(parts, "/"), nil
 }
 
+func canonicalApp(network, wallet, app string) (string, string, string, error) {
+	if network != "main" && network != "test" {
+		return "", "", "", fmt.Errorf("%w: 网络非法", ErrInvalidPath)
+	}
+	if wallet == "" || app == "" {
+		return "", "", "", fmt.Errorf("%w: 命名空间非法", ErrInvalidPath)
+	}
+	canonical, err := walletcrypto.ValidateAppPublicKeyHex(app)
+	if err != nil {
+		return "", "", "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
+	}
+	return network, wallet, canonical, nil
+}
+
 // Put 原子提交内容、MIME、revision 和时间；条件创建走唯一约束+事务，不先读后写。
 // ifNoneMatch 为 "*" 时仅当不存在才创建；revisionMismatch（期望 revision）用于条件更新，0 表示不检查。
 func (s *Store) Put(network, wallet, app, path string, content []byte, mime string, ifNoneMatch string, expectRevision int64) (rev int64, updatedAt int64, err error) {
 	clean, err := validatePath(path)
 	if err != nil {
+		return 0, 0, err
+	}
+	if network, wallet, app, err = canonicalApp(network, wallet, app); err != nil {
 		return 0, 0, err
 	}
 	if content == nil {
@@ -87,7 +106,7 @@ func (s *Store) Put(network, wallet, app, path string, content []byte, mime stri
 	defer tx.Rollback()
 	var curRev int64
 	var exists bool
-	err = tx.QueryRow(`SELECT revision FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path=?`, network, wallet, app, clean).Scan(&curRev)
+	err = tx.QueryRow(`SELECT revision FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path=?`, network, wallet, app, clean).Scan(&curRev)
 	if err == nil {
 		exists = true
 	} else if errors.Is(err, sql.ErrNoRows) {
@@ -115,10 +134,10 @@ func (s *Store) Put(network, wallet, app, path string, content []byte, mime stri
 		return 0, 0, err
 	}
 	if exists {
-		_, err = tx.Exec(`UPDATE objects SET content=?, mime=?, revision=?, updated_at=? WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path=?`,
+		_, err = tx.Exec(`UPDATE objects SET content=?, mime=?, revision=?, updated_at=? WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path=?`,
 			content, mime, nextRev, now, network, wallet, app, clean)
 	} else {
-		_, err = tx.Exec(`INSERT INTO objects(network,wallet_pubkey,app_pubkey,path,content,mime,revision,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		_, err = tx.Exec(`INSERT INTO objects(network,wallet_pubkey,app_public_key,path,content,mime,revision,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
 			network, wallet, app, clean, content, mime, nextRev, now)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY") {
@@ -145,13 +164,16 @@ func (s *Store) Get(network, wallet, app, path string, offset, length int64) (Ob
 	if err != nil {
 		return Object{}, err
 	}
+	if network, wallet, app, err = canonicalApp(network, wallet, app); err != nil {
+		return Object{}, err
+	}
 	if err := s.Begin(); err != nil {
 		return Object{}, err
 	}
 	defer s.End()
 	var o Object
 	var content []byte
-	err = s.db.QueryRow(`SELECT network,wallet_pubkey,app_pubkey,path,content,mime,revision,updated_at,length(content) FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path=?`,
+	err = s.db.QueryRow(`SELECT network,wallet_pubkey,app_public_key,path,content,mime,revision,updated_at,length(content) FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path=?`,
 		network, wallet, app, clean).Scan(&o.Network, &o.Wallet, &o.App, &o.Path, &content, &o.MIME, &o.Revision, &o.Updated, &o.Total)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Object{}, ErrNotFound
@@ -179,13 +201,16 @@ func (s *Store) Delete(network, wallet, app, path string) error {
 	if err != nil {
 		return err
 	}
+	if network, wallet, app, err = canonicalApp(network, wallet, app); err != nil {
+		return err
+	}
 	if err := s.Begin(); err != nil {
 		return err
 	}
 	defer s.End()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	res, err := s.db.Exec(`DELETE FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path=?`, network, wallet, app, clean)
+	res, err := s.db.Exec(`DELETE FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path=?`, network, wallet, app, clean)
 	if err != nil {
 		return err
 	}
@@ -217,6 +242,9 @@ type Entry struct {
 // （与 Connect SDK STORAGE_DEFAULT_LIST_LIMIT 一致，跨语言向量锁定），
 // 上限 MaxListLimit（STORAGE_MAX_LIST_LIMIT）。
 func (s *Store) List(network, wallet, app, prefix, cursor string, limit int) (entries []Entry, nextCursor string, err error) {
+	if network, wallet, app, err = canonicalApp(network, wallet, app); err != nil {
+		return nil, "", err
+	}
 	prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
 	if limit <= 0 {
 		limit = 200
@@ -239,10 +267,10 @@ func (s *Store) List(network, wallet, app, prefix, cursor string, limit int) (en
 		}
 	}
 	// 前缀用 substr 按字面、区分大小写比较；LIKE 会把 _ / % 当通配符。
-	query := `SELECT path,mime,revision,length(content),updated_at FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path>? ORDER BY path LIMIT ?`
+	query := `SELECT path,mime,revision,length(content),updated_at FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path>? ORDER BY path LIMIT ?`
 	args := []any{network, wallet, app, cursor, limit + 1}
 	if prefix != "" {
-		query = `SELECT path,mime,revision,length(content),updated_at FROM objects WHERE network=? AND wallet_pubkey=? AND app_pubkey=? AND path>? AND substr(path,1,length(?))=? ORDER BY path LIMIT ?`
+		query = `SELECT path,mime,revision,length(content),updated_at FROM objects WHERE network=? AND wallet_pubkey=? AND app_public_key=? AND path>? AND substr(path,1,length(?))=? ORDER BY path LIMIT ?`
 		args = []any{network, wallet, app, cursor, prefix, prefix, limit + 1}
 	}
 	rows, err := s.db.Query(query, args...)

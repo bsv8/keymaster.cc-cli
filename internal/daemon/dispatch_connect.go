@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -27,30 +26,25 @@ func isEstablishingConnectMethod(method string) bool {
 	}
 }
 
-// connectRequirement 返回执行业务方法所需的 App 许可；ok=false 表示该方法
-// 在本后台未实现（明确拒绝，不静默）。
+// connectRequirement 返回业务方法是否可用；ok=false 表示该方法
+// 在本后台未实现（明确拒绝，不静默）。能力声明已删除，不做 requirements 门禁。
 func connectRequirement(method string) (requirement string, ok bool) {
 	switch {
 	case strings.HasPrefix(method, "storage."):
-		return "storage", true
+		return "", true
 	case method == "cipher.encrypt" || method == "cipher.decrypt":
-		return "private-key", true
+		return "", true
 	case method == "identity.get" || method == "intent.sign":
-		return "private-key", true
+		return "", true
 	case method == "payment.pay" || method == "payment.status":
-		return "private-key", true
+		return "", true
+	case method == "channel.publish" || method == "channel.subscription_set":
+		return "", true
+	case method == "msfile.stat" || method == "msfile.seed.read" || method == "msfile.block.read":
+		return "", true
 	default:
 		return "", false
 	}
-}
-
-func hasRequirement(auth connect.Auth, req string) bool {
-	for _, r := range auth.Requirements {
-		if r == req {
-			return true
-		}
-	}
-	return false
 }
 
 func (d *Daemon) opConnectApprovalsList(ctx context.Context) (any, *kmapi.ErrorDetail) {
@@ -84,9 +78,9 @@ func (d *Daemon) opConnectBindingsList(ctx context.Context) (any, *kmapi.ErrorDe
 			continue
 		}
 		out = append(out, map[string]any{
-			"id": a.AuthorizationID, "appPublicKey": a.AppPublicKey, "appId": a.AppID, "appName": a.AppName,
+			"id":     a.AuthorizationID,
 			"origin": a.Origin, "network": a.Network, "generation": a.Generation,
-			"applicationKey": connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID),
+			"applicationKey": connect.ApplicationKey(a.AppPublicKeyHex),
 		})
 	}
 	return map[string]any{"bindings": out}, nil
@@ -104,10 +98,9 @@ func (d *Daemon) opConnectAuthList(ctx context.Context) (any, *kmapi.ErrorDetail
 			continue
 		}
 		out = append(out, map[string]any{
-			"appPublicKey": a.AppPublicKey, "appId": a.AppID, "appName": a.AppName,
 			"network": a.Network, "origin": a.Origin, "generation": a.Generation,
 			"createdAt": a.CreatedAt, "authorizationId": a.AuthorizationID,
-			"applicationKey": connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID),
+			"applicationKey": connect.ApplicationKey(a.AppPublicKeyHex),
 		})
 	}
 	return map[string]any{"authorizations": out}, nil
@@ -117,27 +110,21 @@ func (d *Daemon) opConnectAuthRevoke(ctx context.Context, p kmapi.ConnectAuthRev
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
 	}
-	if strings.TrimSpace(p.Origin) == "" || strings.TrimSpace(p.AppPublicKey) == "" || strings.TrimSpace(p.AppID) == "" {
-		return nil, errDetail(kmapi.ErrBadRequest, "origin/appPublicKey/appId 必填")
+	key := connect.ApplicationKey(p.AppPublicKeyHex)
+	if key == "" {
+		return nil, errDetail(kmapi.ErrBadRequest, "verified App public key required")
 	}
-	if !isExactHttpOrigin(strings.TrimSpace(p.Origin)) {
-		return nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
-	}
-	appKey := connect.ApplicationKey(p.Origin, p.AppPublicKey, p.AppID)
 	var revErr error
 	d.connectMgr.SerializedAuthChange(func() {
-		revErr = d.connectMgr.AuthStore().RevokeExact(p.Origin, p.AppPublicKey, p.AppID)
-		if revErr == nil && d.connectMgr.Connections() != nil {
-			d.connectMgr.Connections().CloseByApp(p.Origin, p.AppPublicKey, p.AppID)
+		revErr = d.connectMgr.AuthStore().RevokeApp(key)
+		if revErr == nil {
+			d.connectMgr.Connections().CloseByApp(key)
 		}
 	})
 	if revErr != nil {
-		return nil, errDetail(kmapi.ErrNotFound, "授权不存在")
+		return nil, errDetail(kmapi.ErrNotFound, revErr.Error())
 	}
-	d.connectMgr.History().Append(connect.HistoryEvent{
-		AppKey: appKey, Origin: p.Origin, AppID: p.AppID, AppPublicKey: p.AppPublicKey,
-		Kind: "disconnected", Detail: "disconnect-app",
-	})
+	_, _ = d.connectMgr.History().Append(connect.HistoryEvent{AppKey: key, Kind: "disconnected", Detail: "disconnect-app"})
 	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
@@ -200,7 +187,7 @@ func (d *Daemon) opConnectApprovalsDecide(ctx context.Context, p kmapi.ConnectAp
 				}
 				var gerr error
 				approval, first, gerr = d.connectMgr.Queue().DecideApproveWithGrant(p.ApprovalID, func(a connect.Approval) error {
-					if perr := d.grantAutoPermission(a.Origin, a.AppPublicKey, a.AppID, a.Method); perr != nil {
+					if perr := d.grantAutoPermission(a.AppPublicKeyHex, a.Origin, a.Method); perr != nil {
 						return fmt.Errorf("%s", perr.Message)
 					}
 					return nil
@@ -288,14 +275,19 @@ func (d *Daemon) validateConnectAuth(authorizationID, origin string) (connect.Au
 	if !ok {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
 	}
-	// 缺少必要身份字段的存量记录不能获得执行权，也不猜测归属。
-	if strings.TrimSpace(a.AppID) == "" || strings.TrimSpace(a.IdentityDigest) == "" || strings.TrimSpace(a.AppPublicKey) == "" {
-		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
-	}
 	if a.Origin != origin {
 		return connect.Auth{}, errDetail(kmapi.ErrBadRequest, "来源不匹配")
 	}
 	// 代际必须精确匹配：缺失代际的旧记录同样失效，不因字段为空而放行。
+	if connect.ApplicationKey(a.AppPublicKeyHex) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrOriginRejected, "verified App identity required")
+	}
+	if a.DeploymentID != "" {
+		r, ok := d.deployments.Identity(a.Origin)
+		if !ok || r.DeploymentID != a.DeploymentID || r.AppPublicKeyHex != a.AppPublicKeyHex || r.Generation != a.DeploymentGeneration {
+			return connect.Auth{}, errDetail(kmapi.ErrNotFound, "deployment no longer active")
+		}
+	}
 	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
 	}
@@ -349,11 +341,20 @@ func (d *Daemon) lookupValidAuth(authorizationID, origin string) (connect.Auth, 
 	if !ok {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
 	}
-	if strings.TrimSpace(a.AppID) == "" || strings.TrimSpace(a.IdentityDigest) == "" || strings.TrimSpace(a.AppPublicKey) == "" {
+	if strings.TrimSpace(a.Origin) == "" || strings.TrimSpace(a.Network) == "" || strings.TrimSpace(a.WalletPublicKey) == "" {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
 	}
 	if a.Origin != origin {
 		return connect.Auth{}, errDetail(kmapi.ErrBadRequest, "来源不匹配")
+	}
+	if connect.ApplicationKey(a.AppPublicKeyHex) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrOriginRejected, "verified App identity required")
+	}
+	if a.DeploymentID != "" {
+		r, ok := d.deployments.Identity(a.Origin)
+		if !ok || r.DeploymentID != a.DeploymentID || r.AppPublicKeyHex != a.AppPublicKeyHex || r.Generation != a.DeploymentGeneration {
+			return connect.Auth{}, errDetail(kmapi.ErrNotFound, "deployment no longer active")
+		}
 	}
 	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
@@ -385,8 +386,17 @@ func (d *Daemon) recheckAuthLive(authorizationID string) (connect.Auth, *kmapi.E
 	if !ok {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
 	}
-	if strings.TrimSpace(a.AppID) == "" || strings.TrimSpace(a.IdentityDigest) == "" || strings.TrimSpace(a.AppPublicKey) == "" {
+	if a.Origin == "" || a.Network == "" || a.WalletPublicKey == "" {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权不存在或已失效")
+	}
+	if connect.ApplicationKey(a.AppPublicKeyHex) == "" {
+		return connect.Auth{}, errDetail(kmapi.ErrOriginRejected, "verified App identity required")
+	}
+	if a.DeploymentID != "" {
+		r, ok := d.deployments.Identity(a.Origin)
+		if !ok || r.DeploymentID != a.DeploymentID || r.AppPublicKeyHex != a.AppPublicKeyHex || r.Generation != a.DeploymentGeneration {
+			return connect.Auth{}, errDetail(kmapi.ErrNotFound, "deployment no longer active")
+		}
 	}
 	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
@@ -468,46 +478,32 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	if method == "connect.launch" {
 		return d.execConnectLaunch(ctx, p)
 	}
-	// 建立连接类方法：proof 必填，每次调用都需用户确认绑定。
+	// 建立连接类方法：每次调用都需用户确认绑定，不做静默自动执行。
+	// 可信来源属于 Receiver 上下文；应用不得自报 origin 冒用他人权限，
+	// 后台继续核对来源与原授权一致。
 	// 例外：Receiver 已把持有授权的 reconnect 心跳转成 resume；此时只复核
-	// 既有授权，不重复弹审批，也不改变授权内容。刷新恢复可附带当前入口 proof，
-	// 由后台核对与原授权绑定的应用身份一致，不替换身份或扩大许可。
+	// 既有授权，不重复弹审批，也不改变授权内容。
 	if isEstablishingConnectMethod(method) {
-		if method == "connect.resume" && p.AuthorizationID != nil && *p.AuthorizationID != "" {
-			if strings.TrimSpace(origin) == "" {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 缺失")
-			}
-			var proofRaw json.RawMessage
-			if p.Proof != nil {
-				b, _ := json.Marshal(p.Proof)
-				proofRaw = b
-			}
-			return d.resumeConnect(*p.AuthorizationID, origin, proofRaw)
-		}
-		var proofRaw json.RawMessage
-		if p.Proof != nil {
-			b, _ := json.Marshal(p.Proof)
-			proofRaw = b
-		}
-		if len(proofRaw) == 0 {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "proof 必填")
-		}
-		verified, err := connect.VerifyProof(proofRaw)
-		if err != nil {
-			return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
-		}
 		if strings.TrimSpace(origin) == "" {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 缺失")
+		}
+		canonical, cerr := connect.CanonicalOrigin(strings.TrimSpace(origin))
+		if cerr != nil {
+			return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
+		}
+		if method == "connect.resume" && p.AuthorizationID != nil && *p.AuthorizationID != "" {
+			return d.resumeConnect(*p.AuthorizationID, canonical)
 		}
 		paramsMap := map[string]any{}
 		if p.Params != nil {
 			b, _ := json.Marshal(p.Params)
 			_ = json.Unmarshal(b, &paramsMap)
 		}
-		a := d.connectMgr.Queue().Create(
-			verified.PublisherPublicKey, verified.AppID, verified.AppName,
-			method, paramsMap, origin, verified.Requirements, verified.IdentityDigestHex,
-		)
+		appHex, deploymentID, identityErr := d.verifiedConnectIdentity(paramsMap, canonical)
+		if identityErr != nil {
+			return nil, nil, errDetail(kmapi.ErrOriginRejected, identityErr.Error())
+		}
+		a := d.connectMgr.Queue().CreateFull("", "", method, paramsMap, canonical, nil, appHex, deploymentID, d.deploymentGeneration(canonical))
 		d.publishConnect()
 		return map[string]any{"approvalId": a.ID, "status": "pending"}, nil, nil
 	}
@@ -533,9 +529,9 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		if logoutErr != nil {
 			return nil, nil, errDetail(kmapi.ErrNotFound, "授权不存在")
 		}
-		appKey := connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID)
+		appKey := connect.ApplicationKey(a.AppPublicKeyHex)
 		_, _ = d.connectMgr.History().Append(connect.HistoryEvent{
-			AppKey: appKey, Origin: a.Origin, AppID: a.AppID, AppPublicKey: a.AppPublicKey,
+			AppKey: appKey, Origin: a.Origin,
 			Kind: "disconnected", Detail: "logout",
 		})
 		d.publishConnect()
@@ -551,15 +547,11 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	if perr != nil {
 		return nil, nil, perr
 	}
-	req, supported := connectRequirement(method)
+	_, supported := connectRequirement(method)
 	if !supported {
 		return nil, nil, errDetail(kmapi.ErrInternal, "未实现")
 	}
-	if req != "" && !hasRequirement(auth, req) {
-		return nil, nil, errDetail(kmapi.ErrForbidden, "无 "+req+" 操作许可")
-	}
 	// 统一流程：校验参数生成不可变快照 → 查自动许可 → 无许可建待办，有许可走同一业务路径。
-	// 能力声明（Requirements）仅限制 App 可请求范围，不等同于自动许可。
 	paramsSnap := d.paramsMapOf(p)
 	transportReqID := ""
 	if p.RequestID != nil {
@@ -570,7 +562,7 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		if verr != nil {
 			return nil, nil, verr
 		}
-		hasAuto, aerr := d.hasAutoPermission(origin, auth.AppPublicKey, auth.AppID, method)
+		hasAuto, aerr := d.hasAutoPermission(auth.AppPublicKeyHex, method)
 		if aerr != nil {
 			return nil, nil, aerr
 		}
@@ -580,14 +572,14 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 			res, bins, perr := d.execApprovedBusiness(autoCtx, auth, method, snap, attachments, origin, transportReqID)
 			if perr != nil {
 				d.recordApprovalHistory(connect.Approval{
-					ID: "", AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
-					Method: method, Origin: origin,
+					ID:     "",
+					Method: method, Origin: origin, AppPublicKeyHex: auth.AppPublicKeyHex,
 				}, "failed", true, perr.Code)
 				return nil, nil, perr
 			}
 			d.recordApprovalHistory(connect.Approval{
-				ID: "", AppPublicKey: auth.AppPublicKey, AppID: auth.AppID, AppName: auth.AppName,
-				Method: method, Origin: origin,
+				ID:     "",
+				Method: method, Origin: origin, AppPublicKeyHex: auth.AppPublicKeyHex,
 			}, "executed", true, "")
 			// 人工与自动使用不同提醒：自动执行经 connect 事件通知前端合并提醒。
 			d.publishConnect()
@@ -605,7 +597,7 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		}
 		// 其余四类：一次装配完整待办（原授权引用、原传输请求 ID、期限、参数快照与
 		// 二进制附件同一锁内深拷贝），返回前即进入可批准队列，无“先可见后补齐”窗口。
-		appr := d.connectMgr.Queue().CreateFull(auth.AuthorizationID, transportReqID, auth.AppPublicKey, auth.AppID, auth.AppName, method, snap, origin, auth.Requirements, auth.IdentityDigest, attachments)
+		appr := d.connectMgr.Queue().CreateFull(auth.AuthorizationID, transportReqID, method, snap, origin, attachments, auth.AppPublicKeyHex, auth.DeploymentID, auth.DeploymentGeneration)
 		d.publishConnect()
 		return map[string]any{"approvalId": appr.ID, "status": "pending"}, nil, nil
 	}
@@ -627,7 +619,7 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 // resumeConnect 复核既有授权并返回与登录同形的 resume 结果。
 // 只由 Receiver 的 reconnect 心跳/刷新路径调用；授权、来源、网络、钱包、代际
 // 任一不匹配都拒绝，不静默降级为新的审批或新的授权。
-func (d *Daemon) resumeConnect(authorizationID, origin string, proofRaw json.RawMessage) (any, map[string][]byte, *kmapi.ErrorDetail) {
+func (d *Daemon) resumeConnect(authorizationID, origin string) (any, map[string][]byte, *kmapi.ErrorDetail) {
 	// resume 允许暂停态连接；查找、proof 核验与恢复在线在授权生命周期锁内
 	// 按统一顺序完成，proof 不匹配/无效时保持原暂停状态，不提前复活连接。
 	var auth connect.Auth
@@ -637,19 +629,6 @@ func (d *Daemon) resumeConnect(authorizationID, origin string, proofRaw json.Raw
 		if perr != nil {
 			resumeErr = perr
 			return
-		}
-		if len(proofRaw) > 0 {
-			verified, err := connect.VerifyProof(proofRaw)
-			if err != nil {
-				resumeErr = errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
-				return
-			}
-			if !strings.EqualFold(verified.PublisherPublicKey, a.AppPublicKey) ||
-				verified.AppID != a.AppID ||
-				!strings.EqualFold(verified.IdentityDigestHex, a.IdentityDigest) {
-				resumeErr = errDetail(kmapi.ErrBadRequest, "App 身份与原授权不一致")
-				return
-			}
 		}
 		auth = a
 		if d.connectMgr.Connections() != nil {
@@ -674,26 +653,13 @@ func (d *Daemon) resumeConnect(authorizationID, origin string, proofRaw json.Raw
 		},
 		"resolvedClaims": map[string]any{},
 		"resolvedAt":     time.Now().UnixMilli(),
-		"appIdentity": map[string]any{
-			"version": 1, "publisherPublicKeyHex": auth.AppPublicKey,
-			"appId": auth.AppID, "appName": auth.AppName, "identityDigestHex": auth.IdentityDigest,
-		},
 	}, nil, nil
 }
 
 // isExactHttpOrigin 只接受精确 HTTP(S) origin，不接受路径、查询或 opaque 来源。
 func isExactHttpOrigin(origin string) bool {
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
-	}
-	if u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return false
-	}
-	return origin == u.Scheme+"://"+u.Host
+	_, err := connect.CanonicalOrigin(origin)
+	return err == nil
 }
 
 // opConnectLaunchIssue 为钱包主动启动签发一次性令牌。
@@ -715,7 +681,8 @@ func (d *Daemon) opConnectLaunchIssue(ctx context.Context, p kmapi.ConnectLaunch
 		return nil, e
 	}
 	origin := strings.TrimSpace(p.Origin)
-	if !isExactHttpOrigin(origin) {
+	canonical, cerr := connect.CanonicalOrigin(origin)
+	if cerr != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
 	}
 	info, _, err := d.store.Snapshot()
@@ -725,27 +692,32 @@ func (d *Daemon) opConnectLaunchIssue(ctx context.Context, p kmapi.ConnectLaunch
 	d.mu.Lock()
 	walletPub := d.publicKey
 	d.mu.Unlock()
-	// 钱包主动启动即用户授权：签发前独立解析应用发布的身份证明，
-	// 绑定发布者公钥、应用标识、身份摘要与许可范围；消费时 proof 必须
-	// 与之完全一致，应用不能在消费时替换身份或扩大权限。
-	verified, err := connect.FetchAppProof(ctx, origin)
-	if err != nil {
-		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
+	// 钱包主动启动即用户授权：由钱包已确认的目标 URL 推导 origin 并绑定，
+	// 签发一次性令牌；不抓取 HTML proof、不做签名信任根与能力预检。
+	if expected := stringOrEmpty(p.ExpectedAppPublicKeyHex); expected != "" && connect.ApplicationKey(expected) == "" {
+		return nil, errDetail(kmapi.ErrBadRequest, "invalid expected App public key")
 	}
-	rec, err := d.connectMgr.LaunchStore().Issue(origin, info.BsvNetwork, walletPub, d.connectMgr.Generation(), verified, connect.LaunchTTL)
+	if target := stringOrEmpty(p.URL); target != "" {
+		_, actualOrigin, e := connect.CanonicalEntryURL(target)
+		if e != nil || actualOrigin != canonical {
+			return nil, errDetail(kmapi.ErrBadRequest, "launch URL origin mismatch")
+		}
+	}
+	if id := stringOrEmpty(p.DeploymentID); id != "" {
+		active, ok := d.deployments.Identity(canonical)
+		if !ok || active.DeploymentID != id {
+			return nil, errDetail(kmapi.ErrOriginRejected, "deployment no longer active")
+		}
+	} else if _, ok := d.deployments.Identity(canonical); ok {
+		return nil, errDetail(kmapi.ErrOriginRejected, "Files launch requires active deployment context")
+	}
+	rec, err := d.connectMgr.LaunchStore().Issue(canonical, info.BsvNetwork, walletPub, d.connectMgr.Generation(), connect.LaunchTTL, stringOrEmpty(p.ExpectedAppPublicKeyHex), stringOrEmpty(p.DeploymentID), stringOrEmpty(p.URL), d.deploymentGeneration(canonical))
 	if err != nil {
 		return nil, errDetail(kmapi.ErrInternal, "签发启动令牌失败")
 	}
 	return map[string]any{
 		"launchToken": rec.Token,
 		"expiresAt":   rec.ExpiresAt,
-		"appIdentity": map[string]any{
-			"publisherPublicKeyHex": rec.AppPublicKey,
-			"appId":                 rec.AppID,
-			"appName":               rec.AppName,
-			"identityDigestHex":     rec.IdentityDigestHex,
-			"requirements":          append([]string(nil), rec.Requirements...),
-		},
 	}, nil
 }
 
@@ -770,13 +742,9 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if p.Origin != nil {
 		origin = *p.Origin
 	}
-	var proofRaw json.RawMessage
-	if p.Proof != nil {
-		b, _ := json.Marshal(p.Proof)
-		proofRaw = b
-	}
-	if len(proofRaw) == 0 {
-		return nil, nil, errDetail(kmapi.ErrBadRequest, "proof 必填")
+	canonical, cerr := connect.CanonicalOrigin(strings.TrimSpace(origin))
+	if cerr != nil {
+		return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
 	}
 	rec, ok := d.connectMgr.LaunchStore().Consume(strings.TrimSpace(token))
 	if !ok {
@@ -785,19 +753,9 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if time.Now().UnixMilli() > rec.ExpiresAt {
 		return nil, nil, errDetail(kmapi.ErrNotFound, "启动令牌已过期")
 	}
-	if strings.TrimSpace(origin) == "" || origin != rec.Origin {
+	// 跨 origin 不能消费：旧 origin 的启动令牌、授权、数据均不可沿用。
+	if canonical != rec.Origin {
 		return nil, nil, errDetail(kmapi.ErrBadRequest, "来源不匹配")
-	}
-	verified, err := connect.VerifyProof(proofRaw)
-	if err != nil {
-		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份无效: "+err.Error())
-	}
-	// 启动即授权的身份以签发时钱包独立解析的为准：消费 proof 的摘要、
-	// 发布者与应用标识必须与绑定上下文完全一致，不接受替换身份或扩大权限。
-	if !strings.EqualFold(verified.PublisherPublicKey, rec.AppPublicKey) ||
-		verified.AppID != rec.AppID ||
-		!strings.EqualFold(verified.IdentityDigestHex, rec.IdentityDigestHex) {
-		return nil, nil, errDetail(kmapi.ErrBadRequest, "App 身份与启动授权不一致")
 	}
 	if d.store == nil {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
@@ -827,21 +785,40 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if idErr != nil {
 		return nil, nil, errDetail(kmapi.ErrInternal, "生成授权失败")
 	}
-	// 同一应用同一来源重新启动时替换旧授权，避免僵尸授权堆积；按精确身份撤销。
-	// 替换与授予按统一顺序串行，避免旧授权的待办在替换间隙产生新许可。
+	// 同一来源允许多个独立授权并存（各连接独立授权、独立撤销）：
+	// 启动新窗口不撤销该来源既有授权、不关闭既有连接；关闭按连接保留
+	// 授权，显式退出按 authorizationId 撤销本连接，整来源断开仍走
+	// connect.auth.revoke（按 App 公钥全撤）。
+	// 启动消费 proof 仅作一致性核对：提交的证明须与令牌绑定的来源一致，
+	// 不一致直接拒绝；身份必须来自有效证明或本地可信部署登记。
+	launchAppHex, deploymentID, identityErr := d.verifiedConnectIdentity(paramsMap, canonical)
+	if identityErr != nil {
+		return nil, nil, errDetail(kmapi.ErrOriginRejected, identityErr.Error())
+	}
+	if rec.ExpectedAppPublicKeyHex != "" && rec.ExpectedAppPublicKeyHex != launchAppHex {
+		return nil, nil, errDetail(kmapi.ErrOriginRejected, "App public key differs from directory target")
+	}
+	if rec.DeploymentID != deploymentID || rec.DeploymentGeneration != d.deploymentGeneration(canonical) {
+		return nil, nil, errDetail(kmapi.ErrOriginRejected, "deployment launch context mismatch")
+	}
 	savedAuth := connect.Auth{
 		AuthorizationID: authorizationID,
-		AppPublicKey:    verified.PublisherPublicKey, AppID: verified.AppID, AppName: verified.AppName,
-		IdentityDigest: verified.IdentityDigestHex, Requirements: append([]string(nil), verified.Requirements...),
-		Origin: origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
-		Generation: d.connectMgr.Generation(),
+		Origin:          canonical, Network: info.BsvNetwork, WalletPublicKey: walletPub,
+		Generation:      d.connectMgr.Generation(),
+		AppPublicKeyHex: launchAppHex, DeploymentID: deploymentID, DeploymentGeneration: rec.DeploymentGeneration,
+	}
+	display, displayErr := d.verifiedConnectDisplay(paramsMap, canonical)
+	if displayErr != nil {
+		return nil, nil, errDetail(kmapi.ErrOriginRejected, displayErr.Error())
+	}
+	// 目录事务先提交；失败时尚未保存授权或登记活动连接。
+	if rec.URL != "" {
+		if err := d.connectMgr.Directory().ResolveURL(rec.URL, launchAppHex, display); err != nil {
+			return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
+		}
 	}
 	var launchSaveErr error
 	d.connectMgr.SerializedAuthChange(func() {
-		_ = d.connectMgr.AuthStore().RevokeExact(origin, verified.PublisherPublicKey, verified.AppID)
-		if d.connectMgr.Connections() != nil {
-			d.connectMgr.Connections().CloseByApp(origin, verified.PublisherPublicKey, verified.AppID)
-		}
 		launchSaveErr = d.connectMgr.AuthStore().Save(savedAuth)
 		if launchSaveErr == nil && d.connectMgr.Connections() != nil {
 			d.connectMgr.Connections().UpsertActive(savedAuth)
@@ -850,11 +827,12 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if launchSaveErr != nil {
 		return nil, nil, errDetail(kmapi.ErrInternal, "保存授权失败")
 	}
-	appKey := connect.ApplicationKey(origin, verified.PublisherPublicKey, verified.AppID)
+	appKey := launchAppHex
 	_, _ = d.connectMgr.History().Append(connect.HistoryEvent{
-		AppKey: appKey, Origin: origin, AppID: verified.AppID, AppPublicKey: verified.PublisherPublicKey,
+		AppKey: appKey, Origin: canonical,
 		Kind: "connected", Detail: "launch",
 	})
+
 	d.publishConnect()
 	return map[string]any{
 		"authorizationId": authorizationID,
@@ -863,10 +841,6 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 		},
 		"resolvedClaims": map[string]any{},
 		"resolvedAt":     now,
-		"appIdentity": map[string]any{
-			"version": 1, "publisherPublicKeyHex": verified.PublisherPublicKey,
-			"appId": verified.AppID, "appName": verified.AppName, "identityDigestHex": verified.IdentityDigestHex,
-		},
 	}, nil, nil
 }
 
@@ -910,21 +884,29 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 		d.mu.Lock()
 		walletPub := d.publicKey
 		d.mu.Unlock()
-		// 同一应用同一来源重新登录时替换旧授权，避免僵尸授权堆积；
-		// 按精确身份撤销，不影响同发行人其他 App；替换与授予按统一顺序串行。
+		// 同一来源允许多个独立授权并存（各连接独立授权、独立撤销）：
+		// 重新登录只新增本连接授权，不撤销该来源既有授权、不关闭既有连接。
+		// 建连时验证发布身份：审批参数可能携带 SDK 提交的 URL 来源证明；
+		// 验签并核对可信来源一致后记入授权快照。证明无效直接拒绝，不创建授权；
+		// 缺少有效 URL 证明或可信部署登记时拒绝创建正式授权。
+		loginAppHex := a.AppPublicKeyHex
+		if connect.ApplicationKey(loginAppHex) == "" {
+			return nil, nil, errDetail(kmapi.ErrOriginRejected, "verified App identity required")
+		}
+		if a.DeploymentID != "" {
+			r, ok := d.deployments.Identity(a.Origin)
+			if !ok || r.DeploymentID != a.DeploymentID || r.AppPublicKeyHex != loginAppHex || r.Generation != a.DeploymentGeneration {
+				return nil, nil, errDetail(kmapi.ErrOriginRejected, "deployment no longer active")
+			}
+		}
 		savedLoginAuth := connect.Auth{
 			AuthorizationID: authorizationID,
-			AppPublicKey:    a.AppPublicKey, AppID: a.AppID, AppName: a.AppName,
-			IdentityDigest: a.IdentityDigest, Requirements: append([]string(nil), a.Requirements...),
-			Origin: a.Origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
-			Generation: d.connectMgr.Generation(),
+			Origin:          a.Origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
+			Generation:      d.connectMgr.Generation(),
+			AppPublicKeyHex: loginAppHex, DeploymentID: a.DeploymentID, DeploymentGeneration: a.DeploymentGeneration,
 		}
 		var loginSaveErr error
 		d.connectMgr.SerializedAuthChange(func() {
-			_ = d.connectMgr.AuthStore().RevokeExact(a.Origin, a.AppPublicKey, a.AppID)
-			if d.connectMgr.Connections() != nil {
-				d.connectMgr.Connections().CloseByApp(a.Origin, a.AppPublicKey, a.AppID)
-			}
 			loginSaveErr = d.connectMgr.AuthStore().Save(savedLoginAuth)
 			if loginSaveErr == nil && d.connectMgr.Connections() != nil {
 				d.connectMgr.Connections().UpsertActive(savedLoginAuth)
@@ -940,10 +922,6 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 			},
 			"resolvedClaims": map[string]any{},
 			"resolvedAt":     now,
-			"appIdentity": map[string]any{
-				"version": 1, "publisherPublicKeyHex": a.AppPublicKey,
-				"appId": a.AppID, "appName": a.AppName, "identityDigestHex": a.IdentityDigest,
-			},
 		}, nil, nil
 	default:
 		return nil, nil, errDetail(kmapi.ErrInternal, "未实现")
@@ -1066,7 +1044,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 			if len(priv) == 0 {
 				return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
 			}
-			scope, serr := connect.ScopeFor(network, wallet, auth.AppPublicKey, path)
+			scope, serr := connect.ScopeFor(network, wallet, auth.AppPublicKeyHex, path)
 			if serr != nil {
 				for i := range priv {
 					priv[i] = 0
@@ -1080,7 +1058,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 			if serr != nil {
 				return nil, nil, errDetail(kmapi.ErrInternal, serr.Error())
 			}
-			rev, updatedAt, serr := d.storage.Put(network, wallet, auth.AppPublicKey, path, env, encMIME, ifNone, 0)
+			rev, updatedAt, serr := d.storage.Put(network, wallet, auth.AppPublicKeyHex, path, env, encMIME, ifNone, 0)
 			if serr != nil {
 				return nil, nil, storageErrDetail(serr)
 			}
@@ -1089,7 +1067,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 				"revision": strconv.FormatInt(rev, 10), "updatedAt": updatedAt,
 			}, nil, nil
 		}
-		rev, updatedAt, err := d.storage.Put(network, wallet, auth.AppPublicKey, path, content, mime, ifNone, 0)
+		rev, updatedAt, err := d.storage.Put(network, wallet, auth.AppPublicKeyHex, path, content, mime, ifNone, 0)
 		if err != nil {
 			return nil, nil, storageErrDetail(err)
 		}
@@ -1116,7 +1094,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 		}
 		if method == "storage.encrypted.get" {
 			// 范围作用于解密后的明文；必须读取同一版本的完整信封，不能先截断密文。
-			full, err := d.storage.Get(network, wallet, auth.AppPublicKey, path, 0, -1)
+			full, err := d.storage.Get(network, wallet, auth.AppPublicKeyHex, path, 0, -1)
 			if err != nil {
 				switch {
 				case err == appstorage.ErrNotFound:
@@ -1139,7 +1117,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 			if len(priv) == 0 {
 				return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
 			}
-			scope, serr := connect.ScopeFor(network, wallet, auth.AppPublicKey, path)
+			scope, serr := connect.ScopeFor(network, wallet, auth.AppPublicKeyHex, path)
 			if serr != nil {
 				for i := range priv {
 					priv[i] = 0
@@ -1169,7 +1147,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 				"lastModified": isoMillis(full.Updated),
 			}, map[string][]byte{"content": chunk}, nil
 		}
-		obj, err := d.storage.Get(network, wallet, auth.AppPublicKey, path, offset, length)
+		obj, err := d.storage.Get(network, wallet, auth.AppPublicKeyHex, path, offset, length)
 		if err != nil {
 			switch {
 			case err == appstorage.ErrNotFound:
@@ -1217,7 +1195,7 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 			}
 			limit = int(n)
 		}
-		entries, next, err := d.storage.List(network, wallet, auth.AppPublicKey, storagePrefix, cursor, limit)
+		entries, next, err := d.storage.List(network, wallet, auth.AppPublicKeyHex, storagePrefix, cursor, limit)
 		if err != nil {
 			return nil, nil, storageErrDetail(err)
 		}
@@ -1232,17 +1210,17 @@ func (d *Daemon) execConnectStorage(ctx context.Context, auth connect.Auth, meth
 		return res, nil, nil
 	case "storage.directory.create":
 		overwrite, _ := params["overwrite"].(bool)
-		if _, _, err := d.storage.CreateDirectory(network, wallet, auth.AppPublicKey, path, overwrite); err != nil {
+		if _, _, err := d.storage.CreateDirectory(network, wallet, auth.AppPublicKeyHex, path, overwrite); err != nil {
 			return nil, nil, storageErrDetail(err)
 		}
 		return map[string]any{"path": path, "created": true}, nil, nil
 	case "storage.directory.delete":
-		if err := d.storage.DeleteDirectory(network, wallet, auth.AppPublicKey, path); err != nil {
+		if err := d.storage.DeleteDirectory(network, wallet, auth.AppPublicKeyHex, path); err != nil {
 			return nil, nil, storageErrDetail(err)
 		}
 		return map[string]any{"path": path, "deleted": true}, nil, nil
 	case "storage.delete":
-		if err := d.storage.Delete(network, wallet, auth.AppPublicKey, path); err != nil {
+		if err := d.storage.Delete(network, wallet, auth.AppPublicKeyHex, path); err != nil {
 			if err == appstorage.ErrNotFound {
 				return nil, nil, errDetail(kmapi.ErrNotFound, "对象不存在")
 			}
@@ -1348,7 +1326,10 @@ func (d *Daemon) execConnectCipher(ctx context.Context, auth connect.Auth, metho
 	if locked || len(priv) == 0 {
 		return nil, nil, errDetail(kmapi.ErrLocked, "后台已锁定，请先解锁")
 	}
-	siteKey, err := connect.DeriveCipherKey(priv, pub, info.BsvNetwork, origin, auth.AppPublicKey)
+	// 已验证 App 身份的授权按 App 公钥派生 cipher 密钥（origin 不再进入派生）；
+	// 未验证传输沿用来源绑定派生，保持旧行为，不静默升级。
+	siteKey, derr := connect.DeriveAppCipherKey(priv, pub, info.BsvNetwork, auth.AppPublicKeyHex)
+	err = derr
 	for i := range priv {
 		priv[i] = 0
 	}

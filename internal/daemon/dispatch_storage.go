@@ -49,8 +49,8 @@ func (d *Daemon) opStoragePut(ctx context.Context, p kmapi.StoragePutRequest, at
 	if p.WalletPublicKey != "" && !strings.EqualFold(p.WalletPublicKey, wallet) {
 		return nil, nil, errDetail2(kmapi.ErrBadRequest, "钱包不匹配")
 	}
-	if strings.TrimSpace(p.AppPublicKey) == "" || strings.TrimSpace(p.Path) == "" {
-		return nil, nil, errDetail2(kmapi.ErrBadRequest, "app/路径必填")
+	if strings.TrimSpace(p.AppPublicKeyHex) == "" || strings.TrimSpace(p.Path) == "" {
+		return nil, nil, errDetail2(kmapi.ErrBadRequest, "App 公钥/路径必填")
 	}
 	content, ok := attachments["content"]
 	if !ok {
@@ -72,7 +72,7 @@ func (d *Daemon) opStoragePut(ctx context.Context, p kmapi.StoragePutRequest, at
 	if p.IfNoneMatch != nil {
 		ifNone = *p.IfNoneMatch
 	}
-	rev, updatedAt, err := d.storage.Put(network, wallet, p.AppPublicKey, p.Path, content, mime, ifNone, 0)
+	rev, updatedAt, err := d.storage.Put(network, wallet, p.AppPublicKeyHex, p.Path, content, mime, ifNone, 0)
 	if err != nil {
 		switch err {
 		case appstorage.ErrConflict:
@@ -107,7 +107,7 @@ func (d *Daemon) opStorageGet(ctx context.Context, p kmapi.StorageGetRequest) (a
 	if p.Length != nil {
 		length = *p.Length
 	}
-	obj, err := d.storage.Get(network, wallet, p.AppPublicKey, p.Path, offset, length)
+	obj, err := d.storage.Get(network, wallet, p.AppPublicKeyHex, p.Path, offset, length)
 	if err != nil {
 		switch err {
 		case appstorage.ErrNotFound:
@@ -120,7 +120,7 @@ func (d *Daemon) opStorageGet(ctx context.Context, p kmapi.StorageGetRequest) (a
 		}
 	}
 	// 取总数用于 eof 计算。
-	full, err := d.storage.Get(network, wallet, p.AppPublicKey, p.Path, 0, -1)
+	full, err := d.storage.Get(network, wallet, p.AppPublicKeyHex, p.Path, 0, -1)
 	if err != nil {
 		return nil, nil, errDetail2(kmapi.ErrInternal, err.Error())
 	}
@@ -160,7 +160,7 @@ func (d *Daemon) opStorageList(ctx context.Context, p kmapi.StorageListRequest) 
 	if p.Cursor != nil {
 		cursor = *p.Cursor
 	}
-	entries, next, err := d.storage.List(network, wallet, p.AppPublicKey, p.Prefix, cursor, limit)
+	entries, next, err := d.storage.List(network, wallet, p.AppPublicKeyHex, p.Prefix, cursor, limit)
 	if err != nil {
 		if err == appstorage.ErrInvalidCursor {
 			return nil, errDetail2(kmapi.ErrBadRequest, "游标无效")
@@ -189,7 +189,7 @@ func (d *Daemon) opStorageDelete(ctx context.Context, p kmapi.StorageDeleteReque
 	if p.WalletPublicKey != "" && !strings.EqualFold(p.WalletPublicKey, wallet) {
 		return nil, errDetail2(kmapi.ErrBadRequest, "钱包不匹配")
 	}
-	if err := d.storage.Delete(network, wallet, p.AppPublicKey, p.Path); err != nil {
+	if err := d.storage.Delete(network, wallet, p.AppPublicKeyHex, p.Path); err != nil {
 		if err == appstorage.ErrNotFound {
 			return nil, errDetail2(kmapi.ErrNotFound, "对象不存在")
 		}

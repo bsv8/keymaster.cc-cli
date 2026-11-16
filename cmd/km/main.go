@@ -156,7 +156,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `用法:
   km install [--data-dir DIR]   安装程序、检查初始化状态、生成系统服务
   km init [--data-dir DIR]      独立初始化钱包和设置，不启动长期业务
-  km daemon [--data-dir DIR] [--no-tray]
+  km daemon [--data-dir DIR] [--storage-dir DIR] [--no-tray]
                          运行后台，已有钱包时以锁定状态启动；默认启用 Web Admin 与托盘
   km unlock [--api URL] [--data-dir DIR]
   km info [--api URL] [--data-dir DIR]
@@ -517,14 +517,25 @@ func cmdInit(g globalFlags, args []string) int {
 
 func cmdDaemon(g globalFlags, args []string) int {
 	noTray := false
-	for _, a := range args {
+	storageDir := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--storage-dir" && i+1 < len(args) {
+			storageDir = args[i+1]
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--storage-dir=") {
+			storageDir = strings.TrimPrefix(a, "--storage-dir=")
+			continue
+		}
 		switch a {
 		case "--no-tray", "--no-tray=true":
 			noTray = true
 		case "--no-tray=false":
 			noTray = false
 		default:
-			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--no-tray]")
+			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--storage-dir DIR] [--no-tray]")
 			return exitUsage
 		}
 	}
@@ -550,6 +561,7 @@ func cmdDaemon(g globalFlags, args []string) int {
 	// are reported there with the same messages as before.
 	return daemonrun.Run(ctx, daemonrun.Options{
 		DataDir:          layout.Dir,
+		StorageDir:       storageDir,
 		Tray:             mode,
 		ExitCodeOnSignal: exitCancelled,
 	})

@@ -3,10 +3,10 @@ package connect
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/bsv8/keymaster.cc-cli/walletcrypto"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -30,44 +30,30 @@ func IsApprovalMethod(method string) bool {
 	return false
 }
 
-// ApplicationKey 按精确 origin + 发行人公钥小写 + AppID 隔离。
-// 与 TS JSON.stringify([origin, pubkeyLower ?? null, appId ?? null]) 一致。
-func ApplicationKey(origin, publisherPublicKeyHex, appID string) string {
-	var pub any
-	if strings.TrimSpace(publisherPublicKeyHex) == "" {
-		pub = nil
-	} else {
-		pub = strings.ToLower(strings.TrimSpace(publisherPublicKeyHex))
+// ApplicationKey 只接受已验证的 App 公钥，不提供来源身份回退。
+func ApplicationKey(appPublicKeyHex string) string {
+	key, err := walletcrypto.ValidateAppPublicKeyHex(appPublicKeyHex)
+	if err != nil {
+		return ""
 	}
-	var id any
-	if strings.TrimSpace(appID) == "" {
-		id = nil
-	} else {
-		id = appID
-	}
-	raw, _ := json.Marshal([]any{origin, pub, id})
-	return string(raw)
+	return key
 }
 
-// PermissionEntry 为单个应用的自动许可快照。
+// PermissionEntry 为单个 App 公钥的自动许可快照；Origin 仅为最近操作来源。
 type PermissionEntry struct {
-	AppKey       string   `json:"appKey"`
-	Origin       string   `json:"origin"`
-	AppPublicKey string   `json:"appPublicKey"`
-	AppID        string   `json:"appId"`
-	Methods      []string `json:"methods"`
-	UpdatedAt    int64    `json:"updatedAt"`
+	AppKey    string   `json:"appKey"`
+	Origin    string   `json:"origin"`
+	Methods   []string `json:"methods"`
+	UpdatedAt int64    `json:"updatedAt"`
 }
 
 // HistoryEvent 为应用连接/审批/许可的可审计事件。
 // 不含密钥、token、解密明文或完整原始报文，仅保留关联、状态与错误码。
 type HistoryEvent struct {
-	ID           string `json:"id"`
-	At           int64  `json:"at"`
-	AppKey       string `json:"appKey"`
-	Origin       string `json:"origin"`
-	AppID        string `json:"appId"`
-	AppPublicKey string `json:"appPublicKey"`
+	ID     string `json:"id"`
+	At     int64  `json:"at"`
+	AppKey string `json:"appKey"`
+	Origin string `json:"origin"`
 	// Kind: connected/disconnected/permission-granted/permission-revoked/
 	//       manual-approved/auto-approved/executed/failed/user-canceled/timed-out
 	Kind      string `json:"kind"`
@@ -104,11 +90,6 @@ func (s *AppState) Load() error {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		// 新文件不存在：从 legacy 文件迁移（permissions.json + history.json），
-		// 迁移成功后以新文件为准，旧文件不再读取。
-		if err := s.migrateLocked(); err != nil {
-			return err
-		}
 		return nil
 	}
 	var f appStateFile
@@ -117,54 +98,21 @@ func (s *AppState) Load() error {
 	}
 	m := map[string]*PermissionEntry{}
 	for _, e := range f.Permissions {
-		if e.AppKey == "" {
-			continue
+		if ApplicationKey(e.AppKey) == "" {
+			return fmt.Errorf("incompatible application permission identity")
 		}
 		cp := e
 		cp.Methods = copyStrings(e.Methods)
 		m[e.AppKey] = &cp
+	}
+	for _, event := range f.Events {
+		if ApplicationKey(event.AppKey) == "" {
+			return fmt.Errorf("incompatible application history identity")
+		}
 	}
 	s.perms = m
 	s.events = append([]HistoryEvent(nil), f.Events...)
 	return nil
-}
-
-func (s *AppState) migrateLocked() error {
-	// 读取 legacy 文件（不存在视为空，不报错）；s.path 为 <walletDir>/connect/apps.json。
-	legacyDir := filepath.Dir(s.path)
-	// 仅“文件不存在”视为空；读取失败或解析失败必须返回错误，不能提交部分迁移
-	//（否则会写入不完整的 apps.json，而旧文件之后不再被读取，造成永久丢失）。
-	var perms []PermissionEntry
-	if raw, err := os.ReadFile(filepath.Join(legacyDir, "permissions.json")); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("迁移许可存储失败: %w", err)
-		}
-	} else if err := json.Unmarshal(raw, &perms); err != nil {
-		return fmt.Errorf("迁移许可存储失败: %w", err)
-	}
-	var events []HistoryEvent
-	if raw, err := os.ReadFile(filepath.Join(legacyDir, "history.json")); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("迁移历史存储失败: %w", err)
-		}
-	} else if err := json.Unmarshal(raw, &events); err != nil {
-		return fmt.Errorf("迁移历史存储失败: %w", err)
-	}
-	m := map[string]*PermissionEntry{}
-	for _, e := range perms {
-		if e.AppKey == "" {
-			continue
-		}
-		cp := e
-		cp.Methods = copyStrings(e.Methods)
-		m[e.AppKey] = &cp
-	}
-	s.perms = m
-	s.events = append([]HistoryEvent(nil), events...)
-	if len(m) == 0 && len(events) == 0 {
-		return nil
-	}
-	return s.saveLocked()
 }
 
 func (s *AppState) saveLocked() error {
@@ -233,6 +181,9 @@ func (s *AppState) Snapshot() []PermissionEntry {
 
 // Append 追加历史事件；单文件单次落盘，失败回滚内存。
 func (s *AppState) Append(e HistoryEvent) (HistoryEvent, error) {
+	if ApplicationKey(e.AppKey) == "" {
+		return HistoryEvent{}, fmt.Errorf("verified App public key is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e.At == 0 {
@@ -277,11 +228,13 @@ func (s *AppState) List(appKey string, limit int) []HistoryEvent {
 
 // GrantWithEvent 在同一锁内授予单项自动许可并追加对应历史事件，一次落盘。
 // 任一环节失败整体回滚，不留下无事件的许可。
-func (s *AppState) GrantWithEvent(origin, pubkey, appID, method string, event HistoryEvent) error {
+func (s *AppState) GrantWithEvent(appKey, method string, event HistoryEvent) error {
 	if !IsApprovalMethod(method) {
 		return fmt.Errorf("操作不支持自动许可")
 	}
-	appKey := ApplicationKey(origin, pubkey, appID)
+	if ApplicationKey(appKey) == "" {
+		return fmt.Errorf("verified App public key is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.perms == nil {
@@ -289,7 +242,7 @@ func (s *AppState) GrantWithEvent(origin, pubkey, appID, method string, event Hi
 	}
 	e, ok := s.perms[appKey]
 	if !ok {
-		e = &PermissionEntry{AppKey: appKey, Origin: origin, AppPublicKey: pubkey, AppID: appID}
+		e = &PermissionEntry{AppKey: appKey, Origin: event.Origin}
 		s.perms[appKey] = e
 	}
 	for _, m := range e.Methods {

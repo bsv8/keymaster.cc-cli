@@ -21,7 +21,7 @@ func (d *Daemon) opConnectPermissionsList(ctx context.Context, p kmapi.ConnectPe
 			continue
 		}
 		out = append(out, map[string]any{
-			"applicationKey": e.AppKey, "origin": e.Origin, "appId": e.AppID, "appPublicKey": e.AppPublicKey,
+			"applicationKey": e.AppKey, "origin": e.Origin,
 			"methods": append([]string{}, e.Methods...), "updatedAt": e.UpdatedAt,
 		})
 	}
@@ -74,7 +74,7 @@ func (d *Daemon) opConnectHistoryList(ctx context.Context, p kmapi.ConnectHistor
 	for _, e := range events {
 		out = append(out, map[string]any{
 			"id": e.ID, "at": e.At, "applicationKey": e.AppKey, "origin": e.Origin,
-			"appId": e.AppID, "appPublicKey": e.AppPublicKey, "kind": e.Kind,
+			"kind":   e.Kind,
 			"method": e.Method, "auto": e.Auto, "errorCode": e.ErrorCode, "detail": e.Detail,
 		})
 	}
@@ -91,50 +91,37 @@ func (d *Daemon) opConnectAppsList(ctx context.Context) (any, *kmapi.ErrorDetail
 	// 应用身份合并授权、许可与历史三方来源：退出/断开删除授权后，有许可或历史
 	// 的应用仍保留管理入口（撤销许可/查询历史），不因授权消失而无法选中。
 	type appInfo struct {
-		origin, appID, appName, pubkey, digest string
+		origin string
 	}
 	merged := map[string]*appInfo{}
-	touch := func(key, origin, appID, appName, pubkey, digest string) *appInfo {
+	touch := func(key, origin string) *appInfo {
 		e, ok := merged[key]
 		if !ok {
-			e = &appInfo{origin: origin, appID: appID}
+			e = &appInfo{origin: origin}
 			merged[key] = e
 		}
 		if e.origin == "" {
 			e.origin = origin
 		}
-		if e.appID == "" {
-			e.appID = appID
-		}
-		if appName != "" && e.appName == "" {
-			e.appName = appName
-		}
-		if pubkey != "" && e.pubkey == "" {
-			e.pubkey = pubkey
-		}
-		if digest != "" && e.digest == "" {
-			e.digest = digest
-		}
 		return e
 	}
 	for _, a := range d.connectMgr.AuthStore().List() {
-		key := connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID)
-		touch(key, a.Origin, a.AppID, a.AppName, a.AppPublicKey, a.IdentityDigest)
+		key := connect.ApplicationKey(a.AppPublicKeyHex)
+		touch(key, a.Origin)
 	}
 	for _, e := range d.connectMgr.Permissions().Snapshot() {
-		touch(e.AppKey, e.Origin, e.AppID, "", e.AppPublicKey, "")
+		touch(e.AppKey, e.Origin)
 	}
 	for _, e := range d.connectMgr.History().List("", 1000) {
 		if e.AppKey == "" {
 			continue
 		}
-		touch(e.AppKey, e.Origin, e.AppID, "", e.AppPublicKey, "")
+		touch(e.AppKey, e.Origin)
 	}
 	var apps []map[string]any
 	for key, e := range merged {
 		apps = append(apps, map[string]any{
-			"applicationKey": key, "origin": e.origin, "appId": e.appID, "appName": e.appName,
-			"appPublicKey": e.pubkey, "identityDigestHex": e.digest,
+			"applicationKey": key, "origin": e.origin,
 		})
 	}
 	// 会话为应用下的在线连接实例（未关闭且未暂停），含创建时间与暂停标记。
@@ -152,7 +139,7 @@ func (d *Daemon) opConnectAppsList(ctx context.Context) (any, *kmapi.ErrorDetail
 		if !ok || a.Generation == "" || a.Generation != gen {
 			continue
 		}
-		key := connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID)
+		key := connect.ApplicationKey(a.AppPublicKeyHex)
 		connections = append(connections, map[string]any{
 			"id": c.ID, "authId": c.AuthID, "applicationKey": key,
 			"origin": a.Origin, "network": a.Network, "generation": a.Generation,

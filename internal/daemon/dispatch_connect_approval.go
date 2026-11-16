@@ -22,9 +22,9 @@ func (d *Daemon) sweepExpiredApprovals() {
 			d.rejectPaymentByApproval(a, "timeout")
 		}
 		if a.Status == "cancelled" {
-			appKey := connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID)
+			appKey := connect.ApplicationKey(a.AppPublicKeyHex)
 			_, _ = d.connectMgr.History().Append(connect.HistoryEvent{
-				AppKey: appKey, Origin: a.Origin, AppID: a.AppID, AppPublicKey: a.AppPublicKey,
+				AppKey: appKey, Origin: a.Origin,
 				Kind: "timed-out", Method: a.Method, Detail: a.ID,
 			})
 		}
@@ -75,18 +75,20 @@ func (d *Daemon) connectSnapshot() map[string]any {
 	}
 	return map[string]any{
 		"pending": pending, "online": online,
-		"approvals": approvals,
+		"approvals":        approvals,
 		"historyAvailable": true,
 	}
 }
 
 // hasAutoPermission 查询对应操作的自动许可。
 // 存储不可用时返回 error，调用方必须阻断并报 INTERNAL，不得按无许可继续自动执行。
-func (d *Daemon) hasAutoPermission(origin, pubkey, appID, method string) (bool, *kmapi.ErrorDetail) {
+func (d *Daemon) hasAutoPermission(appKey, method string) (bool, *kmapi.ErrorDetail) {
 	if !connect.IsApprovalMethod(method) {
 		return false, nil
 	}
-	appKey := connect.ApplicationKey(origin, pubkey, appID)
+	if connect.ApplicationKey(appKey) == "" {
+		return false, errDetail(kmapi.ErrBadRequest, "verified App identity required")
+	}
 	has, err := d.connectMgr.Permissions().Has(appKey, method)
 	if err != nil {
 		return false, errDetail(kmapi.ErrInternal, "许可读取失败")
@@ -98,10 +100,9 @@ func (d *Daemon) hasAutoPermission(origin, pubkey, appID, method string) (bool, 
 // grantAutoPermission 仅在批准时保存自动许可；拒绝/取消不保存。
 // 写入失败返回 INTERNAL，调用方不得显示“已开启自动同意”。
 // 许可与对应历史事件在 AppState 同一锁内一次落盘（原子提交）。
-func (d *Daemon) grantAutoPermission(origin, pubkey, appID, method string) *kmapi.ErrorDetail {
-	appKey := connect.ApplicationKey(origin, pubkey, appID)
-	err := d.connectMgr.AppState().GrantWithEvent(origin, pubkey, appID, method, connect.HistoryEvent{
-		AppKey: appKey, Origin: origin, AppID: appID, AppPublicKey: pubkey,
+func (d *Daemon) grantAutoPermission(appKey, origin, method string) *kmapi.ErrorDetail {
+	err := d.connectMgr.AppState().GrantWithEvent(appKey, method, connect.HistoryEvent{
+		AppKey: appKey, Origin: origin,
 		Kind: "permission-granted", Method: method, Auto: true,
 	})
 	if err != nil {
@@ -116,15 +117,15 @@ func (d *Daemon) grantAutoPermission(origin, pubkey, appID, method string) *kmap
 // revokeAutoPermission 取消单项自动许可；许可与历史事件在同一锁内一次落盘。
 func (d *Daemon) revokeAutoPermission(appKey, method string) *kmapi.ErrorDetail {
 	// 先查出归属用于历史（只读快照，不持有锁）。
-	var origin, appID, pubkey string
+	var origin string
 	for _, e := range d.connectMgr.Permissions().Snapshot() {
 		if e.AppKey == appKey {
-			origin, appID, pubkey = e.Origin, e.AppID, e.AppPublicKey
+			origin = e.Origin
 			break
 		}
 	}
 	if err := d.connectMgr.AppState().RevokeWithEvent(appKey, method, connect.HistoryEvent{
-		AppKey: appKey, Origin: origin, AppID: appID, AppPublicKey: pubkey,
+		AppKey: appKey, Origin: origin,
 		Kind: "permission-revoked", Method: method,
 	}); err != nil {
 		return errDetail(kmapi.ErrInternal, "取消许可失败")
@@ -134,9 +135,9 @@ func (d *Daemon) revokeAutoPermission(appKey, method string) *kmapi.ErrorDetail 
 
 // recordApprovalHistory 记录审批决定与执行结果，区分人工/自动与业务失败。
 func (d *Daemon) recordApprovalHistory(a connect.Approval, kind string, auto bool, errCode string) {
-	appKey := connect.ApplicationKey(a.Origin, a.AppPublicKey, a.AppID)
+	appKey := connect.ApplicationKey(a.AppPublicKeyHex)
 	_, _ = d.connectMgr.History().Append(connect.HistoryEvent{
-		AppKey: appKey, Origin: a.Origin, AppID: a.AppID, AppPublicKey: a.AppPublicKey,
+		AppKey: appKey, Origin: a.Origin,
 		Kind: kind, Method: a.Method, Auto: auto, ErrorCode: errCode, Detail: a.ID,
 	})
 }
@@ -286,6 +287,7 @@ func isAuto(ctx context.Context) bool {
 	v, _ := ctx.Value(autoCallerKey).(bool)
 	return v
 }
+
 // idleConnectionMs 为连接闲置暂停阈值：15 分钟无鉴权活动且无该应用待办时暂停
 // 运行连接（保留授权，由 resume 重新握手恢复）。有待办的应用不算离线。
 const idleConnectionMs = int64(15 * 60 * 1000)
@@ -335,7 +337,7 @@ func (d *Daemon) sweepIdleConnections() {
 	pendingByApp := map[string]bool{}
 	for _, ap := range d.connectMgr.Queue().List() {
 		if ap.Status == "pending" {
-			pendingByApp[connect.ApplicationKey(ap.Origin, ap.AppPublicKey, ap.AppID)] = true
+			pendingByApp[connect.ApplicationKey(ap.AppPublicKeyHex)] = true
 		}
 	}
 	paused := d.connectMgr.Connections().SweepIdle(now, idleConnectionMs, func(appKey string) bool {

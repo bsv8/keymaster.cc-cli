@@ -9,21 +9,19 @@ import (
 	"time"
 )
 
-// Auth 为 App 授权记录。以 AuthorizationID 为主键持久化；同一 App 在不同
-// 来源各持一条授权，来源、网络、钱包、身份摘要任一变化即视为不同授权。
-// 世代（Generation）绑定签发时的后台运行代际；后台重启后旧授权必须重新登录。
+// Auth 是已验证 App 的授权快照，以 AuthorizationID 区分独立连接。
+// origin 仅绑定实际传输来源；Generation 绑定签发时的后台运行代际。
+// AppPublicKeyHex 必填，由 URL 验签或有效部署登记产生。
 type Auth struct {
-	AuthorizationID string   `json:"authorizationId"`
-	AppPublicKey    string   `json:"appPublicKey"`
-	AppID           string   `json:"appId"`
-	AppName         string   `json:"appName"`
-	IdentityDigest  string   `json:"identityDigestHex"`
-	Requirements    []string `json:"requirements"`
-	Origin          string   `json:"origin"`
-	Network         string   `json:"network"`
-	WalletPublicKey string   `json:"walletPublicKey"`
-	Generation      string   `json:"generation"`
-	CreatedAt       int64    `json:"createdAt"`
+	DeploymentGeneration string `json:"deploymentGeneration,omitempty"`
+	DeploymentID         string `json:"deploymentId,omitempty"`
+	AuthorizationID      string `json:"authorizationId"`
+	Origin               string `json:"origin"`
+	Network              string `json:"network"`
+	WalletPublicKey      string `json:"walletPublicKey"`
+	Generation           string `json:"generation"`
+	CreatedAt            int64  `json:"createdAt"`
+	AppPublicKeyHex      string `json:"appPublicKeyHex"`
 }
 
 // AuthStore 持久保存授权（钱包根/connect/auth.json）。
@@ -37,8 +35,7 @@ func NewAuthStore(walletDir string) *AuthStore {
 	return &AuthStore{path: filepath.Join(walletDir, "connect", "auth.json"), auths: map[string]Auth{}}
 }
 
-// Load 读取持久授权；兼容仅含旧字段的记录（缺失字段留空，调用方按代际与
-// 摘要重新校验，旧记录自然失效，需重新登录）。
+// Load 只读取完整的公钥授权快照；无效记录使整个加载失败。
 func (s *AuthStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,9 +52,11 @@ func (s *AuthStore) Load() error {
 	}
 	m := map[string]Auth{}
 	for _, a := range list {
-		if a.AuthorizationID == "" {
-			// 旧格式：以 App 公钥为键迁移为单条记录，代际留空以便强制重新登录。
-			a.AuthorizationID = "auth_" + a.AppPublicKey
+		if err := validateAuth(a); err != nil {
+			return err
+		}
+		if _, exists := m[a.AuthorizationID]; exists {
+			return fmt.Errorf("duplicate authorizationId")
 		}
 		m[a.AuthorizationID] = a
 	}
@@ -84,7 +83,24 @@ func (s *AuthStore) saveLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
+func validateAuth(a Auth) error {
+	if ApplicationKey(a.AppPublicKeyHex) == "" {
+		return fmt.Errorf("verified App public key required")
+	}
+	origin, err := CanonicalOrigin(a.Origin)
+	if err != nil || origin != a.Origin || a.AuthorizationID == "" || a.Generation == "" || a.CreatedAt <= 0 || (a.Network != "test" && a.Network != "main") || ApplicationKey(a.WalletPublicKey) == "" {
+		return fmt.Errorf("invalid authorization snapshot")
+	}
+	if (a.DeploymentID == "") != (a.DeploymentGeneration == "") {
+		return fmt.Errorf("invalid deployment authorization snapshot")
+	}
+	return nil
+}
+
 func (s *AuthStore) Save(a Auth) error {
+	if ApplicationKey(a.AppPublicKeyHex) == "" {
+		return fmt.Errorf("verified App public key required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if a.AuthorizationID == "" {
@@ -92,6 +108,9 @@ func (s *AuthStore) Save(a Auth) error {
 	}
 	if a.CreatedAt == 0 {
 		a.CreatedAt = time.Now().UnixMilli()
+	}
+	if err := validateAuth(a); err != nil {
+		return err
 	}
 	prev, hadPrev := s.auths[a.AuthorizationID]
 	s.auths[a.AuthorizationID] = a
@@ -124,25 +143,6 @@ func (s *AuthStore) FindByID(id string) (Auth, bool) {
 	return a, ok
 }
 
-// FindByApp 返回指定 App 公钥的全部授权（用于兼容查询与整体撤销）。
-func (s *AuthStore) FindByApp(appPubKey string) []Auth {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []Auth
-	for _, a := range s.auths {
-		if a.AppPublicKey == appPubKey {
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
-// Revoke 保留仅供内部精确替换旧授权使用；对外 API 不再暴露按公钥粗粒度撤销。
-// 新代码优先使用 RevokeExact，避免误撤同一发行人其他应用。
-func (s *AuthStore) Revoke(appPubKey string) error {
-	return s.revokeLocked(func(a Auth) bool { return a.AppPublicKey == appPubKey }, true)
-}
-
 func (s *AuthStore) revokeLocked(match func(Auth) bool, needFound bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -165,24 +165,6 @@ func (s *AuthStore) revokeLocked(match func(Auth) bool, needFound bool) error {
 	return nil
 }
 
-// RevokeExact 按精确应用身份撤销该应用全部连接，不影响同发行人其他 App 或其他来源。
-func (s *AuthStore) RevokeExact(origin, appPubKey, appID string) error {
-	return s.revokeLocked(func(a Auth) bool {
-		if a.Origin != origin {
-			return false
-		}
-		if appPubKey != "" && !equalFold(a.AppPublicKey, appPubKey) {
-			return false
-		}
-		if appID != "" && a.AppID != appID {
-			return false
-		}
-		return true
-	}, true)
-}
-
-// FindExact 按精确应用身份查找有效授权。
-
 // RevokeByID 撤销单条授权；落盘失败回滚内存。
 func (s *AuthStore) RevokeByID(id string) error {
 	s.mu.Lock()
@@ -199,21 +181,7 @@ func (s *AuthStore) RevokeByID(id string) error {
 	return nil
 }
 
-func equalFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
+// RevokeApp 仅撤销该公钥的连接授权，不删除许可与业务数据。
+func (s *AuthStore) RevokeApp(key string) error {
+	return s.revokeLocked(func(a Auth) bool { return a.AppPublicKeyHex == key }, true)
 }

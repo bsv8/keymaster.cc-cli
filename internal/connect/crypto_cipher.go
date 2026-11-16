@@ -4,38 +4,18 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"strings"
 
+	"github.com/bsv8/keymaster.cc-cli/walletcrypto"
 	"github.com/fxamacker/cbor/v2"
-	"golang.org/x/crypto/hkdf"
 )
 
-// DeriveCipherKey 按 HKDF-SHA256 从钱包秘密材料派生 cipher 密钥，
-// 绑定钱包公钥、网络、来源与 App，避免公开信息可算出密钥。
-//
-//	IKM  = 32 字节钱包私钥
-//	salt = "keymaster.connect.cipher.v1"
-//	info = pubkeyLower + "\0" + network + "\0" + origin + "\0" + appPubkey
-//
-// 与公开信息直接做 HMAC 的做法不同：仅持有公钥、网络与来源的观察者无法
-// 推导出密钥，密文因此具有真正的保密性。派生细节见 parity 验密向量。
-func DeriveCipherKey(privKey []byte, pubHex, network, origin, appPubkey string) ([]byte, error) {
-	if len(privKey) != 32 {
-		return nil, fmt.Errorf("私钥非法")
-	}
-	if _, err := hex.DecodeString(pubHex); err != nil || len(pubHex) != 66 {
-		return nil, fmt.Errorf("公钥非法")
-	}
-	info := strings.ToLower(pubHex) + "\x00" + network + "\x00" + origin + "\x00" + appPubkey
-	r := hkdf.New(sha256.New, privKey, []byte("keymaster.connect.cipher.v1"), []byte(info))
-	key := make([]byte, 32)
-	if _, err := r.Read(key); err != nil {
-		return nil, err
-	}
-	return key, nil
+// DeriveAppCipherKey 按 HKDF-SHA256 从钱包秘密材料派生 App 级 cipher 密钥，
+// 绑定钱包公钥、网络和已验证 App 公钥；origin、版本与 indexseed 不进入派生。
+// 调用方必须传入建连时已验证的 App 公钥，不得接受业务请求自带的公钥声明。
+// 唯一真源为 walletcrypto，内部包仅委托以防分叉。
+func DeriveAppCipherKey(privKey []byte, walletHex, network, appHex string) ([]byte, error) {
+	return walletcrypto.DeriveAppCipherKey(privKey, walletHex, network, appHex)
 }
 
 func encodeCipherInner(contentType string, content []byte) ([]byte, error) {

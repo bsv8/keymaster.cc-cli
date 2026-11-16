@@ -10,17 +10,15 @@ import (
 // （锁定/刷新/关闭暂停运行连接，保留原授权，由原应用重新握手恢复）。
 // 在线定义：未关闭且未暂停的实际运行连接，不能用持久授权条数代替。
 type Connection struct {
-	ID           string `json:"id"`
-	AuthID       string `json:"authId"`
-	AppKey       string `json:"appKey"`
-	Origin       string `json:"origin"`
-	AppID        string `json:"appId"`
-	AppPublicKey string `json:"appPublicKey"`
-	AppName      string `json:"appName"`
-	CreatedAt    int64  `json:"createdAt"`
-	LastSeen     int64  `json:"lastSeen"`
-	ClosedAt     int64  `json:"closedAt,omitempty"`
-	PausedAt     int64  `json:"pausedAt,omitempty"`
+	ID        string `json:"id"`
+	AuthID    string `json:"authId"`
+	AppKey    string `json:"appKey"`
+	Origin    string `json:"origin"`
+	AppName   string `json:"appName,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+	LastSeen  int64  `json:"lastSeen"`
+	ClosedAt  int64  `json:"closedAt,omitempty"`
+	PausedAt  int64  `json:"pausedAt,omitempty"`
 }
 
 // ConnectionStore 为内存运行态注册表（不跨重启；重启后旧代际连接整体失效，
@@ -40,8 +38,8 @@ func (s *ConnectionStore) UpsertActive(auth Auth) Connection {
 	defer s.mu.Unlock()
 	now := time.Now().UnixMilli()
 	if c, ok := s.conns[auth.AuthorizationID]; ok {
-		c.AppKey = ApplicationKey(auth.Origin, auth.AppPublicKey, auth.AppID)
-		c.Origin, c.AppID, c.AppPublicKey, c.AppName = auth.Origin, auth.AppID, auth.AppPublicKey, auth.AppName
+		c.AppKey = ApplicationKey(auth.AppPublicKeyHex)
+		c.Origin = auth.Origin
 		c.LastSeen = now
 		c.ClosedAt = 0
 		c.PausedAt = 0
@@ -49,8 +47,8 @@ func (s *ConnectionStore) UpsertActive(auth Auth) Connection {
 	}
 	c := &Connection{
 		ID: auth.AuthorizationID, AuthID: auth.AuthorizationID,
-		AppKey: ApplicationKey(auth.Origin, auth.AppPublicKey, auth.AppID),
-		Origin: auth.Origin, AppID: auth.AppID, AppPublicKey: auth.AppPublicKey, AppName: auth.AppName,
+		AppKey:    ApplicationKey(auth.AppPublicKeyHex),
+		Origin:    auth.Origin,
 		CreatedAt: now, LastSeen: now,
 	}
 	s.conns[auth.AuthorizationID] = c
@@ -107,8 +105,8 @@ func (s *ConnectionStore) Close(authID string) bool {
 	return true
 }
 
-// CloseByApp 关闭该精确应用的全部连接（精确撤销时调用）。
-func (s *ConnectionStore) CloseByApp(origin, pubkey, appID string) int {
+// CloseByApp 按 App 公钥关闭全部连接。
+func (s *ConnectionStore) CloseByApp(appPublicKeyHex string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UnixMilli()
@@ -117,13 +115,7 @@ func (s *ConnectionStore) CloseByApp(origin, pubkey, appID string) int {
 		if c.ClosedAt != 0 {
 			continue
 		}
-		if c.Origin != origin {
-			continue
-		}
-		if pubkey != "" && !equalFold(c.AppPublicKey, pubkey) {
-			continue
-		}
-		if appID != "" && c.AppID != appID {
+		if c.AppKey != appPublicKeyHex {
 			continue
 		}
 		c.ClosedAt = now

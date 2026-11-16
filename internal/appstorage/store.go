@@ -156,17 +156,29 @@ func Open(layout Layout) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('objects')`).Scan(&count); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if count > 0 {
+		var current int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('objects') WHERE name='app_public_key'`).Scan(&current); err != nil || current != 1 {
+			db.Close()
+			return nil, fmt.Errorf("incompatible App Storage schema")
+		}
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS objects (
 		network TEXT NOT NULL,
 		wallet_pubkey TEXT NOT NULL,
-		app_pubkey TEXT NOT NULL,
+		app_public_key TEXT NOT NULL,
 		path TEXT NOT NULL,
 		content BLOB NOT NULL,
 		mime TEXT NOT NULL,
 		revision INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
-		PRIMARY KEY (network, wallet_pubkey, app_pubkey, path)
-	); CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(network, wallet_pubkey, app_pubkey, path);
+		PRIMARY KEY (network, wallet_pubkey, app_public_key, path)
+	); CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(network, wallet_pubkey, app_public_key, path);
 	CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 	INSERT OR IGNORE INTO meta(key,value) VALUES('revision_seq',0);
 	UPDATE meta SET value = MAX(value, (SELECT COALESCE(MAX(revision),0) FROM objects)) WHERE key='revision_seq';`); err != nil {

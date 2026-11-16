@@ -16,21 +16,19 @@ import (
 // 决定或认领），落盘成功后 Publish 转为 pending。避免“先可见后落盘”窗口内
 // 的决定/执行与迟到回写互相覆盖。
 type Approval struct {
-	ID             string         `json:"id"`
-	AppPublicKey   string         `json:"appPublicKey"`
-	AppID          string         `json:"appId"`
-	AppName        string         `json:"appName"`
-	Method         string         `json:"method"`
-	Params         map[string]any `json:"params"`
-	Origin         string         `json:"origin"`
-	Requirements   []string       `json:"requirements"`
-	IdentityDigest string         `json:"identityDigestHex"`
-	Status         string         `json:"status"`
-	CreatedAt      int64          `json:"createdAt"`
-	DecidedAt      int64          `json:"decidedAt,omitempty"`
+	DeploymentGeneration string         `json:"deploymentGeneration,omitempty"`
+	AppPublicKeyHex      string         `json:"appPublicKeyHex"`
+	DeploymentID         string         `json:"deploymentId,omitempty"`
+	ID                   string         `json:"id"`
+	Method               string         `json:"method"`
+	Params               map[string]any `json:"params"`
+	Origin               string         `json:"origin"`
+	Status               string         `json:"status"`
+	CreatedAt            int64          `json:"createdAt"`
+	DecidedAt            int64          `json:"decidedAt,omitempty"`
 	// TerminalAt 为进入终态（rejected/cancelled/done/failed）的时间，用于终态缓存淘汰；
 	// 期限内重复查询返回同一结果，超期后删除释放附件内存。
-	TerminalAt     int64          `json:"-"`
+	TerminalAt int64 `json:"-"`
 	// AuthorizationID 为创建时的原连接授权引用；登录类审批为空。
 	AuthorizationID string `json:"authorizationId,omitempty"`
 	// TransportRequestID 为原传输请求 ID（Receiver 请求 ID），身份/意图信封
@@ -63,34 +61,34 @@ func NewQueue() *Queue {
 const DefaultApprovalTTL = int64(10 * 60 * 1000)
 
 func approvalExpiry(params map[string]any, now int64) int64 {
-    // 请求自带 exp（unix seconds）时取更早者作为期限。
-    if v, ok := params["exp"]; ok {
-        var expSec int64
-        switch n := v.(type) {
-        case float64:
-            expSec = int64(n)
-        case int:
-            expSec = int64(n)
-        case int64:
-            expSec = n
-        }
-        if expSec > 0 {
-            expMs := expSec * 1000
-            if expMs < now+DefaultApprovalTTL {
-                return expMs
-            }
-        }
-    }
-    return now + DefaultApprovalTTL
+	// 请求自带 exp（unix seconds）时取更早者作为期限。
+	if v, ok := params["exp"]; ok {
+		var expSec int64
+		switch n := v.(type) {
+		case float64:
+			expSec = int64(n)
+		case int:
+			expSec = int64(n)
+		case int64:
+			expSec = n
+		}
+		if expSec > 0 {
+			expMs := expSec * 1000
+			if expMs < now+DefaultApprovalTTL {
+				return expMs
+			}
+		}
+	}
+	return now + DefaultApprovalTTL
 }
 
-func (q *Queue) Create(appPubkey, appID, appName, method string, params map[string]any, origin string, requirements []string, digest string) *Approval {
-	return q.CreateFull("", "", appPubkey, appID, appName, method, params, origin, requirements, digest, nil)
+func (q *Queue) Create(method string, params map[string]any, origin string) *Approval {
+	return q.CreateFull("", "", method, params, origin, nil)
 }
 
 // CreateFull 一次装配完整待办：原授权引用、原传输请求 ID、期限、参数快照与二进制
 // 附件在同一锁内写入并深拷贝，返回前即进入可批准队列；不存在“先可见后补齐”窗口。
-func (q *Queue) CreateFull(authID, transportReqID, appPubkey, appID, appName, method string, params map[string]any, origin string, requirements []string, digest string, reqBinaries map[string][]byte) *Approval {
+func (q *Queue) CreateFull(authID, transportReqID, method string, params map[string]any, origin string, reqBinaries map[string][]byte, identity ...string) *Approval {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.seq++
@@ -98,13 +96,20 @@ func (q *Queue) CreateFull(authID, transportReqID, appPubkey, appID, appName, me
 	now := time.Now().UnixMilli()
 	cpParams := deepCopyApprovalParams(params)
 	a := &Approval{
-		ID: id, AppPublicKey: appPubkey, AppID: appID, AppName: appName, Method: method,
+		ID: id, Method: method,
 		Params: cpParams, Origin: origin,
-		Requirements:   append([]string(nil), requirements...),
-		IdentityDigest: digest,
-		Status:         "pending", CreatedAt: now,
+		Status: "pending", CreatedAt: now,
 		AuthorizationID: authID, TransportRequestID: transportReqID,
 		ExpiresAt: approvalExpiry(cpParams, now), ReqBinaries: copyApprovalBinaries(reqBinaries),
+	}
+	if len(identity) > 0 {
+		a.AppPublicKeyHex = identity[0]
+	}
+	if len(identity) > 1 {
+		a.DeploymentID = identity[1]
+	}
+	if len(identity) > 2 {
+		a.DeploymentGeneration = identity[2]
 	}
 	q.items[id] = a
 	cp := *a
@@ -113,7 +118,7 @@ func (q *Queue) CreateFull(authID, transportReqID, appPubkey, appID, appName, me
 
 // CreateStagedFull 一次装配完整暂存审批：落盘绑定完成前不进入待办列表，不能被
 // 决定或认领；调用方必须在持久化成功后 Publish，未成功则 Discard。
-func (q *Queue) CreateStagedFull(authID, transportReqID, appPubkey, appID, appName, method string, params map[string]any, origin string, requirements []string, digest string, reqBinaries map[string][]byte) *Approval {
+func (q *Queue) CreateStagedFull(authID, transportReqID, method string, params map[string]any, origin string, reqBinaries map[string][]byte, identity ...string) *Approval {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.seq++
@@ -121,13 +126,20 @@ func (q *Queue) CreateStagedFull(authID, transportReqID, appPubkey, appID, appNa
 	now := time.Now().UnixMilli()
 	cpParams := deepCopyApprovalParams(params)
 	a := &Approval{
-		ID: id, AppPublicKey: appPubkey, AppID: appID, AppName: appName, Method: method,
+		ID: id, Method: method,
 		Params: cpParams, Origin: origin,
-		Requirements:   append([]string(nil), requirements...),
-		IdentityDigest: digest,
-		Status:         "staged", CreatedAt: now,
+		Status: "staged", CreatedAt: now,
 		AuthorizationID: authID, TransportRequestID: transportReqID,
 		ExpiresAt: approvalExpiry(cpParams, now), ReqBinaries: copyApprovalBinaries(reqBinaries),
+	}
+	if len(identity) > 0 {
+		a.AppPublicKeyHex = identity[0]
+	}
+	if len(identity) > 1 {
+		a.DeploymentID = identity[1]
+	}
+	if len(identity) > 2 {
+		a.DeploymentGeneration = identity[2]
 	}
 	q.items[id] = a
 	cp := *a
@@ -375,6 +387,7 @@ func (q *Queue) CompletedResult(id string) (result any, binaries map[string][]by
 	}
 	return a.Result, a.Binaries, a.ExecErrorCode, a.ExecErrorMsg, true
 }
+
 // IsExpired 判断审批是否已过期限。
 func (a Approval) IsExpired(now int64) bool {
 	if a.ExpiresAt == 0 {
@@ -426,10 +439,9 @@ func (q *Queue) SweepExpired(now int64) []Approval {
 func (a Approval) View() map[string]any {
 	params := redactParamsForView(a.Method, a.Params)
 	view := map[string]any{
-		"id": a.ID, "appPublicKey": a.AppPublicKey, "appId": a.AppID, "appName": a.AppName,
+		"id":     a.ID,
 		"method": a.Method, "params": params, "origin": a.Origin,
-		"requirements": append([]string(nil), a.Requirements...),
-		"identityDigestHex": a.IdentityDigest, "status": a.Status, "createdAt": a.CreatedAt,
+		"status": a.Status, "createdAt": a.CreatedAt,
 		"expiresAt": a.ExpiresAt, "authorizationId": a.AuthorizationID,
 	}
 	if len(a.ReqBinaries) > 0 {

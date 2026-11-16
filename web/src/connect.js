@@ -127,11 +127,10 @@ function receiverSend(target, origin, message) {
 }
 
 // 钱包主动启动：向后台签发一次性令牌（钱包管理上下文，需已初始化并解锁）。
-// 前端不能自行生成授权；后台签发时独立解析应用身份证明并绑定发布者、应用标识、
-// 身份摘要与许可范围，消费时 proof 必须与之完全一致。
-export async function issueLaunchToken(origin) {
+// 前端不能自行生成授权；后台由已确认的目标 URL 推导 origin 并绑定，不抓取证明、不做能力预检。
+export async function issueLaunchToken(origin, target = {}) {
   const c = await getClient();
-  return c.call(undefined, 'connect.launch.issue', { origin });
+  return c.call(undefined, 'connect.launch.issue', { origin, ...target });
 }
 
 // 登记钱包启动的应用上下文。origin 为应用精确来源；getSource 返回
@@ -423,11 +422,8 @@ async function handleRequest(req, recv) {
       // 并携带 authorizationId；宿主只复核既有授权，不重复审批、不新建授权。
       if (method === 'connect.resume' && req.authorizationId) {
         try {
-          // 刷新恢复附带当前入口 proof（如有），由后台核对原授权绑定身份；心跳无 proof 时按原授权恢复。
-          const resumeProof = req.params?.appIdentity;
           const resumed = await client.call({ signal }, 'connect.request.exec', {
             method, origin, authorizationId: req.authorizationId, requestId: req.id,
-            ...(resumeProof ? { proof: resumeProof } : {}),
           });
           // 同一连接的心跳/刷新恢复成功：沿用原授权，本连接继续持有，不新建映射到他处。
           // 刷新后的新连接先由后台验证记录中的授权，再建立新映射，不要求新 Receiver 事先已有映射。
@@ -450,13 +446,12 @@ async function handleRequest(req, recv) {
         }
         return;
       }
-      const proof = params.appIdentity;
-      if (!proof) {
-        recv.replyError(req, { code: 'invalid_request', message: '缺少 App 身份证明' });
+      if ('appIdentity' in params) {
+        recv.replyError(req, { code: 'invalid_request', message: 'App 身份字段已删除' });
         return;
       }
       const res = await client.call({ signal }, 'connect.request.exec', {
-        method, params, proof, origin, requestId: req.id,
+        method, params, origin, requestId: req.id,
       });
       if (res && res.approvalId) {
         pendingApproval.set(res.approvalId, { approvalId: res.approvalId, ctx: req, method, origin, reqId: req.id, receiver: recv });

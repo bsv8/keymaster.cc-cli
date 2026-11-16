@@ -23,30 +23,26 @@ type PaymentOutput struct {
 type PaymentStatus string
 
 const (
-	PaymentPending          PaymentStatus = "pending"
-	PaymentNotSigned        PaymentStatus = "not_signed"
-	PaymentUnknown          PaymentStatus = "unknown"
-	PaymentFailed           PaymentStatus = "failed"
-	PaymentAccepted         PaymentStatus = "accepted"
-	PaymentAlreadyKnown     PaymentStatus = "already_known"
+	PaymentPending      PaymentStatus = "pending"
+	PaymentNotSigned    PaymentStatus = "not_signed"
+	PaymentUnknown      PaymentStatus = "unknown"
+	PaymentFailed       PaymentStatus = "failed"
+	PaymentAccepted     PaymentStatus = "accepted"
+	PaymentAlreadyKnown PaymentStatus = "already_known"
 )
 
 // PaymentRecord 为持久幂等记录；RawHex 为冻结的已签名交易原文（批准前冻结，批准后原样广播）。
-// AuthorizationID/IdentityDigest/Requirements/Generation 为创建时的原授权快照，
+// AuthorizationID/Generation 为创建时的原授权快照，
 // 广播前必须复核原授权及运行代际，不能借新授权继续旧申请。
-// ApprovalID 为冻结后创建的审批，未创建时为空；重启收敛据此区分“从未审批”与“审批可能已执行”。
 type PaymentRecord struct {
+	AppPublicKeyHex   string          `json:"appPublicKeyHex"`
 	Key               string          `json:"key"`
 	PaymentID         string          `json:"paymentId"`
 	ClientRequestID   string          `json:"clientRequestId"`
 	Origin            string          `json:"origin"`
 	OwnerPublicKeyHex string          `json:"ownerPublicKeyHex"`
 	Network           string          `json:"network"`
-	AppID             string          `json:"appId"`
-	AppPublicKey      string          `json:"appPublicKey"`
 	AuthorizationID   string          `json:"authorizationId,omitempty"`
-	IdentityDigest    string          `json:"identityDigestHex,omitempty"`
-	Requirements      []string        `json:"requirements,omitempty"`
 	Generation        string          `json:"generation,omitempty"`
 	ApprovalID        string          `json:"approvalId,omitempty"`
 	RequestDigest     string          `json:"requestDigest"`
@@ -63,8 +59,8 @@ type PaymentRecord struct {
 
 // PaymentStore 持久保存付款记录（钱包根/connect/payments.json）。
 type PaymentStore struct {
-	mu   sync.Mutex
-	path string
+	mu    sync.Mutex
+	path  string
 	byKey map[string]PaymentRecord
 }
 
@@ -233,7 +229,7 @@ func (s *PaymentStore) Claim(r PaymentRecord, maxPending int) (created bool, exi
 	if maxPending > 0 {
 		n := 0
 		for _, cur := range s.byKey {
-			if cur.Origin == r.Origin && cur.OwnerPublicKeyHex == r.OwnerPublicKeyHex && cur.Network == r.Network && cur.AppID == r.AppID && cur.AppPublicKey == r.AppPublicKey {
+			if cur.AppPublicKeyHex == r.AppPublicKeyHex && cur.OwnerPublicKeyHex == r.OwnerPublicKeyHex && cur.Network == r.Network {
 				if cur.Status == PaymentPending || cur.Status == PaymentUnknown {
 					n++
 				}
@@ -260,6 +256,7 @@ func (s *PaymentStore) Claim(r PaymentRecord, maxPending int) (created bool, exi
 //   - pending 且无 RawHex（选币/冻结从未完成）：明确未提交，转 not_signed；
 //   - pending、有 RawHex 但无 ApprovalID（冻结完成但审批从未创建）：从未广播，转 not_signed；
 //   - pending、有 RawHex 且有 ApprovalID（审批存在过，批准与广播结果已不可考）：转 unknown，保留原申请查询能力。
+//
 // unknown/not_signed/failed/accepted/already_known 不动。
 func (s *PaymentStore) ReconcileAfterRestart() error {
 	s.mu.Lock()
@@ -301,12 +298,12 @@ func (s *PaymentStore) ReconcileAfterRestart() error {
 }
 
 // CountPending 统计同身份下非终态记录数，用于限流。
-func (s *PaymentStore) CountPending(origin, owner, network, appID, publisher string) int {
+func (s *PaymentStore) CountPending(appPublicKeyHex, owner, network string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
 	for _, r := range s.byKey {
-		if r.Origin == origin && r.OwnerPublicKeyHex == owner && r.Network == network && r.AppID == appID && r.AppPublicKey == publisher {
+		if r.AppPublicKeyHex == appPublicKeyHex && r.OwnerPublicKeyHex == owner && r.Network == network {
 			if r.Status == PaymentPending || r.Status == PaymentUnknown {
 				n++
 			}
@@ -315,9 +312,9 @@ func (s *PaymentStore) CountPending(origin, owner, network, appID, publisher str
 	return n
 }
 
-// PaymentIdentityKey 与钱包侧一致：网络、来源、owner、appId、publisher。
-func PaymentIdentityKey(network, origin, owner, appID, publisher string) string {
-	raw, _ := json.Marshal([]any{"keymaster.connect-payment-id.v1", network, origin, owner, appID, publisher})
+// PaymentIdentityKey 与 Web 钱包一致：网络、钱包、已验证 App 公钥。
+func PaymentIdentityKey(network, appPublicKeyHex, owner string) string {
+	raw, _ := json.Marshal([]any{"keymaster.connect-payment-id.v1", network, owner, appPublicKeyHex})
 	return string(raw)
 }
 
