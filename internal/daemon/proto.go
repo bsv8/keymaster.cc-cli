@@ -120,6 +120,9 @@ func applySettingsUpdate(next *appconfig.Settings, body *kmapi.SettingsUpdate) e
 	if body.Port != nil {
 		next.Port = *body.Port
 	}
+	if body.ApplicationOpenMode != nil {
+		next.ApplicationOpenMode = *body.ApplicationOpenMode
+	}
 	if body.Theme != nil {
 		next.Theme = *body.Theme
 	}

@@ -129,16 +129,17 @@ type ServerDefaults struct {
 // Settings is the settings.json document. Port is resettable; the network
 // identity lives in info.json.
 type Settings struct {
-	Version                int            `json:"version"`
-	Revision               int64          `json:"revision"`
-	Port                   int            `json:"port"`
-	Theme                  string         `json:"theme"`
-	Language               string         `json:"language"`
-	WOCAPIKey              string         `json:"wocApiKey"`
-	FeeRateSatoshisPerKb   int64          `json:"feeRateSatoshisPerKb"`
-	Scheduler              Scheduler      `json:"scheduler"`
-	Services               Services       `json:"services"`
-	Server                 ServerDefaults `json:"server"`
+	Version              int            `json:"version"`
+	Revision             int64          `json:"revision"`
+	Port                 int            `json:"port"`
+	Theme                string         `json:"theme"`
+	ApplicationOpenMode  string         `json:"applicationOpenMode"`
+	Language             string         `json:"language"`
+	WOCAPIKey            string         `json:"wocApiKey"`
+	FeeRateSatoshisPerKb int64          `json:"feeRateSatoshisPerKb"`
+	Scheduler            Scheduler      `json:"scheduler"`
+	Services             Services       `json:"services"`
+	Server               ServerDefaults `json:"server"`
 }
 
 // Default supplier identity (bsv8 gateway); address differs per network.
@@ -313,6 +314,9 @@ func validateSettings(st *Settings) error {
 	if !validTheme(st.Theme) {
 		return fmt.Errorf("主题无效: %q", st.Theme)
 	}
+	if st.ApplicationOpenMode != "iframe" && st.ApplicationOpenMode != "popup" {
+		return errors.New("invalid application open mode")
+	}
 	if !validLanguage(st.Language) {
 		return fmt.Errorf("语言无效: %q", st.Language)
 	}
@@ -413,6 +417,7 @@ func defaultsSettings(network string) *Settings {
 		Revision:             0,
 		Port:                 DefaultPort,
 		Theme:                "system",
+		ApplicationOpenMode:  "iframe",
 		Language:             "system",
 		WOCAPIKey:            "",
 		FeeRateSatoshisPerKb: 1000,
@@ -553,6 +558,9 @@ func (s *Store) Load() error {
 func applySettingsDefaults(st *Settings, network string) {
 	if st.Port == 0 {
 		st.Port = DefaultPort
+	}
+	if st.ApplicationOpenMode == "" {
+		st.ApplicationOpenMode = "iframe"
 	}
 	if st.Theme == "" {
 		st.Theme = "system"

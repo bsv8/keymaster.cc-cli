@@ -18,6 +18,8 @@ github.com/bsv8/ChannelProtocol v0.6.0 h1:XuYue6SYAj2P10Ki58Gir6ccUD8RRF5LNyIwPU
 github.com/bsv8/ChannelProtocol v0.6.0/go.mod h1:4bfggFR9kvvofFLsiGqwTzKs/b+3KCNdIQWD36M9jNY=
 github.com/bsv8/KeyHold/go/v2 v2.1.0 h1:jXWOFfz6vBUBFcYs/cr/LdvbgSzibccBkvm9my3BuLU=
 github.com/bsv8/KeyHold/go/v2 v2.1.0/go.mod h1:OZLWScchU7HuTAesjurR5j5buSOezhZX9NAUS68ZaYs=
+github.com/bsv8/KeymasterAPIProtocol v0.1.1 h1:RvvvgpzSUvjKW7jSyrVr1QsUyzKeO/giOD5FWJmCm8U=
+github.com/bsv8/KeymasterAPIProtocol v0.1.1/go.mod h1:U4+GXS/iLJ57/Wl6PCuVGyhUSW5zIEotJO+a7ajzJas=
 github.com/bsv8/MasterSeed v1.1.0 h1:ew2FpSdf9cEMpvmAndYEnCd6XwLjiiw9wRxIGjIpwqY=
 github.com/bsv8/MasterSeed v1.1.0/go.mod h1:ULMCjerY24hd1aSwb2FXrYrQmjE0xCdbQ1iCbQTIVME=
 github.com/bsv8/MultisigPool/v4 v4.0.0 h1:7r7MjHpo2R/73trH9XYlEg0NIn6nemKzcue3z4TlsZE=

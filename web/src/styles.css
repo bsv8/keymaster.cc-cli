@@ -48,36 +48,48 @@ body {
   font-size: 14px;
   line-height: 1.55;
 }
-.layout { display: flex; min-height: 100vh; }
-.sidebar {
-  width: 216px; flex-shrink: 0;
-  background: var(--sidebar); color: var(--sidebar-text);
-  display: flex; flex-direction: column; padding: 18px 12px;
-  position: sticky; top: 0; height: 100vh;
+/* 工作区对齐 keymaster.cc；iframe 保持固定父节点，切换仅隐藏。 */
+.layout { display:flex; flex-direction:column; height:100dvh; overflow:hidden; }
+.layout [hidden] { display:none!important; }
+.topbar { display:flex; align-items:center; gap:8px; min-height:48px; padding:6px 16px; background:var(--card); border-bottom:1px solid var(--border); flex:none; z-index:5; }
+.topbar .spacer { flex:1; }
+.workspace-brand { display:flex; align-items:center; gap:9px; background:transparent; color:var(--text); padding:0; font-size:15px; }
+.workspace-brand img { width:26px; height:26px; }
+.workspace-body { display:flex; flex:1; min-height:0; }
+.sidebar { width:260px; flex:none; overflow:auto; background:var(--card); border-right:1px solid var(--border); padding:8px; }
+.workspace-menu-caption { color:var(--muted); font-size:12px; padding:8px 10px; }
+.nav { display:flex; flex-direction:column; gap:3px; }
+.nav button,.workspace-app-menu-row button { background:transparent; color:var(--text); text-align:left; font-weight:400; border-radius:5px; padding:8px 10px; }
+.nav button:hover,.workspace-app-menu-row button:hover { background:var(--bg); }
+.nav button.active,.workspace-app-menu-row button[aria-current=true] { background:var(--accent-soft); }
+.workspace-app-menu-row { display:flex; min-width:0; }
+.workspace-app-menu-row > button:first-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.main { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
+.workspace-tabs-row { display:flex; flex:none; min-height:39px; background:var(--card); border-bottom:1px solid var(--border); }
+.workspace-sidebar-toggle { flex:none; background:transparent; color:var(--muted); border-right:1px solid var(--border); border-radius:0; padding:6px 12px; }
+.workspace-tabs { display:flex; flex:1; min-width:0; overflow-x:auto; }
+.workspace-tabs > button,.workspace-tab-app { flex:none; }
+.workspace-tab-app { display:flex; }
+.workspace-tabs button { position:relative; background:transparent; color:var(--muted); border-radius:0; padding:8px 12px; font-weight:400; }
+.workspace-tabs [role=tab][aria-selected=true] { color:var(--text); background:var(--accent-soft); }
+.workspace-tabs [role=tab][aria-selected=true]::after { content:''; position:absolute; inset:auto 0 0; border-bottom:2px solid var(--accent); }
+.workspace-tabs .workspace-close { padding:4px 8px; }
+.workspace-route { overflow:auto; flex:1; min-height:0; }
+.workspace-app-outlet { flex:1; min-height:0; position:relative; }
+.workspace-app-frame { width:100%; height:100%; border:0; display:block; background:var(--card); }
+.content { padding:20px 24px 48px; max-width:1120px; width:100%; margin:0 auto; }
+button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.application-launch-dialog { max-width:600px; width:calc(100% - 32px); max-height:85dvh; overflow:auto; border:1px solid var(--border); border-radius:10px; padding:24px; background:var(--card); color:var(--text); }
+.application-launch-dialog .launch-target { overflow-wrap:anywhere; }
+.application-launch-dialog h2 { margin-top:0; }
+dialog:modal { overscroll-behavior:contain; }
+dialog::backdrop { background:rgb(0 0 0 / .45); overflow:hidden; overscroll-behavior:contain; }
+@media (max-width:640px) {
+ .topbar { flex-wrap:wrap; padding:6px 10px; gap:5px; }
+ .topbar .badge { font-size:10px; padding:2px 5px; }
+ .sidebar { width:min(260px,70vw); }
+ .content { padding:16px 12px 32px; }
 }
-.brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
-.brand img { width: 30px; height: 30px; border-radius: 8px; background: #fff; }
-.brand b { color: #fff; font-size: 16px; letter-spacing: 0.2px; }
-.brand small { display: block; color: var(--sidebar-text); font-size: 11px; font-weight: 400; }
-.nav { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
-.nav button {
-  background: transparent; border: 0; color: var(--sidebar-text);
-  text-align: left; padding: 9px 12px; border-radius: 8px; cursor: pointer;
-  font-size: 14px; display: flex; align-items: center; gap: 10px;
-}
-.nav button:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
-.nav button.active { background: rgba(255, 255, 255, 0.14); color: var(--sidebar-active); font-weight: 600; }
-.nav .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; opacity: 0.6; }
-.sidefoot { margin-top: auto; padding: 12px 8px 0; font-size: 11px; color: var(--sidebar-text); opacity: 0.75; }
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.topbar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 14px 24px; background: var(--card); border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 5;
-}
-.topbar h1 { font-size: 17px; margin: 0; font-weight: 650; }
-.topbar .spacer { flex: 1; }
-.content { padding: 20px 24px 48px; max-width: 1120px; width: 100%; margin: 0 auto; }
 .badge {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
@@ -164,14 +176,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .section-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 4px; }
 .section-head h2 { margin: 0; }
 .section-head .hint { margin-left: auto; }
-@media (max-width: 860px) {
-  .sidebar { width: 100%; height: auto; position: static; flex-direction: row; align-items: center; }
-  .nav { flex-direction: row; flex-wrap: wrap; }
-  .sidefoot { display: none; }
-  .layout { flex-direction: column; }
-  .brand { padding: 0 8px 0 0; }
-}
-
 /* 全局待办条与审批顶层面板：对齐 keymaster.cc ApplicationCenter */
 .application-alert {
   position: sticky; top: 0; z-index: 40;

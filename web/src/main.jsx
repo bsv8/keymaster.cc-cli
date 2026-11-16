@@ -4,7 +4,8 @@ import './styles.css';
 import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
-import { initConnectReceiver, issueLaunchToken, registerLaunchedApp, teardownLaunchedApp, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
+import { initConnectReceiver, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
+import { ApplicationWorkspace, ApplicationLaunchDialog, WorkspaceTabs, useWorkspace, useApplicationWorkspace } from './workspace.jsx';
 import { GlobalApproval, AppCenter, DirectoryCenter } from './approvalCenter.jsx';
 
 const TABS = [
@@ -265,6 +266,7 @@ function SettingsPage({ onTheme }) {
           revision: s.revision,
           port: Number(s.port),
           theme: s.theme,
+          applicationOpenMode: s.applicationOpenMode,
           language: s.language,
           wocApiKey: s.wocApiKey || '',
           feeRateSatoshisPerKb: Number(s.feeRateSatoshisPerKb),
@@ -339,6 +341,12 @@ function SettingsPage({ onTheme }) {
               <option value="ja">日本語</option>
             </select>
           </label>
+          <label>应用打开方式
+            <select data-testid="application-open-mode" value={s.applicationOpenMode} onChange={e => set({ applicationOpenMode: e.target.value })}>
+              <option value="iframe">内嵌 Tab（默认）</option><option value="popup">新窗口</option>
+            </select>
+            <small>仅影响之后打开的应用，已打开应用保持原方式。</small>
+          </label>
           <label>{t('WoC API Key')}<input value={s.wocApiKey || ''} onChange={(e) => set({ wocApiKey: e.target.value })} autoComplete="off" placeholder={t('可选')} /></label>
           <label>{t('手续费率 sats/KB')}<input data-testid="settings-fee-rate" type="number" value={s.feeRateSatoshisPerKb ?? ''} onChange={(e) => set({ feeRateSatoshisPerKb: e.target.value === '' ? 0 : Number(e.target.value) })} /></label>
         </div>
@@ -406,116 +414,21 @@ function SettingsPage({ onTheme }) {
   );
 }
 
+/** 连接页只提供入口；工作区持有应用，导航不会结束应用连接。 */
 function ConnectPanel() {
-  const [err, setErr] = React.useState('');
-  const [demoUrl, setDemoUrl] = React.useState('');
-  const [walletReady, setWalletReady] = React.useState(false);
-  const [launchErr, setLaunchErr] = React.useState('');
-  const [launchBusy, setLaunchBusy] = React.useState(false);
-  const [iframeSrc, setIframeSrc] = React.useState('');
-  const iframeRef = React.useRef(null);
-  const iframeHandleRef = React.useRef(null);
-  const load = React.useCallback(async () => {
-    try {
-      const c = await getClient();
-      const st = await c.status().catch(() => null);
-      setWalletReady(!!(st && st.initialized && !st.locked));
-      setErr('');
-    } catch (e) { setErr(String(e?.message || e)); }
-  }, []);
-  // 订阅替代轮询：Connect 状态变化时重载；不长期维护两套状态来源。
-  React.useEffect(() => watchTopics(['connect'], () => load()), [load]);
-  React.useEffect(() => { load(); }, [load]);
-  // 独立窗口的连接管理归钱包整体生命周期（App 根 effect 定期收殓已关闭窗口，
-  // 卸载时 teardown 全部启动连接）；面板卸载只处理随展示销毁的 iframe，
-  // 页面导航不得误终止仍在运行的独立窗口。
-  React.useEffect(() => () => {
-    if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
-  }, []);
-  const parseLaunchInput = (value) => {
-    const trimmed = String(value || '').trim();
-    const u = new URL(trimmed);
-    if (!['http:', 'https:'].includes(u.protocol) || !u.host) throw new Error('应用地址必须为 HTTP(S) URL');
-    return { origin: u.origin, href: u.href };
-  };
-  const withLaunchParams = (href, token, mode) => {
-    const u = new URL(href);
-    u.searchParams.set('launchToken', token);
-    u.searchParams.set('sessionWindowOrigin', window.location.origin);
-    u.searchParams.set('mode', mode === 'iframe' ? 'iframe' : 'appView');
-    return u.href;
-  };
-  // 窗口方式在点击时预留窗口，避免异步签发后被拦截；签发失败则关闭预留窗口。
-  // 保留完整 URL 的路径/查询/片段，不截成 origin 根路径。
-  const launchWindow = async () => {
-    setLaunchErr('');
-    let child = null;
-    try {
-      const { origin, href } = parseLaunchInput(demoUrl);
-      setLaunchBusy(true);
-      child = window.open('about:blank', '_blank');
-      if (!child) throw new Error('应用窗口被拦截');
-      const issued = await issueLaunchToken(origin);
-      if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
-      const url = withLaunchParams(href, issued.launchToken, 'appView');
-      const handle = registerLaunchedApp({ origin, getSource: () => child, kind: 'window', child });
-      try {
-        child.location.href = url;
-      } catch (e) {
-        try { teardownLaunchedApp(handle); } catch { /* ignore */ }
-        throw e;
-      }
-    } catch (e) {
-      try { if (child && !child.closed) child.close(); } catch { /* ignore */ }
-      setLaunchErr(String(e?.message || e));
-    } finally {
-      setLaunchBusy(false);
-    }
-  };
-  // 页内方式由钱包页面挂载 iframe；应用以 parent 为启动方自动 launch。
-  const launchIframe = async () => {
-    setLaunchErr('');
-    try {
-      const { origin, href } = parseLaunchInput(demoUrl);
-      setLaunchBusy(true);
-      const issued = await issueLaunchToken(origin);
-      if (!issued || !issued.launchToken) throw new Error('签发启动令牌失败');
-      if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
-      const handle = registerLaunchedApp({ origin, getSource: () => (iframeRef.current ? iframeRef.current.contentWindow : null), kind: 'iframe' });
-      iframeHandleRef.current = handle;
-      setIframeSrc(withLaunchParams(href, issued.launchToken, 'iframe'));
-    } catch (e) {
-      setLaunchErr(String(e?.message || e));
-    } finally {
-      setLaunchBusy(false);
-    }
-  };
-  const closeIframe = () => {
-    setIframeSrc('');
-    if (iframeHandleRef.current) { try { teardownLaunchedApp(iframeHandleRef.current); } catch { /* ignore */ } iframeHandleRef.current = null; }
-  };
-  return (
-    <div>
-      <section className="card"><h2>启动应用</h2>
-        <p className="hint">钱包已初始化并解锁后才能启动；点击启动即授权，应用自动完成登录，不再弹第二次审批。</p>
-        {launchErr && <p className="error" data-testid="launch-error">{launchErr}</p>}
-        <div className="row">
-          <input data-testid="launch-demo-url" value={demoUrl} onChange={(e) => setDemoUrl(e.target.value)} placeholder="应用地址（完整 URL，如 http://127.0.0.1:4392/app?x=1#y）" className="mono" style={{ minWidth: 320 }} />
-          <button type="button" data-testid="launch-window" disabled={!walletReady || launchBusy} onClick={launchWindow}>窗口打开</button>
-          <button type="button" data-testid="launch-iframe" disabled={!walletReady || launchBusy} onClick={launchIframe}>页内打开</button>
-        </div>
-        {!walletReady && <p className="hint">钱包未就绪或已锁定：先完成初始化并解锁。</p>}
-        {iframeSrc && <div style={{ marginTop: 12 }}>
-          <div className="row"><span className="hint mono">{iframeSrc}</span><button type="button" className="danger" onClick={closeIframe}>关闭页内应用</button></div>
-          <iframe data-testid="launch-iframe-view" ref={iframeRef} src={iframeSrc} title="launched-app" style={{ width: '100%', height: 560, border: '1px solid var(--border, #ccc)' }} />
-        </div>}
-      </section>
-      <div style={{ marginTop: 12 }}>
-        {err && <p className="error">{err}</p>}
-        <AppCenter />
+  const workspace = useApplicationWorkspace();
+  const [demoUrl, setDemoUrl] = useState('');
+  return <div>
+    <section className="card"><h2>启动应用</h2>
+      <p className="hint">确认应用与当前钱包后自动登录；打开方式在设置中统一选择。<span data-testid="application-open-mode-summary">{workspace.mode}</span></p>
+      {workspace.settingsError && <p className="error">{workspace.settingsError}</p>}
+      <div className="row">
+        <input data-testid="launch-demo-url" value={demoUrl} onChange={e => setDemoUrl(e.target.value)} placeholder="应用完整 HTTP(S) URL" />
+        <button type="button" data-testid="launch-app" disabled={!workspace.ready || workspace.busy} onClick={() => workspace.requestLaunch({ url: demoUrl.trim(), title: demoUrl.trim(), testId: 'launch-iframe-view' })}>打开应用</button>
       </div>
-    </div>
-  );
+    </section>
+    <div className="mt"><AppCenter /></div>
+  </div>;
 }
 
 function WalletInit({ onDone }) {
@@ -549,13 +462,15 @@ function WalletInit({ onDone }) {
 function App() {
   const pageFromLocation = () => TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? 'overview';
   const [page, updatePage] = useState(pageFromLocation);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const setPage = (next) => {
+    workspace.select(null);
     const path = next === 'overview' ? '/' : `/${next}`;
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
     updatePage(next);
   };
   useEffect(() => {
-    const onPopState = () => updatePage(pageFromLocation());
+    const onPopState = () => { updatePage(pageFromLocation()); workspace.select(null); };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
@@ -573,6 +488,7 @@ function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [conn, setConn] = useState('connecting');
   const instanceRef = useRef('');
+  const workspace = useWorkspace({ status, info, conn });
 
   useAppliedTheme(theme);
 
@@ -593,7 +509,7 @@ function App() {
   }, [conn, status, info]);
   // 独立启动窗口与 popup 传输对端的连接管理归钱包整体生命周期：
   // 定期收殓已关闭窗口与已关闭的应用方卸载时 teardown 全部启动连接并尽力发送官方 closing 通知；
-  // 面板切换只影响 iframe 展示不误终止独立窗口。
+  // 视图由工作区持有，菜单和 Tab 切换不终止应用连接。
   useEffect(() => {
     initConnectReceiver().catch(() => {});
     const t = setInterval(() => { try { sweepClosedLaunchedApps(); sweepClosedPopup(); } catch { /* ignore */ } }, 2000);
@@ -726,25 +642,12 @@ function App() {
   const rootPath = (id) => (roots?.roots || []).find((r) => r.id === id)?.path || '—';
   const defaultRootPath = rootPath(roots?.defaultDownloadRootID);
 
+  const title = t(TABS.find(tab => tab.id === page)?.label || 'Keymaster 后台');
   return (
+    <ApplicationWorkspace.Provider value={workspace}>
     <div className="layout">
-      <aside className="sidebar">
-        <div className="brand">
-          <img src="/favicon.svg" alt="km" />
-          <div><b>km</b><small>{t('Keymaster 后台')}</small></div>
-        </div>
-        <nav className="nav">
-          {TABS.map((tab) => (
-            <button key={tab.id} type="button" data-testid={`nav-${tab.id}`} className={page === tab.id ? 'active' : ''} onClick={() => setPage(tab.id)}>
-              <span className="dot" />{t(tab.label)}
-            </button>
-          ))}
-        </nav>
-        <div className="sidefoot">{t('单二进制 · 本机回环')}<br />{t('主题跟随系统/设置')}</div>
-      </aside>
-      <div className="main">
         <header className="topbar">
-          <h1>{TABS.find((t) => t.id === page)?.label ? t(TABS.find((x) => x.id === page).label) : t('Keymaster 后台')}</h1>
+          <button type="button" className="workspace-brand" aria-label="Keymaster 首页" onClick={() => setPage('overview')}><img src="/favicon.svg" alt="" /><strong>Keymaster</strong></button>
           <span className="spacer" />
           <span className="badge" data-testid="connection-state" data-state={conn}>{conn === 'connected' ? t('已连接') : conn === 'connecting' ? t('连接中') : conn === 'protocol-incompatible' ? t('协议不兼容') : t('已断开')}</span>
           {conn === 'disconnected' && <button type="button" className="ghost" onClick={() => retryConnection()}>{t('重试')}</button>}
@@ -752,6 +655,26 @@ function App() {
           <StateBadge state={conn === 'connected' ? status?.state : undefined} locked={status?.locked ?? info?.locked} />
           {info?.network && <span className="badge">{info.network} · {info?.address ? `${info.address.slice(0, 8)}…` : ''}</span>}
         </header>
+      <div className="workspace-body">
+      <aside id="workspace-menu" className="sidebar" hidden={!sidebarOpen}>
+        <div className="workspace-menu-caption">菜单</div>
+        {workspace.views.length > 0 && <nav className="workspace-app-menu" aria-label="已打开应用">
+          <div className="workspace-menu-caption">应用</div>
+          {workspace.views.map(view => <div className="workspace-app-menu-row" key={view.id}>
+            <button type="button" aria-current={workspace.active === view.id ? 'true' : undefined} onClick={() => workspace.select(view.id)}>{view.title}</button>
+            <button type="button" className="workspace-close" aria-label={`关闭 ${view.title}`} onClick={() => workspace.close(view.id)}>×</button>
+          </div>)}
+        </nav>}
+        <nav className="nav" aria-label="钱包功能">
+          {TABS.map(tab => <button key={tab.id} type="button" data-testid={`nav-${tab.id}`} className={!workspace.active && page === tab.id ? 'active' : ''} onClick={() => setPage(tab.id)}>{t(tab.label)}</button>)}
+        </nav>
+      </aside>
+      <main className="main">
+        <div className="workspace-tabs-row">
+          <button type="button" className="workspace-sidebar-toggle" aria-controls="workspace-menu" aria-expanded={sidebarOpen} aria-label={sidebarOpen ? '收起菜单' : '展开菜单'} onClick={() => setSidebarOpen(open => !open)}>☰</button>
+          <WorkspaceTabs workspace={workspace} title={title} />
+        </div>
+        <div className="workspace-route" role="tabpanel" aria-labelledby="internal-tab" hidden={!!workspace.active}>
         <div className="content">
           {error && <p className="error">{error}</p>}
       {!status?.initialized && status && (
@@ -846,16 +769,16 @@ function App() {
           <table>
             <thead><tr><th>{t('seed')}</th><th>{t('状态')}</th><th>{t('进度')}</th><th>{t('完成路径')}</th><th>{t('操作')}</th></tr></thead>
             <tbody>
-              {tasks.map((t) => (
-                <tr key={t.seedHashHex}>
-                  <td className="mono">{t.seedHashHex.slice(0, 12)}…</td>
-                  <td>{{pending: t('待提交'), running: t('运行中'), done: t('已完成'), failed: t('失败'), cancelled: t('已取消')}[t.state] || t.state}{t.detail ? ` · ${t.detail}` : ''}{t.error ? ` · ${t.error}` : ''}</td>
+              {tasks.map((task) => (
+                <tr key={task.seedHashHex}>
+                  <td className="mono">{task.seedHashHex.slice(0, 12)}…</td>
+                  <td>{{pending: t('待提交'), running: t('运行中'), done: t('已完成'), failed: t('失败'), cancelled: t('已取消')}[task.state] || task.state}{task.detail ? ` · ${task.detail}` : ''}{task.error ? ` · ${task.error}` : ''}</td>
                   <td>
-                    <div className="progress"><i style={{ width: `${t.blocksTotal ? Math.round((t.blocksDone / t.blocksTotal) * 100) : 0}%` }} /></div>
-                    <span className="hint">{t.blocksDone}/{t.blocksTotal}</span>
+                    <div className="progress"><i style={{ width: `${task.blocksTotal ? Math.round((task.blocksDone / task.blocksTotal) * 100) : 0}%` }} /></div>
+                    <span className="hint">{task.blocksDone}/{task.blocksTotal}</span>
                   </td>
-                  <td className="mono">{t.finalPath || '—'}</td>
-                  <td>{['pending', 'running'].includes(t.state) && <button className="danger" onClick={() => cancelTask(t.seedHashHex)}>{t('取消')}</button>}</td>
+                  <td className="mono">{task.finalPath || '—'}</td>
+                  <td>{['pending', 'running'].includes(task.state) && <button className="danger" onClick={() => cancelTask(task.seedHashHex)}>{t('取消')}</button>}</td>
                 </tr>
               ))}
             </tbody>
@@ -895,8 +818,13 @@ function App() {
 
           <p className="hint">{t('主题跟随系统或设置页选择（settings 唯一来源，本页不写 localStorage）。远程访问请自备反向代理与认证。')}</p>
         </div>
+        </div>
+        <div className="workspace-app-outlet" role="tabpanel" aria-labelledby={workspace.active ? `tab-${encodeURIComponent(workspace.active)}` : undefined} ref={workspace.outletRef} hidden={!workspace.active} />
+      </main>
       </div>
     </div>
+    <ApplicationLaunchDialog workspace={workspace} />
+    </ApplicationWorkspace.Provider>
   );
 }
 
