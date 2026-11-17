@@ -247,7 +247,7 @@ function SettingsPage({ onTheme }) {
     if (dirtyRef.current) {
       setConflict(t('设置已在别处修改，当前草稿可能过期；刷新将丢失草稿，保存将按表单 revision 覆盖。'));
     } else {
-      load();
+      return load();
     }
   }), [load]);
   useEffect(() => { if (s) onTheme(s.theme); }, [s, onTheme]);
@@ -550,7 +550,7 @@ function App() {
   }, []);
   // 原请求窗口订阅后台 connect 变化，收到决定后复核 Receiver 上下文再认领执行。
   // 重连后读完整快照再触发认领，不依赖某一页内存或仅依赖通知消息；无固定轮询兜底。
-  useEffect(() => watchTopics(['connect'], () => { pumpPendingApprovals().catch(() => {}); }), []);
+  useEffect(() => watchTopics(['connect'], () => pumpPendingApprovals().catch(() => {})), []);
 
   const load = useCallback(async () => {
     try {

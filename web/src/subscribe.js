@@ -4,6 +4,24 @@ import { getClient, getConnectionStatus, getInstanceId, onConnectionStatus } fro
 
 const watchers = new Set();
 
+/** 同一订阅只允许一轮刷新在途；期间的变化合并为下一轮，避免状态突发挤占业务请求。 */
+function markDirty(w) {
+  w.dirty = true;
+  if (w.refreshing) return;
+  w.refreshing = true;
+  void (async () => {
+    try {
+      while (watchers.has(w) && w.dirty) {
+        w.dirty = false;
+        try { await w.onDirty(); }
+        catch (error) {
+          if (import.meta.env.DEV) console.debug('[subscription] refresh failed', { topics: w.topics, name: error?.name });
+        }
+      }
+    } finally { w.refreshing = false; }
+  })();
+}
+
 /** 取消当前绑定；旧连接关闭时取消帧失败可忽略。 */
 function detach(w) {
   const ctrl = w.ctrl;
@@ -25,19 +43,19 @@ function attach(w) {
     const boundInstance = c.getInstanceId();
     w.cancelSub = c.subscribeEvents(w.topics, {
       onSnapshot: () => {
-        if (watchers.has(w) && w.ctrl === ctrl && c.getInstanceId() === boundInstance) w.onDirty();
+        if (watchers.has(w) && w.ctrl === ctrl && c.getInstanceId() === boundInstance) markDirty(w);
       },
       onEvent: () => {
         if (!watchers.has(w) || w.ctrl !== ctrl) return false;
         // 旧实例迟到事件丢弃：实例已变则忽略。
         if (c.getInstanceId() !== getInstanceId() || c.getInstanceId() !== boundInstance) return true;
-        w.onDirty();
+        markDirty(w);
       },
       onResync: () => {
         if (!watchers.has(w) || w.ctrl !== ctrl) return;
         // resync 可能来自缺口，也可能服务端已关闭该订阅；重新订阅并取新快照
         // 才能保证后续事件继续到达。
-        w.onDirty();
+        markDirty(w);
         attach(w);
       },
     }, { signal: ctrl.signal });
@@ -56,7 +74,7 @@ onConnectionStatus((status) => {
 
 /** 订阅主题变化，有变化或需重同步时调用 onDirty。返回取消函数。 */
 export function watchTopics(topics, onDirty) {
-  const w = { topics: [...topics], onDirty, ctrl: null, cancelSub: null };
+  const w = { topics: [...topics], onDirty, ctrl: null, cancelSub: null, dirty: false, refreshing: false };
   watchers.add(w);
   if (getConnectionStatus() === 'connected') attach(w);
   return () => {
