@@ -84,9 +84,6 @@ func (d *Daemon) opWalletImport(ctx context.Context, p kmapi.WalletImportRequest
 	if ctx.Err() != nil {
 		return nil, errDetail(kmapi.ErrStopping, "初始化请求已取消")
 	}
-	if p.Password == "" {
-		return nil, errDetail(kmapi.ErrBadRequest, "密码不能为空")
-	}
 	if strings.TrimSpace(p.KeyMaterial) == "" {
 		return nil, errDetail(kmapi.ErrBadRequest, "keyMaterial 必填")
 	}
@@ -105,16 +102,8 @@ func (d *Daemon) opWalletImport(ctx context.Context, p kmapi.WalletImportRequest
 	if err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, "导入文件不是有效的纯 KeyHold")
 	}
-	unlocked, err := keyhold.Unlock(doc, p.Password)
-	if err != nil {
-		return nil, errDetail(kmapi.ErrBadRequest, "解密失败（密码错误或文件损坏）")
-	}
-	auth := hmacBinding(unlocked.PrivateKey, network, unlocked.PublicKeyHex)
-	pubHex := unlocked.PublicKeyHex
-	for i := range unlocked.PrivateKey {
-		unlocked.PrivateKey[i] = 0
-	}
-	if err := d.persistNewWallet(network, pubHex, auth, raw); err != nil {
+	// Encrypted import stays locked; key verification and binding happen at unlock.
+	if err := d.persistNewWallet(network, doc.PublicKeyHex, "", raw); err != nil {
 		return nil, err
 	}
 	return kmapi.WalletImportResponse{Ok: true}, nil

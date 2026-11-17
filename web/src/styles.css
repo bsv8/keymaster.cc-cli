@@ -243,3 +243,22 @@ button.overview-app-tile:hover:not(:disabled) { background: var(--bg); }
 .inline-field { display:flex; flex:1; min-width:0; flex-direction:column; gap:4px; }
 .directory-dialog { color:var(--text); width:calc(100% - 32px); max-height:82dvh; }
 .directory-dialog h2 { margin-top:0; }
+
+.wallet-entry { min-height:100dvh; padding:24px 16px 48px; background:var(--bg); }
+.wallet-entry-brand { display:flex; align-items:center; gap:10px; max-width:920px; margin:0 auto 36px; font-size:20px; }
+.wallet-entry-panel { max-width:800px; margin:auto; padding:clamp(20px,4vw,40px); border:1px solid var(--border); border-radius:16px; background:var(--card); }
+.wallet-entry-panel h1 { margin:0 0 16px; font-size:clamp(1.5rem,3vw,2rem); }
+.wallet-entry-panel h1:focus { outline:none; }
+.wallet-entry-panel form { max-width:560px; margin:auto; }
+.wallet-entry-panel fieldset { min-width:0; border:0; padding:0; margin:0; }
+.wallet-entry-panel label:not(.check) { display:block; margin:16px 0 6px; }
+.wallet-entry-panel input:not([type=radio]):not([type=checkbox]),.wallet-entry-panel select,.wallet-entry-panel textarea { width:100%; font-size:max(1rem,1em); }
+.wallet-entry-panel .row { margin-top:24px; }
+.wallet-entry-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:16px; margin:24px 0; }
+.wallet-entry-cards button { display:flex; flex-direction:column; gap:14px; white-space:normal; text-align:left; color:var(--text); background:var(--bg); border:1px solid var(--border); padding:24px; }
+.wallet-entry-cards button[aria-pressed=true] { border-color:var(--accent); background:var(--accent-soft); }
+.wallet-entry-cards strong { font-size:1.15rem; }.wallet-entry-cards span { font-weight:400; }.wallet-entry-cards small { color:var(--accent); }
+.wallet-network { margin-top:20px!important; }.wallet-network legend { font-weight:600; }.wallet-network-options { display:flex; gap:16px; flex-wrap:wrap; }
+.wallet-network-options label { display:flex!important; align-items:center; gap:10px; padding:14px; border:1px solid var(--border); border-radius:10px; flex:1; min-width:140px; }
+.wallet-network-options input { flex:none; }.wallet-network-options small { display:block; color:var(--muted); }
+.wallet-steps { display:flex; flex-wrap:wrap; gap:12px; list-style:none; padding:0; color:var(--muted); }.wallet-steps [aria-current=step] { color:var(--accent); font-weight:600; }

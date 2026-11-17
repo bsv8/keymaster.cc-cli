@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
+import { WalletFrame, WalletOnboarding, WalletUnlock } from './walletEntry.jsx';
 import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
-import { getClient, getInstanceId, onConnectionStatus, retryConnection } from './client.js';
+import { getClient, getInstanceId, getConnectionStatus, onConnectionStatus, retryConnection } from './client.js';
 import { initConnectReceiver, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
 import { ApplicationWorkspace, ApplicationLaunchDialog, WorkspaceTabs, useWorkspace, useApplicationWorkspace } from './workspace.jsx';
 import { OverviewApps } from './overviewApps.jsx';
@@ -448,64 +449,6 @@ function ConnectPanel() {
   </div>;
 }
 
-function WalletInit({ onDone }) {
-  const [mode, setMode] = React.useState('new');
-  const [password, setPassword] = React.useState('');
-  const [confirmation, setConfirmation] = React.useState('');
-  const [network, setNetwork] = React.useState('test');
-  const [keyMaterial, setKeyMaterial] = React.useState('');
-  const [err, setErr] = React.useState('');
-  const [busy, setBusy] = React.useState(false);
-  const submitting = React.useRef(false);
-  const confirmInput = React.useRef(null);
-  const submit = async (e) => {
-    e.preventDefault();
-    if (submitting.current) return;
-    setErr('');
-    if (mode === 'new' && password !== confirmation) {
-      confirmInput.current.setCustomValidity('两次密码不一致，请重新确认');
-      confirmInput.current.reportValidity();
-      return;
-    }
-    submitting.current = true; setBusy(true);
-    try {
-      const c = await getClient();
-      if (mode === 'new') await c.walletCreate(password, network);
-      // Published SDK's convenience method lacks network; use the official
-      // registered method and the updated APIProtocol v1 request definition.
-      else await c.call(undefined, 'wallet.import', { password, keyMaterial, network });
-      setPassword(''); setConfirmation(''); setKeyMaterial(''); await onDone();
-    } catch (e) { setErr(String(e?.message || e)); }
-    finally { submitting.current = false; setBusy(false); }
-  };
-  return (<form data-testid="wallet-init" method="post" onSubmit={submit} aria-busy={busy}>
-    <p role="alert" className="error">{err}</p>
-    <fieldset disabled={busy}>
-      <legend>初始化钱包</legend>
-      <label htmlFor="wallet-init-mode">创建方式</label>
-      <select id="wallet-init-mode" name="mode" data-testid="wallet-init-mode" value={mode} onChange={(e) => {
-        setMode(e.target.value); setPassword(''); setConfirmation(''); setKeyMaterial(''); setErr('');
-        confirmInput.current?.setCustomValidity('');
-      }}><option value="new">新建</option><option value="import">导入 KeyHold</option></select>
-      {mode === 'import' && <>
-        <p id="wallet-import-hint" className="hint">仅导入加密密钥，不恢复原钱包的网络、业务记录或未决资金责任。请使用 KeyHold 文件原密码，并重新确认网络。</p>
-        <label htmlFor="wallet-init-key">纯 KeyHold JSON（必填）</label>
-        <textarea id="wallet-init-key" name="keyMaterial" data-testid="wallet-init-key" rows={6} required aria-describedby="wallet-import-hint" spellCheck={false} value={keyMaterial} onChange={(e) => setKeyMaterial(e.target.value)} className="mono" />
-      </>}
-      <label htmlFor="wallet-init-password">{mode === 'new' ? '设置钱包密码（必填）' : 'KeyHold 原密码（必填）'}</label>
-      <input id="wallet-init-password" name="password" data-testid="wallet-init-password" type="password" required value={password} onChange={(e) => { setPassword(e.target.value); confirmInput.current?.setCustomValidity(''); }} autoComplete={mode === 'new' ? 'new-password' : 'current-password'} />
-      {mode === 'new' && <>
-        <label htmlFor="wallet-init-confirmation">确认密码（必填）</label>
-        <input id="wallet-init-confirmation" name="confirmation" data-testid="wallet-init-confirmation" ref={confirmInput} type="password" required value={confirmation} onChange={(e) => { setConfirmation(e.target.value); e.target.setCustomValidity(''); }} autoComplete="new-password" />
-      </>}
-      <label htmlFor="wallet-init-network">最后确认钱包网络</label>
-      <select id="wallet-init-network" name="network" data-testid="wallet-init-network" value={network} onChange={(e) => setNetwork(e.target.value)}><option value="test">test（测试网）</option><option value="main">main（主网）</option></select>
-      <div className="row"><button data-testid="wallet-init-submit" type="submit">{busy ? '正在初始化…' : mode === 'new' ? '创建钱包' : '导入密钥'}</button></div>
-    </fieldset>
-    <p className="hint">成功后进入锁定状态，已有钱包不会被覆盖。</p>
-  </form>);
-}
-
 function App() {
   const pageFromLocation = () => TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? 'overview';
   const [page, updatePage] = useState(pageFromLocation);
@@ -524,11 +467,18 @@ function App() {
   const [theme, setTheme] = useState('system');
   const [lang, setLangUi] = useState('zh');
   const [status, setStatus] = useState(null);
+  const initializing = useRef(false);
+  const unlockCredential = useRef({ password: '' });
+  const loadSequence = useRef(0);
+  useEffect(() => {
+    const clear = () => { unlockCredential.current.password = ''; };
+    window.addEventListener('pagehide', clear);
+    return () => { clear(); window.removeEventListener('pagehide', clear); };
+  }, []);
   const [info, setInfo] = useState(null);
   const [roots, setRoots] = useState(null);
   const [files, setFiles] = useState(null);
   const [tasks, setTasks] = useState([]);
-  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [seed, setSeed] = useState('');
   const [newRoot, setNewRoot] = useState('');
@@ -540,6 +490,13 @@ function App() {
   useAppliedTheme(theme);
 
   useEffect(() => onConnectionStatus(setConn), []);
+  useEffect(() => {
+    if (conn !== 'connected') {
+      ++loadSequence.current;
+      unlockCredential.current.password = '';
+      setStatus(null); setInfo(null);
+    }
+  }, [conn]);
 
   // 向 opener（App 弹窗模式）发布 ready：仅当后台已连接、已初始化且已解锁。
   // ready 只表示传输可用，不携带授权；官方 SDK 凭 origin 校验发送方。
@@ -558,29 +515,46 @@ function App() {
   // 定期收殓已关闭窗口与已关闭的应用方卸载时 teardown 全部启动连接并尽力发送官方 closing 通知；
   // 视图由工作区持有，菜单和 Tab 切换不终止应用连接。
   useEffect(() => {
+    if (conn !== 'connected' || !status?.initialized || status.locked) return;
     initConnectReceiver().catch(() => {});
     const t = setInterval(() => { try { sweepClosedLaunchedApps(); sweepClosedPopup(); } catch { /* ignore */ } }, 2000);
     const onHide = () => { try { teardownAllLaunchedApps(); } catch { /* ignore */ } };
     window.addEventListener('pagehide', onHide);
     return () => { clearInterval(t); window.removeEventListener('pagehide', onHide); };
-  }, []);
+  }, [conn, status?.initialized, status?.locked]);
   // 原请求窗口订阅后台 connect 变化，收到决定后复核 Receiver 上下文再认领执行。
   // 重连后读完整快照再触发认领，不依赖某一页内存或仅依赖通知消息；无固定轮询兜底。
-  useEffect(() => watchTopics(['connect'], () => pumpPendingApprovals().catch(() => {})), []);
+  useEffect(() => {
+    if (conn !== 'connected' || !status?.initialized || status.locked) return;
+    return watchTopics(['connect'], () => pumpPendingApprovals().catch(() => {}));
+  }, [conn, status?.initialized, status?.locked]);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
+    const current = c => sequence === loadSequence.current && getConnectionStatus() === 'connected' && c.getInstanceId() === getInstanceId() && !initializing.current;
     try {
-      const s = await (await client()).status();
+      const c = await client();
+      const s = await c.status();
+      if (!current(c)) return;
       setStatus(s);
-      const i = await (await client()).info();
+      if (!s.initialized || s.locked || s.state !== 'unlocked') {
+        setInfo(null); setRoots(null); setFiles(null); setTasks([]); setError('');
+        return;
+      }
+      const i = await c.info();
+      if (!current(c)) return;
       setInfo(i);
-      const r = await (await client()).listRoots().catch(() => null);
+      const r = await c.listRoots().catch(() => null);
+      if (!current(c)) return;
       setRoots(r);
-      const f = await (await client()).listFiles().catch(() => null);
+      const f = await c.listFiles().catch(() => null);
+      if (!current(c)) return;
       setFiles(f);
-      const t = await (await client()).listTasks().catch(() => ({ tasks: [] }));
+      const t = await c.listTasks().catch(() => ({ tasks: [] }));
+      if (!current(c)) return;
       setTasks(t.tasks || []);
-      const st = await (await client()).getSettings().catch(() => null);
+      const st = await c.getSettings().catch(() => null);
+      if (!current(c)) return;
       if (st?.theme) setTheme(st.theme);
       {
         const L = resolveLang(st?.language);
@@ -599,19 +573,6 @@ function App() {
     // 统一订阅替代 5s 整页轮询：快照与事件衔接无遗漏，有变化时重载。
     return watchTopics([], () => load());
   }, [load]);
-
-  const unlock = async (e) => {
-    e.preventDefault();
-    setError('');
-    try {
-      await (await client()).unlock(password);
-      await load();
-    } catch (e) {
-      setError(String(e?.message || e));
-    } finally {
-      setPassword('');
-    }
-  };
 
   const submitTask = async (e) => {
     e.preventDefault();
@@ -689,6 +650,15 @@ function App() {
   const rootPath = (id) => (roots?.roots || []).find((r) => r.id === id)?.path || '—';
   const defaultRootPath = rootPath(roots?.defaultDownloadRootID);
 
+  if (conn !== 'connected' || !status) return <WalletFrame><h1>{conn === 'protocol-incompatible' ? '协议不兼容' : conn === 'disconnected' ? '后台连接已断开' : '正在读取钱包状态…'}</h1>{error && <p role="alert" className="error">{error}</p>}<button type="button" onClick={() => { void retryConnection().then(load).catch(cause => setError(String(cause.message || cause))); }}>重试连接</button></WalletFrame>;
+  if (!status.initialized) return <WalletOnboarding onImporting={value => { initializing.current = value; if (!value) void load(); }} onImported={password => {
+    unlockCredential.current.password = password;
+    initializing.current = false;
+    ++loadSequence.current;
+    setStatus({ initialized: true, locked: true, state: 'locked' }); setError('');
+  }} />;
+  if (status.locked || status.state !== 'unlocked') return <WalletUnlock credential={unlockCredential.current} onReady={load} />;
+
   const title = t(TABS.find(tab => tab.id === page)?.label || 'Keymaster 后台');
   return (
     <ApplicationWorkspace.Provider value={workspace}>
@@ -724,11 +694,6 @@ function App() {
         <div className="workspace-route" role="tabpanel" aria-labelledby="internal-tab" hidden={!!workspace.active}>
         <div className="content">
           {error && <p className="error">{error}</p>}
-      {!status?.initialized && status && (
-        <section className="card"><h2>{t('新建 / 导入钱包（后台执行）')}</h2>
-          <WalletInit onDone={() => load()} />
-        </section>)}
-
       {page === 'overview' && (
         <>
         <OverviewApps onBrowse={() => setPage('apps')} />
@@ -755,20 +720,7 @@ function App() {
             <p className="hint">{t('查询失败不显示为零；缓存会明确标注时间。')}</p>
           </section>
 
-          <section className="card">
-            <h2>{t('解锁')}</h2>
-            {(status?.locked ?? info?.locked) ? (
-              <form onSubmit={unlock}>
-                <div className="row">
-                  <label className="inline-field" htmlFor="wallet-unlock-password">{t('钱包密码')}<input id="wallet-unlock-password" data-testid="unlock-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t("钱包密码（仅解密，不建会话）")} autoComplete="current-password" /></label>
-                  <button data-testid="unlock-submit" type="submit">{t('解锁')}</button>
-                </div>
-                <p className="hint">{t('密码只进本次请求体，不存浏览器存储，提交后清空。')}</p>
-              </form>
-            ) : (
-              <p className="hint">{t('后台已解锁。重启后需重新解锁；本轮无主动锁定命令。')}</p>
-            )}
-          </section>
+
         </div>
         </>
       )}

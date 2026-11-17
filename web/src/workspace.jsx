@@ -47,6 +47,7 @@ export function useWorkspace({ status, info, conn }) {
     for (const view of registry.current.values()) if (view.frame) view.frame.hidden = view.id !== active;
   }, [active, views]);
   useEffect(() => {
+    if (conn !== 'connected' || !status?.initialized) return;
     let disposed = false;
     const load = async () => {
       try {
@@ -59,7 +60,7 @@ export function useWorkspace({ status, info, conn }) {
     load();
     const stop = watchTopics(['settings'], load);
     return () => { disposed = true; stop(); };
-  }, []);
+  }, [conn, status?.initialized]);
   const instance = getInstanceId();
   useEffect(() => {
     // 后台代际变化不能把旧启动接到新钱包；仅断网不销毁已有页面。

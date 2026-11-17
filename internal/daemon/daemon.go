@@ -482,7 +482,12 @@ func (d *Daemon) Unlock(password string) error {
 		return errors.New("钱包公钥与身份元数据不一致")
 	}
 	expected := computeAuth(result.PrivateKey, info.BsvNetwork, result.PublicKeyHex)
-	if subtle.ConstantTimeCompare([]byte(expected), []byte(info.NetworkAuthenticationHex)) != 1 {
+	if info.NetworkBindingPending {
+		if err := d.store.CompleteNetworkBinding(info.BsvNetwork, result.PublicKeyHex, expected); err != nil {
+			clearBytes(result.PrivateKey)
+			return fmt.Errorf("保存首次网络绑定失败: %w", err)
+		}
+	} else if subtle.ConstantTimeCompare([]byte(expected), []byte(info.NetworkAuthenticationHex)) != 1 {
 		clearBytes(result.PrivateKey)
 		return errors.New("钱包网络身份认证失败")
 	}

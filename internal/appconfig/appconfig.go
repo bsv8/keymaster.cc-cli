@@ -62,6 +62,7 @@ type Info struct {
 	BsvNetwork               string `json:"bsvNetwork"`
 	PublicKeyHex             string `json:"publicKeyHex"`
 	NetworkAuthenticationHex string `json:"networkAuthenticationHex"`
+	NetworkBindingPending    bool   `json:"networkBindingPending,omitempty"`
 	Roots                    []Root `json:"roots"`
 	DefaultDownloadRootID    string `json:"defaultDownloadRootID,omitempty"`
 }
@@ -270,7 +271,7 @@ func validateInfo(in *Info) error {
 	if !pubkeyPattern.MatchString(in.PublicKeyHex) {
 		return errors.New("info.json 公钥无效")
 	}
-	if !hex64Pattern.MatchString(in.NetworkAuthenticationHex) {
+	if (in.NetworkBindingPending && in.NetworkAuthenticationHex != "") || (!in.NetworkBindingPending && !hex64Pattern.MatchString(in.NetworkAuthenticationHex)) {
 		return errors.New("info.json 网络绑定无效")
 	}
 	seenPath := map[string]bool{}
@@ -454,7 +455,7 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 	if !pubkeyPattern.MatchString(publicKeyHex) {
 		return errors.New("公钥无效")
 	}
-	if !hex64Pattern.MatchString(networkAuthHex) {
+	if networkAuthHex != "" && !hex64Pattern.MatchString(networkAuthHex) {
 		return errors.New("网络绑定无效")
 	}
 	for _, p := range []string{s.infoPath, s.settingsPath} {
@@ -468,6 +469,7 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 		Version: InfoVersion, Revision: 0,
 		BsvNetwork: network, PublicKeyHex: publicKeyHex,
 		NetworkAuthenticationHex: networkAuthHex,
+		NetworkBindingPending:    networkAuthHex == "",
 		Roots:                    []Root{},
 	}
 	if err := validateInfo(info); err != nil {
@@ -728,11 +730,11 @@ func (s *Store) UpdateInfo(expectedRevision int64, fn func(*Info) error) (Info, 
 	_ = json.Unmarshal(raw, &next)
 	// Network identity is not ordinarily mutable: guard it here so no caller
 	// can switch networks by editing settings.
-	origNetwork, origPub, origAuth := next.BsvNetwork, next.PublicKeyHex, next.NetworkAuthenticationHex
+	origNetwork, origPub, origAuth, origPending := next.BsvNetwork, next.PublicKeyHex, next.NetworkAuthenticationHex, next.NetworkBindingPending
 	if err := fn(&next); err != nil {
 		return Info{}, err
 	}
-	if next.BsvNetwork != origNetwork || next.PublicKeyHex != origPub || next.NetworkAuthenticationHex != origAuth {
+	if next.BsvNetwork != origNetwork || next.PublicKeyHex != origPub || next.NetworkAuthenticationHex != origAuth || next.NetworkBindingPending != origPending {
 		return Info{}, errors.New("网络身份禁止普通修改")
 	}
 	next.Version = InfoVersion
@@ -835,4 +837,32 @@ func (s *Store) SetCollectorIntervals(expectedRevision int64, early int, interva
 		next.Server.Collector.RetryCapMs = retryCapMs
 		return nil
 	})
+}
+
+// CompleteNetworkBinding commits the first decrypted identity before the wallet can run.
+func (s *Store) CompleteNetworkBinding(network, publicKeyHex, authenticationHex string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.info == nil || !s.info.NetworkBindingPending {
+		return errors.New("网络绑定状态已变化，请重试解锁")
+	}
+	if s.info.BsvNetwork != network || s.info.PublicKeyHex != publicKeyHex || !hex64Pattern.MatchString(authenticationHex) {
+		return errors.New("网络身份不一致")
+	}
+	next := *s.info
+	next.NetworkAuthenticationHex = authenticationHex
+	next.NetworkBindingPending = false
+	next.Revision++
+	if err := validateInfo(&next); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(&next, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.infoPath, append(raw, '\n')); err != nil {
+		return err
+	}
+	s.info = &next
+	return nil
 }
