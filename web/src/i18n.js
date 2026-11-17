@@ -4,6 +4,12 @@ let lang = 'zh';
 
 const D = {
 en: {
+'钱包密码': 'Wallet password',
+'售卖目录': 'Sale directory',
+'介绍': 'Description',
+'采集器名称': 'Collector name',
+'采集器 URL': 'Collector URL',
+'应用 URL': 'Application URL',
 '概览': 'Overview',
 '售卖': 'Sell',
 '下载': 'Download',
@@ -149,6 +155,12 @@ en: {
 ' ★': ' ★',
 },
 ja: {
+'钱包密码': 'ウォレットのパスワード',
+'售卖目录': '販売ディレクトリ',
+'介绍': '説明',
+'采集器名称': 'コレクター名',
+'采集器 URL': 'コレクター URL',
+'应用 URL': 'アプリ URL',
 '概览': '概要',
 '售卖': '販売',
 '下载': 'ダウンロード',

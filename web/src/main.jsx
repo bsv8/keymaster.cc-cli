@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { t, setLang, resolveLang } from './i18n.js';
@@ -53,6 +53,19 @@ function StateBadge({ state, locked }) {
 }
 
 function DirPicker({ initial, onPick, onConfirm, onClose }) {
+  const dialog = useRef(null);
+  const titleId = useId();
+  const pathId = useId();
+  const pressedOutside = useRef(false);
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  const outside = event => {
+    const bounds = dialog.current.getBoundingClientRect();
+    return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+  };
   const [path, setPath] = useState(initial && initial.startsWith('/') ? initial : '/data');
   const [dirs, setDirs] = useState([]);
   const [parent, setParent] = useState('');
@@ -78,14 +91,18 @@ function DirPicker({ initial, onPick, onConfirm, onClose }) {
   }, [path]);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>{t('选择目录')}</h3>
+    <dialog ref={dialog} className="modal directory-dialog" aria-labelledby={titleId}
+      onCancel={event => { event.preventDefault(); onClose(); }}
+      onPointerDown={event => { pressedOutside.current = outside(event); }}
+      onPointerUp={event => { if (pressedOutside.current && outside(event)) onClose(); pressedOutside.current = false; }}
+      onPointerCancel={() => { pressedOutside.current = false; }}>
+        <h2 id={titleId}>{t('选择目录')}</h2>
+        <label htmlFor={pathId}>{t('路径')}</label>
         <div className="row">
-          <input value={path} onChange={(e) => { setPath(e.target.value); onPick(e.target.value); }} placeholder={t("/srv/files（可直接输入 path）")} className="mono" />
+          <input id={pathId} autoFocus value={path} onChange={(e) => { setPath(e.target.value); onPick(e.target.value); }} placeholder={t("/srv/files（可直接输入 path）")} className="mono" />
           <button type="button" className="ghost" disabled={!parent} onClick={() => browse(parent)}>{t('.. 上级')}</button>
         </div>
-        {err && <p className="error">{err}</p>}
+        {err && <p className="error" role="alert">{err}</p>}
         <div className="dirlist">
           {dirs.map((d) => (
             <button key={d.path} type="button" className="diritem" onDoubleClick={() => browse(d.path)} onClick={() => { setPath(d.path); onPick(d.path); }}>
@@ -99,8 +116,7 @@ function DirPicker({ initial, onPick, onConfirm, onClose }) {
           <button type="button" className="ghost" onClick={onClose}>{t('取消')}</button>
           <button type="button" onClick={() => onConfirm(path)}>{t('选择此目录')}</button>
         </div>
-      </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -193,8 +209,8 @@ function CollectorPage() {
         <h2>{t('文件介绍')}</h2>
         <form onSubmit={saveDesc}>
           <div className="row">
-            <input value={descSeed} onChange={(e) => setDescSeed(e.target.value)} placeholder="seedHashHex" className="mono" />
-            <input value={descText} onChange={(e) => setDescText(e.target.value)} placeholder={t("介绍（≤2048 字节，存采集自有存储）")} />
+            <label className="inline-field" htmlFor="collector-description-seed">{t('seedHashHex')}<input id="collector-description-seed" value={descSeed} onChange={(e) => setDescSeed(e.target.value)} placeholder="seedHashHex" className="mono" /></label>
+            <label className="inline-field" htmlFor="collector-description-text">{t('介绍')}<input id="collector-description-text" value={descText} onChange={(e) => setDescText(e.target.value)} placeholder={t("介绍（≤2048 字节，存采集自有存储）")} /></label>
             <button type="submit">{t('保存介绍并重入队')}</button>
           </div>
         </form>
@@ -368,16 +384,16 @@ function SettingsPage({ onTheme }) {
         {(s.server.collector?.collectors || []).map((c, i) => (
           <div className="card" key={c.id || i} style={{ marginBottom: 8 }}>
             <div className="row">
-              <input value={c.name || ''} onChange={(e) => {
+              <label className="inline-field" htmlFor={`collector-${i}-name`}>{t('采集器名称')}<input id={`collector-${i}-name`} value={c.name || ''} onChange={(e) => {
                 const list = [...(s.server.collector.collectors || [])];
                 list[i] = { ...list[i], name: e.target.value };
                 setCollector({ collectors: list });
-              }} placeholder={t("名称（如 官方）")} style={{ maxWidth: 140 }} />
-              <input value={c.endpoint || ''} onChange={(e) => {
+              }} placeholder={t("名称（如 官方）")} style={{ maxWidth: 140 }} /></label>
+              <label className="inline-field" htmlFor={`collector-${i}-endpoint`}>{t('采集器 URL')}<input id={`collector-${i}-endpoint`} value={c.endpoint || ''} onChange={(e) => {
                 const list = [...(s.server.collector.collectors || [])];
                 list[i] = { ...list[i], endpoint: e.target.value };
                 setCollector({ collectors: list });
-              }} placeholder={t("https://collector.example.com（完整提交 URL，官方地址待定）")} className="mono" />
+              }} placeholder={t("https://collector.example.com（完整提交 URL，官方地址待定）")} className="mono" /></label>
               <label className="check"><input type="checkbox" checked={!!c.enabled} onChange={(e) => {
                 const list = [...(s.server.collector.collectors || [])];
                 list[i] = { ...list[i], enabled: e.target.checked };
@@ -424,7 +440,7 @@ function ConnectPanel() {
       <p className="hint">确认应用与当前钱包后自动登录；打开方式在设置中统一选择。<span data-testid="application-open-mode-summary">{workspace.mode}</span></p>
       {workspace.settingsError && <p className="error">{workspace.settingsError}</p>}
       <div className="row">
-        <input data-testid="launch-demo-url" value={demoUrl} onChange={e => setDemoUrl(e.target.value)} placeholder="应用完整 HTTP(S) URL" />
+        <label className="inline-field" htmlFor="application-launch-url">{t('应用 URL')}<input id="application-launch-url" data-testid="launch-demo-url" value={demoUrl} onChange={e => setDemoUrl(e.target.value)} placeholder="应用完整 HTTP(S) URL" /></label>
         <button type="button" data-testid="launch-app" disabled={!workspace.ready || workspace.busy} onClick={() => workspace.requestLaunch({ url: demoUrl.trim(), title: demoUrl.trim(), testId: 'launch-iframe-view' })}>打开应用</button>
       </div>
     </section>
@@ -477,10 +493,10 @@ function WalletInit({ onDone }) {
         <textarea id="wallet-init-key" name="keyMaterial" data-testid="wallet-init-key" rows={6} required aria-describedby="wallet-import-hint" spellCheck={false} value={keyMaterial} onChange={(e) => setKeyMaterial(e.target.value)} className="mono" />
       </>}
       <label htmlFor="wallet-init-password">{mode === 'new' ? '设置钱包密码（必填）' : 'KeyHold 原密码（必填）'}</label>
-      <input id="wallet-init-password" name="password" data-testid="wallet-init-password" type="password" required value={password} onChange={(e) => { setPassword(e.target.value); confirmInput.current?.setCustomValidity(''); }} autoComplete="off" />
+      <input id="wallet-init-password" name="password" data-testid="wallet-init-password" type="password" required value={password} onChange={(e) => { setPassword(e.target.value); confirmInput.current?.setCustomValidity(''); }} autoComplete={mode === 'new' ? 'new-password' : 'current-password'} />
       {mode === 'new' && <>
         <label htmlFor="wallet-init-confirmation">确认密码（必填）</label>
-        <input id="wallet-init-confirmation" name="confirmation" data-testid="wallet-init-confirmation" ref={confirmInput} type="password" required value={confirmation} onChange={(e) => { setConfirmation(e.target.value); e.target.setCustomValidity(''); }} autoComplete="off" />
+        <input id="wallet-init-confirmation" name="confirmation" data-testid="wallet-init-confirmation" ref={confirmInput} type="password" required value={confirmation} onChange={(e) => { setConfirmation(e.target.value); e.target.setCustomValidity(''); }} autoComplete="new-password" />
       </>}
       <label htmlFor="wallet-init-network">最后确认钱包网络</label>
       <select id="wallet-init-network" name="network" data-testid="wallet-init-network" value={network} onChange={(e) => setNetwork(e.target.value)}><option value="test">test（测试网）</option><option value="main">main（主网）</option></select>
@@ -744,7 +760,7 @@ function App() {
             {(status?.locked ?? info?.locked) ? (
               <form onSubmit={unlock}>
                 <div className="row">
-                  <input data-testid="unlock-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t("钱包密码（仅解密，不建会话）")} autoComplete="off" />
+                  <label className="inline-field" htmlFor="wallet-unlock-password">{t('钱包密码')}<input id="wallet-unlock-password" data-testid="unlock-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t("钱包密码（仅解密，不建会话）")} autoComplete="current-password" /></label>
                   <button data-testid="unlock-submit" type="submit">{t('解锁')}</button>
                 </div>
                 <p className="hint">{t('密码只进本次请求体，不存浏览器存储，提交后清空。')}</p>
@@ -763,7 +779,7 @@ function App() {
           <p className="hint">{t('后台每 5 秒自动核对（新增/长度变化才重算）并支持 SIGHUP；这里可手动立即刷新。')}</p>
           <form onSubmit={addRoot}>
             <div className="row">
-              <input value={newRoot} onChange={(e) => setNewRoot(e.target.value)} placeholder={t("/srv/files（后台可读目录，可直接输入）")} />
+              <label className="inline-field" htmlFor="sell-root-path">{t('售卖目录')}<input id="sell-root-path" value={newRoot} onChange={(e) => setNewRoot(e.target.value)} placeholder={t("/srv/files（后台可读目录，可直接输入）")} /></label>
               <button type="button" className="ghost" onClick={() => { setPickerOpen(true); }}>{t('浏览…')}</button>
               <button type="submit">{t('添加')}</button>
             </div>
@@ -796,7 +812,7 @@ function App() {
           <h2>{t('下载任务')}</h2>
           <form onSubmit={submitTask}>
             <div className="row">
-              <input value={seed} onChange={(e) => setSeed(e.target.value)} placeholder={t("seedhashhex（64 hex），重复提交复用任务")} className="mono" />
+              <label className="inline-field" htmlFor="download-seed">{t('seedhashhex')}<input id="download-seed" value={seed} onChange={(e) => setSeed(e.target.value)} placeholder={t("seedhashhex（64 hex），重复提交复用任务")} className="mono" /></label>
               <button type="submit">{t('提交 get')}</button>
             </div>
           </form>
