@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"sort"
 	"time"
 
@@ -76,15 +77,52 @@ func apiPlugin(id string, methods map[string]apiHandler) webloom.Plugin {
 }
 
 // finishOpen 在公开 Daemon 前完成插件装配；独立后台和内嵌后台使用同一实例。
+// 先做整体目录校验：插件身份、单元身份、方法归属不得重复，说明引用不得缺失；
+// 再做逐插件方法集合核对；任一失败都不返回半就绪 Runtime。
 func (d *Daemon) finishOpen() (*Daemon, error) {
+	if err := pluginmanifest.ValidateEmbedded(); err != nil {
+		logPluginStartupFailure(err)
+		_ = d.Close()
+		return nil, err
+	}
 	runtime, err := webloom.Start(context.Background(), []webloom.Plugin{
 		d.vaultAPIPlugin(), d.sellAPIPlugin(), d.collectorAPIPlugin(), d.downloadAPIPlugin(),
 		d.appsAPIPlugin(), d.protocolAPIPlugin(), d.backgroundAPIPlugin(),
 	})
 	if err != nil {
+		logPluginStartupFailure(err)
+
 		_ = d.Close()
 		return nil, err
 	}
 	d.plugins = runtime
 	return d, nil
+}
+
+// Logging is development-only and receives errors, never request payloads.
+func logPluginStartupFailure(err error) {
+	if os.Getenv("KEYMASTER_ENV") != "dev" {
+		return
+	}
+	var visit func(error, int)
+	visit = func(cause error, depth int) {
+		if cause == nil || depth >= 32 {
+			return
+		}
+		text := cause.Error()
+		text = regexp.MustCompile(`(?i)(password|passwd|private.?key|secret|mnemonic|token|credential|authorization|bindingId|api.?key)["']?\s*[=:]\s*("[^"\n]*"|'[^'\n]*'|[^ ,;\n]+)`).ReplaceAllString(text, "$1=[redacted]")
+		text = regexp.MustCompile(`(?i)bearer\s+[^ ,;\n]+`).ReplaceAllString(text, "Bearer [redacted]")
+		text = regexp.MustCompile(`(?i)\b[0-9a-f]{64}\b`).ReplaceAllString(text, "[redacted-256bit]")
+		text = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+:[^\s/@]+@`).ReplaceAllString(text, "$1[redacted]@")
+		text = regexp.MustCompile(`\b([KL][1-9A-HJ-NP-Za-km-z]{51}|5[1-9A-HJ-NP-Za-km-z]{50})\b`).ReplaceAllString(text, "[redacted-wif]")
+		log.Printf("[plugins] startup.failed depth=%d type=%T error=%s", depth, cause, text)
+		if multi, ok := cause.(interface{ Unwrap() []error }); ok {
+			for _, child := range multi.Unwrap() {
+				visit(child, depth+1)
+			}
+		} else if single, ok := cause.(interface{ Unwrap() error }); ok {
+			visit(single.Unwrap(), depth+1)
+		}
+	}
+	visit(err, 0)
 }

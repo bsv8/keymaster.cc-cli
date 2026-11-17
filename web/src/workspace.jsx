@@ -1,10 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { getClient, getInstanceId } from './client.js';
 import { watchTopics } from './subscribe.js';
-import { issueLaunchToken, registerLaunchedApp, teardownLaunchedApp } from './connect.js';
+import { issueLaunchToken, registerLaunchedApp, teardownLaunchedApp, launchedAppState } from './connect.js';
 
 export const ApplicationWorkspace = createContext(null);
-/** 所有入口使用同一个确认、启动和视图生命周期。 */
+/** 所有入口使用同一个启动和视图生命周期。 */
 export function useApplicationWorkspace() { return useContext(ApplicationWorkspace); }
 
 /** 内嵌视图由工作区持有；切换只隐藏，不移动或重建 iframe，避免重放一次性令牌。 */
@@ -15,7 +15,6 @@ export function useWorkspace({ status, info, conn }) {
   const [active, setActive] = useState(null);
   const [mode, setMode] = useState(null);
   const [settingsError, setSettingsError] = useState('');
-  const [pending, setPending] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const launching = useRef(false);
@@ -65,10 +64,9 @@ export function useWorkspace({ status, info, conn }) {
   useEffect(() => {
     // 后台代际变化不能把旧启动接到新钱包；仅断网不销毁已有页面。
     generation.current++;
-    setPending(null);
     for (const id of [...registry.current.keys()]) close(id);
   }, [instance, close]);
-  useEffect(() => { if (!ready) { generation.current++; setPending(null); } }, [ready]);
+  useEffect(() => { if (!ready) { generation.current++; } }, [ready]);
   useEffect(() => {
     const sweep = setInterval(() => {
       for (const view of registry.current.values()) if (view.child?.closed) close(view.id);
@@ -81,88 +79,75 @@ export function useWorkspace({ status, info, conn }) {
     return () => { clearInterval(sweep); window.removeEventListener('pagehide', release); release(); };
   }, [close]);
 
-  /** 确认目标与当前身份后才签发令牌；准备 Files 的异步过程也绑定原运行代际。 */
-  const requestLaunch = (target) => {
+  useEffect(() => watchTopics(['connect'], async () => {
+    // 未初始化/锁定不查询应用中心：初始化前仅允许状态读取、创建/导入、订阅与只读诊断。
+    if (conn !== 'connected' || !status?.initialized || (info?.locked ?? status?.locked)) return;
+    const result = await (await getClient()).call(undefined, 'connect.apps.list', {});
+    const ids = new Set((result.connections || []).map(item => item.authId));
+    for (const view of registry.current.values()) {
+      const state = launchedAppState(view.handle);
+      if (state.authorizationIds?.length && !state.authorizationIds.some(id => ids.has(id))) close(view.id);
+    }
+  }), [close, conn, status?.initialized, info?.locked, status?.locked]);
+  /** 同一 App 的已有视图优先复用；未知身份只按完整入口匹配。 */
+  const requestLaunch = async target => {
     if (!ready || !mode || launching.current) return;
+    const expected = target.expectedAppPublicKeyHex?.toLowerCase();
+    const findExisting = () => {
+      for (const view of registry.current.values()) {
+        const state = launchedAppState(view.handle);
+        const matches = expected ? (state.applicationKey || view.expected)?.toLowerCase() === expected
+          : target.url ? view.url === new URL(target.url).href : target.indexseedhashhex && view.seed === target.indexseedhashhex;
+        if (!matches) continue;
+        if (!state.valid || view.child?.closed || (view.frame && !view.frame.isConnected)) { close(view.id); continue; }
+        select(view.id); return true;
+      }
+      return false;
+    };
     setError('');
-    setPending({ ...target, mode, instance, generation: generation.current });
-  };
-  const confirm = async () => {
-    if (!pending || launching.current) return;
-    const request = pending;
+    if (findExisting()) return;
+    const request = { ...target, mode, instance, generation: generation.current };
     const assertCurrent = () => {
-      if (request.cancelled || !runtimeRef.current.ready || runtimeRef.current.instance !== request.instance || generation.current !== request.generation) throw new Error('Wallet runtime changed; open the application again');
+      if (!runtimeRef.current.ready || runtimeRef.current.instance !== request.instance || generation.current !== request.generation) throw new Error('Wallet runtime changed; open the application again');
     };
     let child = null, view = null;
-    launching.current = true; setBusy(true); setError('');
+    launching.current = true; setBusy(true);
     try {
       assertCurrent();
-      // 必须在用户点击的同步栈内预开新窗口，异步准备后打开会被拦截。
-      if (request.mode === 'popup') {
-        child = window.open('about:blank', '_blank');
-        if (!child) throw new Error('Application window unavailable or blocked');
-      }
-      const target = request.prepare ? await request.prepare() : { url: request.url };
+      if (request.mode === 'popup') { child = window.open('about:blank', '_blank'); if (!child) throw new Error('请允许浏览器打开应用窗口。'); }
+      const prepared = request.prepare ? await request.prepare() : { url: request.url, expectedAppPublicKeyHex: expected };
       assertCurrent();
-      const url = new URL(target.url);
-      if (!['http:', 'https:'].includes(url.protocol) || url.origin === window.location.origin) throw new Error('Applications require a separate HTTP origin');
-      const origin = url.origin;
-      close(origin);
+      const url = new URL(prepared.url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin === window.location.origin) throw new Error('应用需要独立的 HTTP 来源。');
+      const appKey = prepared.expectedAppPublicKeyHex || expected;
+      const id = appKey ? `app:${appKey.toLowerCase()}` : `url:${url.href}`;
+      close(id);
       let frame = null;
       if (request.mode === 'iframe') {
         if (!outletRef.current?.isConnected) throw new Error('Application workspace unavailable');
-        frame = document.createElement('iframe');
-        frame.title = request.title || url.host;
-        frame.className = 'workspace-app-frame';
-        frame.dataset.testid = request.testId || 'application-frame';
-        frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads');
-        frame.referrerPolicy = 'no-referrer';
-        outletRef.current.append(frame);
+        frame = document.createElement('iframe'); frame.title = request.title || url.host;
+        frame.className = 'workspace-app-frame'; frame.dataset.testid = request.testId || 'application-frame';
+        frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads'); frame.referrerPolicy = 'no-referrer'; outletRef.current.append(frame);
       }
-      view = { id: origin, title: request.title || url.host, mode: request.mode, frame, child };
-      registry.current.set(origin, view);
+      view = { id, expected: appKey, url: url.href, seed: target.indexseedhashhex, title: request.title || url.host, mode: request.mode, frame, child };
+      registry.current.set(id, view);
       const source = frame ? frame.contentWindow : child;
       if (!source) throw new Error('Application browsing context unavailable');
-      view.handle = registerLaunchedApp({ origin, getSource: () => source, kind: frame ? 'iframe' : 'window', child });
+      view.handle = registerLaunchedApp({ origin: url.origin, getSource: () => source, kind: frame ? 'iframe' : 'window', child });
       publish();
-      const issued = await issueLaunchToken(origin, target);
+      const issued = await issueLaunchToken(url.origin, prepared);
       assertCurrent();
-      if (registry.current.get(origin) !== view || source.closed) throw new Error('Application has closed');
+      if (registry.current.get(id) !== view || source.closed) throw new Error('Application has closed');
       if (!issued?.launchToken) throw new Error('Launch token unavailable');
-      url.searchParams.set('launchToken', issued.launchToken);
-      url.searchParams.set('sessionWindowOrigin', window.location.origin);
-      url.searchParams.set('mode', frame ? 'iframe' : 'appView');
-      if (frame) { frame.src = url.href; setActive(origin); }
-      else child.location.replace(url.href);
-      if (import.meta.env.DEV) console.debug('[workspace] application launched', { origin, mode: request.mode });
-      setPending(null);
+      url.searchParams.set('launchToken', issued.launchToken); url.searchParams.set('sessionWindowOrigin', window.location.origin); url.searchParams.set('mode', frame ? 'iframe' : 'appView');
+      if (frame) { frame.src = url.href; setActive(id); } else child.location.replace(url.href);
     } catch (cause) {
-      if (view && registry.current.get(view.id) === view) close(view.id);
-      else if (child && !child.closed) child.close();
-      setError(String(cause.message || cause));
+      if (view && registry.current.get(view.id) === view) close(view.id); else if (child && !child.closed) child.close();
+      setError('应用未能打开，请稍后重试。');
+      if (import.meta.env.DEV) console.debug('[workspace] launch.failed', { name: cause?.name, message: '启动或部署准备失败' });
     } finally { launching.current = false; setBusy(false); }
   };
-  return { views, active, select, close, requestLaunch, outletRef, pending, busy, error, confirm,
-    dismiss: () => { if (pending) pending.cancelled = true; setPending(null); }, ready: ready && !!mode, mode, settingsError,
-    identity: info?.publicKeyHex || info?.address || status?.address || '—', network: info?.network };
-}
-
-/** 原生模态确认：浏览器负责焦点约束、Esc 和关闭后焦点恢复。 */
-export function ApplicationLaunchDialog({ workspace: w }) {
-  const dialog = useRef(null);
-  useEffect(() => {
-    if (w.pending && !dialog.current.open) dialog.current.showModal();
-    else if (!w.pending && dialog.current.open) dialog.current.close();
-  }, [w.pending]);
-  return <dialog ref={dialog} className="application-launch-dialog" aria-labelledby="application-launch-title" onClose={w.dismiss}>
-    <h2 id="application-launch-title">打开应用</h2>
-    <p><strong>{w.pending?.title}</strong></p>
-    <p className="mono launch-target">{w.pending?.url || w.pending?.description}</p>
-    <p>当前钱包：{w.network} · <span className="mono">{w.identity}</span></p>
-    <p>打开方式：{w.pending?.mode === 'iframe' ? '内嵌 Tab' : '新窗口'}。确认后应用将自动登录，业务操作仍按原有权限审批。</p>
-    {w.error && <p className="error" role="alert">{w.error}</p>}
-    <div className="row"><form method="dialog"><button type="submit" className="ghost" autoFocus>取消</button></form><button type="button" data-testid="app-launch-confirm" disabled={w.busy || !w.ready} onClick={w.confirm}>{w.busy ? '正在打开…' : '打开应用'}</button></div>
-  </dialog>;
+  return { views, active, select, close, requestLaunch, outletRef, busy, error, ready: ready && !!mode, mode, settingsError };
 }
 
 /** 标签使用普通按钮与明确的键盘导航；不依赖尚未普及的 focusgroup。 */

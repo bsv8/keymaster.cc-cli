@@ -13,7 +13,14 @@
       "connect.deployment.start",
       "connect.deployment.stop",
       "connect.deployment.list"
-    ]
+    ],
+    "documentation": {
+      "name": "应用管理",
+      "summary": "应用目录、部署与启动管理",
+      "duties": "负责应用目录的增删、收藏与选择，以及 Files 部署的安装、启动、停止与查询；钱包主动启动签发一次性令牌。",
+      "boundary": "正式方法已由 apps.daemon 承接；应用目录身份、部署登记与启动令牌的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "应用目录与部署登记归属 apps 目录；启动令牌只在内存持有，不持久化。"
+    }
   },
   {
     "pluginId": "background",
@@ -22,8 +29,16 @@
       "settings.get",
       "settings.update",
       "settings.reset",
-      "events.subscribe"
-    ]
+      "events.subscribe",
+      "plugins.inspect"
+    ],
+    "documentation": {
+      "name": "后台设置",
+      "summary": "设置全文与事件订阅，以及插件只读诊断",
+      "duties": "负责设置全文的读取、更新与恢复，通用事件订阅的快照与变化投递，以及后台插件装配的只读诊断。",
+      "boundary": "正式方法已由 background.daemon 承接；设置存储与事件总线的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "设置全文归属 background/settings.json；事件总线只做分发，不持有业务真值。"
+    }
   },
   {
     "pluginId": "collector",
@@ -35,7 +50,14 @@
       "collector.config",
       "collector.flush",
       "collector.retry"
-    ]
+    ],
+    "documentation": {
+      "name": "采集",
+      "summary": "采集目标状态与提交重试",
+      "duties": "负责采集目标状态查询、提交历史、文件介绍保存、采集配置、立即提交与失败重试。",
+      "boundary": "正式方法已由 collector.daemon 承接；采集队列、提交循环与存储的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "采集队列与提交记录归属 collector 自有存储；文件介绍存采集自有存储。"
+    }
   },
   {
     "pluginId": "download",
@@ -46,7 +68,14 @@
       "tasks.get",
       "tasks.cancel",
       "tasks.subscribe"
-    ]
+    ],
+    "documentation": {
+      "name": "下载任务",
+      "summary": "下载任务的提交、查询与取消",
+      "duties": "负责下载任务的提交、单任务查询、列表查询、取消与任务级订阅。",
+      "boundary": "正式方法已由 download.daemon 承接，业务装配仍存在 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "任务注册归属 download/tasks.json；任务执行态由后台任务管理器持有，证据落盘。"
+    }
   },
   {
     "pluginId": "protocol",
@@ -63,7 +92,14 @@
       "connect.history.list",
       "connect.apps.list",
       "connect.connection.pause"
-    ]
+    ],
+    "documentation": {
+      "name": "连接协议",
+      "summary": "连接审批、授权与执行",
+      "duties": "负责连接审批队列与决定、绑定与授权查询、自动许可查询与取消、历史与应用中心视图、连接暂停，以及已审批原请求的执行。",
+      "boundary": "正式方法已由 protocol.daemon 承接；连接、授权与审批的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "授权、审批与历史归属 protocol 目录；连接态按连接独立持有，关闭即清理。"
+    }
   },
   {
     "pluginId": "sell",
@@ -80,7 +116,14 @@
       "pricing.batch",
       "pricing.setFile",
       "pricing.clearFile"
-    ]
+    ],
+    "documentation": {
+      "name": "售卖",
+      "summary": "售卖根、文件与定价",
+      "duties": "负责售卖根的增删与默认选择、文件列表与目录浏览、目录刷新，以及缺省价、批量定价与单文件定价。",
+      "boundary": "正式方法已由 sell.daemon 承接；售卖根、文件索引与定价的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "售卖根配置归属 vault/info.json 的根列表；文件索引与定价归属 sell 目录；真实文件保留在用户售卖目录，不因删根删除。"
+    }
   },
   {
     "pluginId": "vault",
@@ -91,6 +134,13 @@
       "wallet.unlock",
       "wallet.create",
       "wallet.import"
-    ]
+    ],
+    "documentation": {
+      "name": "钱包",
+      "summary": "钱包状态与解锁/创建/导入",
+      "duties": "负责后台状态与钱包信息查询，以及钱包的解锁、新建与导入；密码只进请求体，不进响应或日志。",
+      "boundary": "正式方法已由 vault.daemon 承接；钱包密钥、身份与余额查询的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
+      "data": "钱包密钥归属 vault/key.json；身份与网络绑定归属 vault/info.json；私钥只在内存解密持有。"
+    }
   }
 ]

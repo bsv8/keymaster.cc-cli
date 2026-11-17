@@ -117,8 +117,10 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 	// Before initialization only bootstrap commands and state observation are
 	// allowed. Keep this gate shared by WS and in-process calls, rather than
 	// relying on every business handler to remember a nil-store check.
+	// plugins.inspect 为只读诊断，初始化前、锁定可读；停止期间仍走顶部 stopping 门禁。
 	if method != kmapi.MethodStatusGet && method != kmapi.MethodWalletCreate &&
-		method != kmapi.MethodWalletImport && method != kmapi.MethodEventsSubscribe {
+		method != kmapi.MethodWalletImport && method != kmapi.MethodEventsSubscribe &&
+		method != kmapi.MethodPluginsInspect {
 		if e := d.needInit(); e != nil {
 			return nil, nil, e
 		}

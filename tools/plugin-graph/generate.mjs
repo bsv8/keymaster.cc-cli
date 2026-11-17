@@ -1,0 +1,142 @@
+// 插件图谱生成编排：合并目录、Web 调用、Go handler/调用，写确定性产物。
+// 用法：node ../tools/plugin-graph/generate.mjs [--check]
+// 产物：web/src/generated/pluginGraph.js（确定性排序、仓库相对路径、无时间戳）。
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { resolve, relative, sep } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { analyzeWebCalls } from './web-calls.mjs';
+
+const cliRoot = resolve(new URL('.', import.meta.url).pathname, '../..');
+const check = process.argv.includes('--check');
+const catalogPath = resolve(cliRoot, 'pluginmanifest/catalog.json');
+const outPath = resolve(cliRoot, 'web/src/generated/pluginGraph.js');
+
+function repo(p) {
+  return relative(cliRoot, p).split(sep).join('/');
+}
+
+function loadCatalog() {
+  const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'));
+  const methodToPlugin = new Map();
+  const goUnitOf = new Map();
+  const seenPlugin = new Map();
+  const seenUnit = new Set();
+  const seenMethod = new Map();
+  for (const u of catalog) {
+    if (!u.pluginId || !u.unitId) throw new Error('插件目录存在空身份');
+    if (seenPlugin.has(u.pluginId)) throw new Error(`插件身份重复 ${u.pluginId}`);
+    seenPlugin.set(u.pluginId, true);
+    for (const id of [u.unitId, `${u.pluginId}.web`]) {
+      if (seenUnit.has(id)) throw new Error(`单元身份重复 ${id}`);
+      seenUnit.add(id);
+    }
+    if (!Array.isArray(u.methods) || !u.methods.length) throw new Error(`插件 ${u.pluginId} 缺少方法`);
+    for (const m of u.methods) {
+      if (seenMethod.has(m)) throw new Error(`方法归属重复 ${m}（${seenMethod.get(m)} 与 ${u.pluginId}）`);
+      seenMethod.set(m, u.pluginId);
+      methodToPlugin.set(m, u.pluginId);
+    }
+    goUnitOf.set(u.pluginId, u.unitId);
+    const doc = u.documentation;
+    if (!doc || !doc.name || !doc.summary || !doc.duties || !doc.boundary || !doc.data) {
+      throw new Error(`插件 ${u.pluginId} 的 documentation 引用缺失`);
+    }
+  }
+  return { catalog, methodToPlugin, goUnitOf };
+}
+
+function runGo() {
+  const out = execFileSync('go', ['run', './tools/plugin-graph/go', cliRoot], { cwd: cliRoot, encoding: 'utf8', maxBuffer: 32 << 20 });
+  return JSON.parse(out);
+}
+
+const { catalog, methodToPlugin, goUnitOf } = loadCatalog();
+const { webCalls, unresolved: webUnresolved } = analyzeWebCalls(cliRoot, methodToPlugin, goUnitOf);
+const goData = runGo();
+
+const plugins = [...catalog]
+  .sort((a, b) => a.pluginId.localeCompare(b.pluginId))
+  .map((u) => ({
+    pluginId: u.pluginId,
+    name: u.documentation.name,
+    summary: u.documentation.summary,
+    duties: u.documentation.duties,
+    boundary: u.documentation.boundary,
+    data: u.documentation.data,
+    webUnitId: `${u.pluginId}.web`,
+    goUnitId: u.unitId,
+    methods: [...u.methods].sort(),
+  }));
+
+const units = [];
+for (const p of plugins) {
+  units.push({ pluginId: p.pluginId, unitId: p.webUnitId, runtime: 'web', provides: [`${p.pluginId}.api`], dependencies: [] });
+  units.push({ pluginId: p.pluginId, unitId: p.goUnitId, runtime: 'go', provides: [...p.methods].sort(), dependencies: [] });
+}
+units.sort((a, b) => a.unitId.localeCompare(b.unitId));
+
+const assemblyEdges = [];
+
+// 校验生成侧引用。
+for (const w of webCalls) {
+  if (!methodToPlugin.has(w.method)) throw new Error(`Web 调用悬空方法 ${w.method} @ ${w.file}:${w.line}`);
+}
+for (const h of goData.goHandlers ?? []) {
+  if (!methodToPlugin.has(h.method)) throw new Error(`Go handler 悬空方法 ${h.method} @ ${h.regFile}:${h.regLine}`);
+  if (methodToPlugin.get(h.method) !== h.pluginId) {
+    throw new Error(`Go handler 归属与目录冲突 ${h.method}（目录 ${methodToPlugin.get(h.method)}，实现 ${h.pluginId}）`);
+  }
+}
+
+const goHandlerByMethod = new Map((goData.goHandlers ?? []).map((h) => [h.method, h]));
+const webCallsByMethod = new Map();
+webCalls.forEach((w, i) => {
+  if (!webCallsByMethod.has(w.method)) webCallsByMethod.set(w.method, []);
+  webCallsByMethod.get(w.method).push(i);
+});
+
+const crossEnd = [...methodToPlugin.keys()].sort().map((method) => {
+  const pluginId = methodToPlugin.get(method);
+  const h = goHandlerByMethod.get(method);
+  return {
+    pluginId,
+    method,
+    webCallIndexes: [...(webCallsByMethod.get(method) ?? [])].sort((a, b) => a - b),
+    goHandler: h ? { handler: h.handler, regFile: h.regFile, regLine: h.regLine, implFile: h.implFile, implLine: h.implLine } : null,
+  };
+});
+
+const unresolved = [
+  ...webUnresolved.map((u) => ({ side: 'web', ...u })),
+  ...(goData.unresolved ?? []).map((u) => ({ side: 'go', ...u })),
+].sort((a, b) => a.side.localeCompare(b.side) || a.file.localeCompare(b.file) || a.line - b.line);
+
+const graph = {
+  version: 1,
+  plugins,
+  units,
+  assemblyEdges,
+  webCalls,
+  goHandlers: [...(goData.goHandlers ?? [])].sort((a, b) => a.method.localeCompare(b.method)),
+  goCalls: [...(goData.goCalls ?? [])].sort((a, b) =>
+    a.callerHandler.localeCompare(b.callerHandler) || a.file.localeCompare(b.file) || a.line - b.line),
+  crossEnd,
+  unresolved,
+};
+
+const text =
+  '// Generated by tools/plugin-graph/generate.mjs; do not edit.\n' +
+  '// 来源：pluginmanifest/catalog.json + web/src 实际调用 + internal/daemon AST。\n' +
+  'export const PLUGIN_GRAPH = ' +
+  JSON.stringify(graph, null, 2) +
+  ';\n';
+
+if (check) {
+  if (!existsSync(outPath)) throw new Error(`产物缺失：${repo(outPath)}，先运行生成`);
+  const current = readFileSync(outPath, 'utf8');
+  if (current !== text) throw new Error('插件图谱产物陈旧：请运行 generate:plugin-graph 后重新核验');
+  console.log(`plugin-graph check ok: ${plugins.length} plugins, ${units.length} units, webCalls ${webCalls.length}, goHandlers ${graph.goHandlers.length}, goCalls ${graph.goCalls.length}, unresolved ${unresolved.length}`);
+} else {
+  writeFileSync(outPath, text);
+  console.log(`plugin-graph generated: ${plugins.length} plugins, ${units.length} units, webCalls ${webCalls.length}, goHandlers ${graph.goHandlers.length}, goCalls ${graph.goCalls.length}, unresolved ${unresolved.length} -> ${repo(outPath)}`);
+}

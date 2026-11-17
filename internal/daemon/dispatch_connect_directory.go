@@ -96,6 +96,7 @@ func (d *Daemon) opConnectDirectoryAdd(ctx context.Context, p kmapi.ConnectDirec
 			}
 		}
 	}
+	d.publishConnect()
 	return store.View(), nil
 }
 func (d *Daemon) opConnectDirectoryRemove(ctx context.Context, p kmapi.ConnectDirectoryRemoveRequest) (any, *kmapi.ErrorDetail) {
@@ -108,6 +109,7 @@ func (d *Daemon) opConnectDirectoryRemove(ctx context.Context, p kmapi.ConnectDi
 	if err := d.connectMgr.Directory().Remove(stringOrEmpty(p.AppPublicKeyHex), stringOrEmpty(p.PendingID)); err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
+	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
 func (d *Daemon) opConnectDirectoryFavorite(ctx context.Context, p kmapi.ConnectDirectoryFavoriteRequest) (any, *kmapi.ErrorDetail) {
@@ -117,6 +119,7 @@ func (d *Daemon) opConnectDirectoryFavorite(ctx context.Context, p kmapi.Connect
 	if err := d.connectMgr.Directory().Favorite(p.AppPublicKeyHex, p.Favorite); err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
+	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
 func (d *Daemon) opConnectDirectorySelect(ctx context.Context, p kmapi.ConnectDirectorySelectRequest) (any, *kmapi.ErrorDetail) {
@@ -129,6 +132,7 @@ func (d *Daemon) opConnectDirectorySelect(ctx context.Context, p kmapi.ConnectDi
 	if err := d.connectMgr.Directory().Select(p.AppPublicKeyHex, connect.DirectorySelection{URL: stringOrEmpty(p.URL), Indexseedhashhex: stringOrEmpty(p.Indexseedhashhex)}); err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
+	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
 func stringOrEmpty(s *string) string {

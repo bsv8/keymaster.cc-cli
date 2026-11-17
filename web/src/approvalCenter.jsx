@@ -6,7 +6,9 @@ import { decideApproval, pumpPendingApprovals } from './connect.js';
 import { interpretLockingScript } from 'keymaster-connect/script';
 import { useApplicationWorkspace } from './workspace.jsx';
 import { t } from './i18n.js';
-import { prepareDirectoryEntry, directoryLaunchTarget } from './directoryLaunch.js';
+import { useConnectData } from './useConnectData.js';
+import { AppIcon, operationName, eventName } from './appPresentation.jsx';
+import { useMarket, entryPresentation } from './appMarket.jsx';
 
 const METHOD_LABELS = {
   'identity.get': '身份凭证',
@@ -21,43 +23,6 @@ async function call(method, params) {
   return c.call(undefined, method, params || {});
 }
 
-export function useConnectData() {
-  const [approvals, setApprovals] = useState([]);
-  const [apps, setApps] = useState({ applications: [], connections: [], permissions: {} });
-  const [permissions, setPermissions] = useState([]);
-  const [history, setHistory] = useState([]);
-  const [err, setErr] = useState('');
-  // 读取失败保留已知快照并明确标记未知，不伪装成正常空状态。
-  const load = useCallback(async () => {
-    const failures = [];
-    try {
-      const c = await getClient();
-      try {
-        const a = await c.call(undefined, 'connect.approvals.list');
-        setApprovals(a.approvals || []);
-      } catch (e) { failures.push(`approvals: ${e?.message || e}`); }
-      try {
-        const ap = await c.call(undefined, 'connect.apps.list');
-        setApps(ap);
-      } catch (e) { failures.push(`apps: ${e?.message || e}`); }
-      try {
-        const pm = await c.call(undefined, 'connect.permissions.list', {});
-        setPermissions(pm.permissions || []);
-      } catch (e) { failures.push(`permissions: ${e?.message || e}`); }
-      try {
-        const h = await c.call(undefined, 'connect.history.list', { limit: 200 });
-        setHistory(h.events || []);
-      } catch (e) { failures.push(`history: ${e?.message || e}`); }
-      setErr(failures.length ? `读取失败（显示已知快照）：${failures.join('；')}` : '');
-      try { await pumpPendingApprovals(); } catch { /* ignore */ }
-    } catch (e) {
-      setErr(`连接失败（显示已知快照）：${String(e?.message || e)}`);
-    }
-  }, []);
-  useEffect(() => watchTopics(['connect'], () => load()), [load]);
-  useEffect(() => { load(); }, [load]);
-  return { approvals, apps, permissions, history, err, reload: load };
-}
 
 function fmtTime(ms) {
   try { return new Date(ms).toLocaleString(); } catch { return String(ms); }
@@ -81,8 +46,8 @@ function ApprovalCard({ approval, wallet, onDecide, disabled }) {
   };
   const params = approval.params || {};
   return (
-    <div className="card" data-testid={`approval-${approval.id}`} style={{ marginBottom: 8 }}>
-      <p className="mono">{approval.method} · {approval.origin}</p>
+    <div className="card" data-testid={`approval-${approval.id}`} data-method={approval.method} style={{ marginBottom: 8 }}>
+      <p>{operationName(approval.method)} · {approval.origin}</p>
       <p className="mono">{t('来源')} {approval.origin} · {t('钱包')} {wallet?.network || '—'} {wallet?.address ? wallet.address.slice(0, 8) + '…' : ''}</p>
       {approval.method === 'identity.get' && (
         <div className="mono">
@@ -100,7 +65,7 @@ function ApprovalCard({ approval, wallet, onDecide, disabled }) {
       )}
       {(approval.method === 'cipher.encrypt' || approval.method === 'cipher.decrypt') && (
         <div className="mono">
-          <p>{t('操作类型')} {approval.method} · scope {t('应用隔离')} · {t('内容类型')} {params.contentType || '—'}</p>
+          <p>{t('操作类型')} {operationName(approval.method)} · {t('应用隔离')} · {t('内容类型')} {params.contentType || '—'}</p>
           <p>{t('附件大小')} {JSON.stringify(approval.attachmentSizes || {})} · {t('解密默认不展示明文，仅展示类型与大小；批准后由原窗口执行。')}</p>
           {approval.expiresAt && <p>{t('期限')} {fmtTime(approval.expiresAt)}</p>}
         </div>
@@ -151,9 +116,11 @@ function PaymentPreview({ params }) {
   );
 }
 
-export function GlobalApproval({ wallet, onNavigateConnect }) {
+export function GlobalApproval({ wallet, showSettings }) {
   const { approvals, apps, err, history } = useConnectData();
-  const online = (apps.connections || []).length;
+  const market = useMarket();
+  const [settingsOutlet, setSettingsOutlet] = useState(null);
+  useEffect(() => { setSettingsOutlet(showSettings ? document.getElementById('application-reminders-settings') : null); }, [showSettings]);
   const autoSeen = useRef(new Set());
   const [reviewing, setReviewing] = useState(undefined);
   const [open, setOpen] = useState(false);
@@ -232,20 +199,23 @@ export function GlobalApproval({ wallet, onNavigateConnect }) {
 
   useEffect(() => () => { try { audio.current?.close(); } catch { /* ignore */ } }, []);
 
+  useEffect(() => { if (open && reviewing === undefined && approvals[0]) setReviewing(approvals[0].id); }, [open, reviewing, approvals]);
   const current = reviewing ? approvals.find((a) => a.id === reviewing) : approvals[0];
   const currentEnded = reviewing && !current;
+  const selectedHistory = history.find(event => `history:${event.id}` === reviewing);
   const decide = async (approval, decision, grantAuto) => {
     await decideApproval(approval.id, decision, grantAuto);
   };
 
   return (
     <>
-      <button type="button" className="ghost" onClick={onNavigateConnect} title={t('在线连接')}>{t('应用连接')} {online}</button>
-      <button type="button" className="ghost" data-testid="global-pending" disabled={!count} onClick={() => review()}>{t('待处理')} {count}</button>
+      <button type="button" className="ghost" data-testid="global-pending" onClick={() => review()}>{t('待处理')} {count}</button>
+      {settingsOutlet && createPortal(<div className="row">
       <button type="button" className="ghost" onClick={async () => { try { audio.current ??= new AudioContext(); await audio.current.resume(); if (audio.current.state !== 'running') throw new Error(); setSound('ready'); await play(true); } catch { setSound('failed'); } }}>{sound === 'off' ? t('启用 / 试听提示音') : sound === 'failed' ? t('声音未启用 · 重试') : t('试听提示音')}</button>
       <button type="button" className="ghost" title={t('浏览器可能限制后台发声和系统通知；静音、勿扰与挂起无法绕过')} onClick={async () => { try { if (typeof Notification === 'undefined') { setNotification(t('浏览器不支持')); return; } const p = await Notification.requestPermission(); setNotification(p === 'granted' ? t('已允许') : t('未获允许')); } catch { setNotification(t('开启失败')); } }}>{t('系统通知')}：{notification}</button>
+      </div>, settingsOutlet)}
       {createPortal(<>
-        {count ? <aside className={`application-alert ${seen ? '' : 'is-unseen'}`} aria-label={t('待处理应用授权')}><strong><i />{t('待授权')} {count} {t('项')}</strong><span>{approvals.map((a) => METHOD_LABELS[a.method] ?? a.method).join(' · ')}</span><button type="button" onClick={() => review()}>{t('查看并处理 →')}</button>{sound === 'failed' ? <small role="status">{t('提示音未播放')}</small> : null}</aside> : null}
+        {count ? <aside className={`application-alert ${seen ? '' : 'is-unseen'}`} aria-label={t('待处理应用授权')}><strong><i />{t('待授权')} {count} {t('项')}</strong><span>{approvals.map((a) => operationName(a.method)).join(' · ')}</span><button type="button" onClick={() => review()}>{t('查看并处理 →')}</button>{sound === 'failed' ? <small role="status">{t('提示音未播放')}</small> : null}</aside> : null}
         {reminder ? <aside className="application-automatic" role="status">{reminder}<button type="button" onClick={() => setReminder('')}>{t('关闭')}</button></aside> : null}
         <dialog ref={dialog} data-testid="connect-approval-dialog" className="application-drawer" onCancel={() => setOpen(false)} onClose={() => setOpen(false)} aria-labelledby="application-approval-title">
           <header><h2 id="application-approval-title">{t('应用授权 · 待处理')} {count} {t('项')}</h2><button type="button" aria-label={t('关闭审批，返回原工作')} onClick={() => setOpen(false)}>✕</button></header>
@@ -253,186 +223,19 @@ export function GlobalApproval({ wallet, onNavigateConnect }) {
             {err && <p className="error">{err}</p>}
             {current ? <ApprovalCard approval={current} wallet={wallet} onDecide={decide} disabled={false} /> : <p>{currentEnded ? t('当前申请已结束或连接已失效。没有可批准的请求。') : t('当前申请已结束或连接已失效。没有可批准的请求。')}</p>}
             <p className="application-note">{t('逐项核对；新请求不会替换当前申请。批准不等于执行成功。')}</p>
-            <h3>{t('其他待处理申请')}</h3>
-            {approvals.filter((a) => a.id !== current?.id).map((a) => <button type="button" className="application-queue-item" key={a.id} onClick={() => { setReviewing(a.id); setSeen(true); }}>{a.origin} · {METHOD_LABELS[a.method] ?? a.method}</button>)}
+            <div className="activity-groups">{[...new Set([...approvals.map(item => item.appPublicKeyHex || item.origin), ...history.map(item => item.applicationKey || item.origin)])].map(key => {
+              const entry = market.entries.find(entry => entry.appPublicKeyHex === key);
+              const display = entry ? entryPresentation(entry, market.deployments) : (market.knownApplications || {})[key] || {};
+              const pending = approvals.filter(item => (item.appPublicKeyHex || item.origin) === key);
+              const records = history.filter(item => (item.applicationKey || item.origin) === key).sort((a, b) => b.at - a.at);
+              const name = display.name || '应用连接申请';
+              return <section className="activity-group" key={key}><header><AppIcon icon={display.icon} url={entry?.urls?.[0]?.url} name={name} size={36} /><h3>{name}</h3></header><ul>{pending.map(item => <li key={item.id}><button className="application-queue-item" aria-pressed={reviewing === item.id} onClick={() => { setReviewing(item.id); setSeen(true); }}><span>{operationName(item.method)}</span><span>等待授权</span></button></li>)}{records.map(event => <li key={event.id}><button className="application-queue-item" aria-pressed={reviewing === `history:${event.id}`} onClick={() => setReviewing(`history:${event.id}`)}><span>{operationName(event.method)}</span><span>{eventName(event)}</span><time>{fmtTime(event.at)}</time></button></li>)}</ul></section>;
+            })}</div>
+            {selectedHistory && <section className="application-history"><h3>{operationName(selectedHistory.method)} · {eventName(selectedHistory)}</h3><p>{fmtTime(selectedHistory.at)}</p><p>{selectedHistory.auto ? '使用已有永久授权' : '人工处理或连接事件'}</p></section>}
+
           </div>
         </dialog>
       </>, document.body)}
     </>
-  );
-}
-
-export function AppCenter() {
-  const { approvals, apps, permissions, history, err, reload } = useConnectData();
-  const [selected, setSelected] = useState(undefined);
-  const [tab, setTab] = useState('activity');
-  const [filter, setFilter] = useState('');
-  const [localErr, setLocalErr] = useState('');
-  const appList = apps.applications || [];
-  const app = appList.find((a) => a.applicationKey === selected) ?? appList[0];
-  const connections = (apps.connections || []).filter((c) => c.applicationKey === app?.applicationKey);
-  const appApprovals = approvals.filter((a) => a.origin === app?.origin);
-
-  const disconnect = async () => {
-    if (!app) return;
-    setLocalErr('');
-    try {
-      await call('connect.auth.revoke', { appPublicKeyHex: app.applicationKey });
-      await reload();
-    } catch (e) {
-      setLocalErr(t('撤销连接授权失败，请重试。'));
-    }
-  };
-
-  const revokePerm = async (applicationKey, method) => {
-    setLocalErr('');
-    try {
-      await call('connect.permissions.revoke', { applicationKey, method });
-      await reload();
-    } catch (e) {
-      setLocalErr(t('取消许可失败，请重试；未将失败伪装为成功。'));
-    }
-  };
-
-  return (
-    <section className="card">
-      <h2>{t('应用连接')}</h2>
-      <p className="hint">{t('按应用管理许可和历史，会话是应用下面的连接实例。')}</p>
-      {err && <p className="error">{err}</p>}
-      {localErr && <p className="error">{localErr}</p>}
-      <div className="row">
-        <aside style={{ minWidth: 220 }}>
-          {appList.length === 0 ? <p className="hint">{t('还没有应用连接。')}</p> : appList.map((a) => (
-            <button key={a.applicationKey} type="button" className={a.applicationKey === app?.applicationKey ? 'ghost' : ''} style={{ display: 'block', marginBottom: 6 }} onClick={() => setSelected(a.applicationKey)}>
-              <strong>{a.origin}</strong><br /><code className="mono">{a.origin}</code>
-            </button>
-          ))}
-        </aside>
-        <article style={{ flex: 1 }}>
-          {app && (
-            <>
-              <div className="application-identity"><h3>{app.origin}</h3><code className="mono">{app.origin}</code><small>{t('应用身份统一使用真实来源')}</small></div>
-              <div className="application-tabs">
-                {[['activity', t('活动')], ['sessions', t('会话')], ['settings', t('设置')], ['history', t('日志历史')]].map(([v, label]) => (
-                  <button key={v} type="button" className={tab === v ? 'selected' : ''} onClick={() => setTab(v)}>{label}</button>
-                ))}
-              </div>
-              {tab === 'settings' && (
-                <>
-                  <button type="button" data-testid="disconnect-app" onClick={disconnect}>{t('断开应用连接')}</button>
-                  <p className="application-note">{t('许可属于来源，不属于某次会话。按精确来源隔离，刷新和重连后仍有效；不同操作互不通用。')}</p>
-                  {err.includes('permissions') && <p className="error" role="alert">{t('许可读取失败，不能把未知状态当成未开启。')}</p>}
-                  {['identity.get', 'intent.sign', 'cipher.encrypt', 'cipher.decrypt', 'payment.pay'].map((m) => {
-                    const entry = permissions.find((p) => p.applicationKey === app.applicationKey);
-                    const unknown = err.includes('permissions') && !entry;
-                    const granted = (entry?.methods || []).includes(m);
-                    return (
-                      <div className="application-setting" key={m}>
-                        <div><strong>{METHOD_LABELS[m]}</strong><code className="mono">{m}</code>{m === 'payment.pay' && granted ? <small className="application-warning">{t('已允许自动付款，不设金额上限。')}</small> : null}</div>
-                        <span>{unknown ? t('读取中 / 未知') : granted ? t('以后自动同意') : t('每次询问')}</span>
-                        {granted && !unknown ? <button type="button" data-testid={`revoke-perm-${m}`} onClick={() => revokePerm(app.applicationKey, m)}>{t('取消自动同意')}</button> : null}
-                      </div>
-                    );
-                  })}
-                  <p className="application-note">{t('只能在实际审批中勾选「以后自动同意」授予许可。取消后，新请求恢复逐次询问；已经签名或执行中的操作不会因此被撤销。')}</p>
-                </>
-              )}
-              {tab === 'sessions' && (
-                <>
-                  <p className="application-note">{t('锁定、刷新或关闭只暂停运行连接，保留原应用授权；同钱包恢复后重新握手，不重放旧业务。明确断开才撤销连接授权。')}</p>
-                  {connections.length ? connections.map((c) => (
-                    <div className="application-session" key={c.id}><div><strong>{t('已连接')}</strong><small>{fmtTime(c.createdAt)}</small><code className="mono">{c.id}</code></div><button type="button" data-testid="disconnect-app" onClick={disconnect}>{t('断开应用连接')}</button></div>
-                  )) : <p className="hint">{t('当前没有在线会话。')}</p>}
-                </>
-              )}
-              {tab === 'activity' && (
-                <>
-                  <p className="application-note">{t('为避免重复审批，逐次请求统一从顶部「待处理」面板处理。')}</p>
-                  {appApprovals.length ? appApprovals.map((a) => <div className="application-session" key={a.id}><strong>{METHOD_LABELS[a.method] ?? a.method}</strong><span>{a.status}</span></div>) : <p className="hint">{t('当前没有活跃请求。')}</p>}
-                </>
-              )}
-              {tab === 'history' && (
-                <>
-                  <input className="application-filter" placeholder={t('筛选操作、状态或时间')} value={filter} onChange={(e) => setFilter(e.target.value)} aria-label={t('筛选应用历史')} />
-                  {(history.filter((e) => e.applicationKey === app.applicationKey).filter((e) => `${e.kind} ${e.method || ''}`.includes(filter))).map((e) => (
-                    <div className="application-history" key={e.id}><strong>{e.kind}</strong><p>{e.method || ''} · {fmtTime(e.at)} {e.auto ? t('(自动)') : t('(人工)')}</p></div>
-                  ))}
-                  <p className="application-note">{t('日志不展示密钥、token、解密明文或完整原始报文。断开连接不删除历史与未核实资金责任。')}</p>
-                </>
-              )}
-            </>
-          )}
-        </article>
-      </div>
-    </section>
-  );
-}
-
-export function DirectoryCenter() {
-  const workspace = useApplicationWorkspace();
-  const [entries, setEntries] = React.useState([]);
-  const [deployments,setDeployments]=React.useState([]);
-  const [pending,setPending] = React.useState([]);
-  const [seed,setSeed] = React.useState('');
-  const [adding,setAdding] = React.useState(false);
-  const [url, setUrl] = React.useState('');
-  const [name, setName] = React.useState('');
-  const [err, setErr] = React.useState('');
-  const [marketError, setMarketError] = React.useState('');
-  const load = React.useCallback(async () => {
-    try {
-      const res = await call('connect.directory.list', {});
-      setEntries(res.entries || []);
-      setPending(res.pending || []);
-      setMarketError(res.marketError || '');
-      const deployed=await call('connect.deployment.list',{});setDeployments(deployed.deployments);
-    } catch (e) { setErr(String(e?.message || e)); }
-  }, []);
-  React.useEffect(() => { load(); }, [load]);
-  // Files 下载与验证只调用后台已声明的方法；商店不读取或写入部署文件。
-  const prepareEntry = async entry => {
-    const target = await prepareDirectoryEntry(entry, call);
-    await load();
-    return target;
-  };
-  const launch = entry => workspace.requestLaunch(directoryLaunchTarget(entry, () => prepareEntry(entry)));
-  const add = async () => {
-    setErr('');
-    try {
-      setAdding(true);
-      if(Boolean(url)===Boolean(seed))throw new Error('URL 与 seed 必须二选一');
-      await call('connect.directory.add', { ...(url?{url}:{indexseedhashhex:seed}), ...(name ? { name } : {}) });
-      setUrl(''); setSeed(''); setName(''); await load();
-    } catch (e) { setErr(String(e?.message || e)); } finally {setAdding(false)}
-  };
-  const remove = async (target) => {
-    setErr('');
-    try { await call('connect.directory.remove', target); await load(); }
-    catch (e) { setErr(String(e?.message || e)); }
-  };
-  const favorite = async (appPublicKeyHex, favorite) => {
-    setErr('');
-    try { await call('connect.directory.favorite', { appPublicKeyHex, favorite }); await load(); }
-    catch (e) { setErr(String(e?.message || e)); }
-  };
-  return (
-    <section className="card">
-      <h2>应用目录</h2>
-      <p className="hint">市场缓存 + 本地自添加 + 收藏按 App 公钥合并；收藏置顶，市场失败不阻塞本地启动。</p>
-      {err && <p className="error">{err}</p>}
-      {workspace.settingsError && <p className="error">{workspace.settingsError}</p>}
-      {marketError && <p className="error">市场更新失败：{marketError} <button type="button" onClick={load}>重试</button></p>}
-      <div className="row">
-        <input aria-label="应用 URL" placeholder="https://app.example/start" value={url} onChange={(e) => setUrl(e.target.value)} />
-        <input aria-label="Files seed" placeholder="indexseedhashhex（与 URL 二选一）" value={seed} onChange={e=>setSeed(e.target.value)} />
-        <input aria-label="展示名称" placeholder="名称（可选）" value={name} onChange={(e) => setName(e.target.value)} />
-        <button type="button" disabled={adding} onClick={add}>{adding?'验证安装中…':'添加'}</button>
-        <button type="button" onClick={load}>刷新</button>
-      </div>
-      {entries.length===0&&pending.length===0&&<p className="hint">暂无条目。</p>}
-      {entries.map(e=>{const key=e.appPublicKeyHex;const selected=e.selected?.url?`url:${e.selected.url}`:e.selected?.indexseedhashhex?`files:${e.selected.indexseedhashhex}`:e.urls.length?`url:${e.urls[0].url}`:`files:${e.files[0].indexseedhashhex}`;const display=(e.selected?.indexseedhashhex?e.files.find(f=>f.indexseedhashhex===e.selected.indexseedhashhex):e.urls.find(u=>u.url===(e.selected?.url??e.urls[0]?.url)))?.display??e.files[0]?.display;return <div key={key} className="application-session"><div>{e.selected?.indexseedhashhex&&deployments.find(d=>d.indexseedhashhex===e.selected.indexseedhashhex&&d.status==='serving')?.iconUrl&&<img alt="" width="40" height="40" src={deployments.find(d=>d.indexseedhashhex===e.selected.indexseedhashhex&&d.status==='serving').iconUrl}/>}{<strong>{display?.name||e.name||key}</strong>}<br/><code>{key}</code><p>{e.marketListed?'市场 · ':''}{e.local?'本地 · ':''}{e.favorite?'已收藏':''}</p><select aria-label={`应用入口 ${key}`} value={selected} onChange={async event=>{try{const value=event.target.value;await call('connect.directory.select',{appPublicKeyHex:key,...value.startsWith('url:')?{url:value.slice(4)}:{indexseedhashhex:value.slice(6)}});await load()}catch(error){setErr(String(error.message||error))}}}>{e.urls.map(u=><option key={u.url} value={`url:${u.url}`}>{u.url}</option>)}{e.files.map(f=><option key={f.indexseedhashhex} value={`files:${f.indexseedhashhex}`}>Files {f.indexseedhashhex}</option>)}</select></div><div className="row"><button data-testid={`directory-launch-${key}`} disabled={!workspace.ready || workspace.busy} onClick={()=>launch(e)}>打开应用</button><button onClick={()=>favorite(key,!e.favorite)}>{e.favorite?'取消收藏':'收藏'}</button>{e.local&&<button onClick={()=>remove({appPublicKeyHex:key})}>删除</button>}{deployments.filter(d=>d.appPublicKeyHex===key&&d.status==='serving').map(d=><button key={d.deploymentId} onClick={async()=>{try{await call('connect.deployment.stop',{deploymentId:d.deploymentId});await load()}catch(error){setErr(String(error.message||error))}}}>停止 {d.indexseedhashhex.slice(0,12)}</button>)}</div></div>})}
-      {pending.map(p=><div className="application-session" key={p.pendingId}><div><strong>{p.name||p.url||p.indexseedhashhex}</strong><p>待验证：{p.url||p.indexseedhashhex}</p>{p.error&&<p className="error">{p.error}</p>}</div><div className="row"><button data-testid={`directory-launch-${p.pendingId}`} disabled={!workspace.ready || workspace.busy} onClick={()=>launch(p)}>打开并验证</button><button onClick={()=>remove({pendingId:p.pendingId})}>删除</button></div></div>)}
-
-    </section>
   );
 }

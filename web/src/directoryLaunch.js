@@ -1,4 +1,4 @@
-// 概览与应用目录复用入口选择、部署准备及工作区确认。
+// 概览与应用目录复用入口选择、部署准备及工作区启动。
 export function selectedDirectoryTarget(entry) {
   return entry.selected || (entry.url ? { url: entry.url } : entry.urls?.length ? { url: entry.urls[0].url } : { indexseedhashhex: entry.indexseedhashhex || entry.files?.[0]?.indexseedhashhex });
 }
@@ -15,5 +15,5 @@ export async function prepareDirectoryEntry(entry, call) {
 }
 export function directoryLaunchTarget(entry, prepare) {
   const selected = selectedDirectoryTarget(entry);
-  return { title: entry.name || selected.url || entry.appPublicKeyHex || 'Files App', url: selected.url, description: selected.indexseedhashhex, prepare, testId: 'directory-iframe-view' };
+  return { expectedAppPublicKeyHex: entry.appPublicKeyHex, indexseedhashhex: selected.indexseedhashhex, title: entry.name || selected.url || entry.appPublicKeyHex || 'Files App', url: selected.url, description: selected.indexseedhashhex, prepare, testId: 'directory-iframe-view' };
 }

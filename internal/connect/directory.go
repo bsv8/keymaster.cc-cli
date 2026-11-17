@@ -55,12 +55,13 @@ type MarketCache struct {
 	LastSuccessfulFetchAt int64            `json:"lastSuccessfulFetchAt"`
 }
 type directoryFile struct {
-	Version   int                           `json:"version"`
-	Market    MarketCache                   `json:"market"`
-	Local     map[string]DirectoryEntry     `json:"local"`
-	Favorites map[string]bool               `json:"favorites"`
-	Pending   map[string]DirectoryPending   `json:"pending"`
-	Selection map[string]DirectorySelection `json:"selection"`
+	Displays  map[string]apppublication.AppDisplay `json:"displays,omitempty"`
+	Version   int                                  `json:"version"`
+	Market    MarketCache                          `json:"market"`
+	Local     map[string]DirectoryEntry            `json:"local"`
+	Favorites map[string]bool                      `json:"favorites"`
+	Pending   map[string]DirectoryPending          `json:"pending"`
+	Selection map[string]DirectorySelection        `json:"selection"`
 }
 type MarketFetchCall struct {
 	done chan struct{}
@@ -230,6 +231,16 @@ func (s *DirectoryStore) Load() error {
 	if err != nil {
 		s.loadError = err
 		return err
+	}
+	for key, display := range f.Displays {
+		if ApplicationKey(key) == "" {
+			s.loadError = fmt.Errorf("invalid display identity")
+			return s.loadError
+		}
+		if _, err := apppublication.ParseDisplay(apppublication.DisplayMap(display)); err != nil {
+			s.loadError = err
+			return err
+		}
 	}
 	s.state = f
 	return nil
@@ -439,7 +450,7 @@ func (s *DirectoryStore) View() map[string]any {
 		pending = append(pending, p)
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].PendingID < pending[j].PendingID })
-	out := map[string]any{"entries": s.listLocked(), "pending": pending}
+	out := map[string]any{"entries": s.listLocked(), "pending": pending, "knownApplications": s.state.Displays, "favorites": s.state.Favorites}
 	if s.loadError != nil {
 		out["marketError"] = s.loadError.Error()
 	} else if s.marketError != "" {
@@ -483,15 +494,17 @@ func (s *DirectoryStore) Favorite(key string, value bool) error {
 			break
 		}
 	}
-	if found == nil {
-		return fmt.Errorf("unknown App public key")
+	if ApplicationKey(key) == "" {
+		return fmt.Errorf("invalid App public key")
 	}
 	return s.transactLocked(func(f *directoryFile) error {
 		if value {
 			f.Favorites[key] = true
-			copy := *found
-			copy.Local = true
-			f.Local[key] = copy
+			if found != nil {
+				copy := *found
+				copy.Local = true
+				f.Local[key] = copy
+			}
 		} else {
 			delete(f.Favorites, key)
 		}
@@ -611,4 +624,20 @@ func (s *DirectoryStore) ResolveSeed(seed, key string, display apppublication.Ap
 		}
 	}
 	return nil
+}
+
+// RememberDisplay retains verified App presentation without inventing a launch URL.
+func (s *DirectoryStore) RememberDisplay(key string, display apppublication.AppDisplay) error {
+	if ApplicationKey(key) == "" {
+		return fmt.Errorf("invalid App public key")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transactLocked(func(f *directoryFile) error {
+		if f.Displays == nil {
+			f.Displays = map[string]apppublication.AppDisplay{}
+		}
+		f.Displays[key] = display
+		return nil
+	})
 }

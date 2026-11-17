@@ -16,7 +16,7 @@ import (
 // 建立连接类方法：每次调用都需用户确认绑定，不做静默自动执行。
 func isEstablishingConnectMethod(method string) bool {
 	switch method {
-	case "connect.login", "connect.resume", "connect.launch":
+	case "connect.login", "connect.launch":
 		return true
 	default:
 		return false
@@ -299,29 +299,15 @@ func (d *Daemon) validateConnectAuth(authorizationID, origin string) (connect.Au
 	if a.Network != info.BsvNetwork || !strings.EqualFold(a.WalletPublicKey, walletPub) {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
 	}
-	// 连接生命周期：已关闭/已暂停的连接即使授权记录仍在也不得执行业务，
-	// 由原应用 resume 重新握手恢复；缺连接记录的存量授权首次视为在线并补建。
-	if d.connectMgr != nil && d.connectMgr.Connections() != nil {
-		found := false
-		for _, c := range d.connectMgr.Connections().List() {
-			if c.AuthID == a.AuthorizationID {
-				found = true
-				break
-			}
-		}
-		if found {
-			if !d.connectMgr.Connections().IsOnline(a.AuthorizationID) {
-				return connect.Auth{}, errDetail(kmapi.ErrNotFound, "连接已暂停或关闭，授权需重新握手")
-			}
-			d.connectMgr.Connections().Touch(a.AuthorizationID)
-		} else {
-			d.connectMgr.Connections().UpsertActive(a)
-		}
+	// 旧授权不能补建运行连接；只有新登录或启动才能登记在线连接。
+	if d.connectMgr.Connections() == nil || !d.connectMgr.Connections().IsOnline(a.AuthorizationID) {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "Connection closed; login again")
 	}
+	d.connectMgr.Connections().Touch(a.AuthorizationID)
 	return a, nil
 }
 
-// lookupValidAuth 复核授权本身（不含连接在线检查），供 resume 等需处理暂停态的路径使用。
+// lookupValidAuth 复核授权本身（不含连接在线检查），仅供撤销授权等不执行业务的路径使用。
 func (d *Daemon) lookupValidAuth(authorizationID, origin string) (connect.Auth, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
 		return connect.Auth{}, errDetail(kmapi.ErrInternal, "Connect 未就绪")
@@ -449,8 +435,8 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		}
 		d.connectMgr.Queue().StoreResult(a.ID, res, binaries)
 		d.recordApprovalHistory(a, "executed", isAuto(ctx), "")
-		// 登录/恢复执行成功即建立连接：记录 connected 事件。
-		if a.Method == "connect.login" || a.Method == "connect.resume" {
+		// 登录执行成功即建立连接：记录 connected 事件。
+		if a.Method == "connect.login" {
 			d.recordApprovalHistory(a, "connected", false, "")
 		}
 		d.publishConnect()
@@ -476,8 +462,6 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	// 建立连接类方法：每次调用都需用户确认绑定，不做静默自动执行。
 	// 可信来源属于 Receiver 上下文；应用不得自报 origin 冒用他人权限，
 	// 后台继续核对来源与原授权一致。
-	// 例外：Receiver 已把持有授权的 reconnect 心跳转成 resume；此时只复核
-	// 既有授权，不重复弹审批，也不改变授权内容。
 	if isEstablishingConnectMethod(method) {
 		if strings.TrimSpace(origin) == "" {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 缺失")
@@ -485,9 +469,6 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		canonical, cerr := connect.CanonicalOrigin(strings.TrimSpace(origin))
 		if cerr != nil {
 			return nil, nil, errDetail(kmapi.ErrBadRequest, "origin 必须为精确 HTTP(S) origin")
-		}
-		if method == "connect.resume" && p.AuthorizationID != nil && *p.AuthorizationID != "" {
-			return d.resumeConnect(*p.AuthorizationID, canonical)
 		}
 		paramsMap := map[string]any{}
 		if p.Params != nil {
@@ -510,7 +491,7 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 		if p.AuthorizationID != nil {
 			authorizationID = *p.AuthorizationID
 		}
-		a, perr := d.validateConnectAuth(authorizationID, origin)
+		a, perr := d.lookupValidAuth(authorizationID, origin)
 		if perr != nil {
 			return nil, nil, perr
 		}
@@ -607,46 +588,6 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 	default:
 		return nil, nil, errDetail(kmapi.ErrInternal, "未实现")
 	}
-}
-
-// resumeConnect 复核既有授权并返回与登录同形的 resume 结果。
-// 只由 Receiver 的 reconnect 心跳/刷新路径调用；授权、来源、网络、钱包、代际
-// 任一不匹配都拒绝，不静默降级为新的审批或新的授权。
-func (d *Daemon) resumeConnect(authorizationID, origin string) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	// resume 允许暂停态连接；查找、proof 核验与恢复在线在授权生命周期锁内
-	// 按统一顺序完成，proof 不匹配/无效时保持原暂停状态，不提前复活连接。
-	var auth connect.Auth
-	var resumeErr *kmapi.ErrorDetail
-	d.connectMgr.SerializedAuthChange(func() {
-		a, perr := d.lookupValidAuth(authorizationID, origin)
-		if perr != nil {
-			resumeErr = perr
-			return
-		}
-		auth = a
-		if d.connectMgr.Connections() != nil {
-			d.connectMgr.Connections().Resume(authorizationID)
-			d.connectMgr.Connections().Touch(authorizationID)
-		}
-	})
-	if resumeErr != nil {
-		return nil, nil, resumeErr
-	}
-	info, _, err := d.store.Snapshot()
-	if err != nil {
-		return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
-	}
-	d.mu.Lock()
-	walletPub := d.publicKey
-	d.mu.Unlock()
-	return map[string]any{
-		"authorizationId": auth.AuthorizationID,
-		"networkIdentity": map[string]any{
-			"bsvNetwork": info.BsvNetwork, "publicKeyHex": walletPub,
-		},
-		"resolvedClaims": map[string]any{},
-		"resolvedAt":     time.Now().UnixMilli(),
-	}, nil, nil
 }
 
 // isExactHttpOrigin 只接受精确 HTTP(S) origin，不接受路径、查询或 opaque 来源。
@@ -804,6 +745,9 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if displayErr != nil {
 		return nil, nil, errDetail(kmapi.ErrOriginRejected, displayErr.Error())
 	}
+	if err := d.connectMgr.Directory().RememberDisplay(launchAppHex, display); err != nil {
+		return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
+	}
 	// 目录事务先提交；失败时尚未保存授权或登记活动连接。
 	if rec.URL != "" {
 		if err := d.connectMgr.Directory().ResolveURL(rec.URL, launchAppHex, display); err != nil {
@@ -814,7 +758,9 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	d.connectMgr.SerializedAuthChange(func() {
 		launchSaveErr = d.connectMgr.AuthStore().Save(savedAuth)
 		if launchSaveErr == nil && d.connectMgr.Connections() != nil {
-			d.connectMgr.Connections().UpsertActive(savedAuth)
+			if !d.registerConnectConnection(ctx, savedAuth) {
+				launchSaveErr = context.Canceled
+			}
 		}
 	})
 	if launchSaveErr != nil {
@@ -858,7 +804,7 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 		return d.execIntentSign(ctx, a)
 	case a.Method == "cipher.encrypt" || a.Method == "cipher.decrypt":
 		return d.execCipherApproved(ctx, a)
-	case a.Method == "connect.login" || a.Method == "connect.resume":
+	case a.Method == "connect.login":
 		if !d.isInitialized() {
 			return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 		}
@@ -892,6 +838,13 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 				return nil, nil, errDetail(kmapi.ErrOriginRejected, "deployment no longer active")
 			}
 		}
+		display, displayErr := d.verifiedConnectDisplay(a.Params, a.Origin)
+		if displayErr != nil {
+			return nil, nil, errDetail(kmapi.ErrOriginRejected, "应用资料验证失败")
+		}
+		if err := d.connectMgr.Directory().RememberDisplay(loginAppHex, display); err != nil {
+			return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
+		}
 		savedLoginAuth := connect.Auth{
 			AuthorizationID: authorizationID,
 			Origin:          a.Origin, Network: info.BsvNetwork, WalletPublicKey: walletPub,
@@ -902,7 +855,9 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 		d.connectMgr.SerializedAuthChange(func() {
 			loginSaveErr = d.connectMgr.AuthStore().Save(savedLoginAuth)
 			if loginSaveErr == nil && d.connectMgr.Connections() != nil {
-				d.connectMgr.Connections().UpsertActive(savedLoginAuth)
+				if !d.registerConnectConnection(ctx, savedLoginAuth) {
+					loginSaveErr = context.Canceled
+				}
 			}
 		})
 		if loginSaveErr != nil {

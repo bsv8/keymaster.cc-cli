@@ -41,5 +41,12 @@ func (d *Daemon) backgroundAPIPlugin() webloom.Plugin {
 			res, perr := d.opEventsSubscribe(ctx, p)
 			return res, nil, perr
 		},
+		kmapi.MethodPluginsInspect: func(ctx context.Context, params json.RawMessage, attachments map[string][]byte) (any, map[string][]byte, *kmapi.ErrorDetail) {
+			if len(params) > 0 && string(params) != "null" {
+				return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
+			}
+			res, perr := d.opPluginsInspect(ctx)
+			return res, nil, perr
+		},
 	})
 }

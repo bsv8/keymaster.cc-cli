@@ -5,11 +5,8 @@ import (
 	"time"
 )
 
-// Connection 为应用连接实例（会话）：授权即凭证，连接为运行态。
-// ClosedAt != 0 表示已断开（退出/撤销/代际失效）；PausedAt != 0 表示已暂停
-// （锁定/刷新/关闭暂停运行连接，保留原授权，由原应用重新握手恢复）。
-// 在线定义：未关闭且未暂停的实际运行连接，不能用持久授权条数代替。
 type Connection struct {
+	ownerID   string // 创建连接的钱包 WebSocket；只在本运行内使用。
 	ID        string `json:"id"`
 	AuthID    string `json:"authId"`
 	AppKey    string `json:"appKey"`
@@ -18,7 +15,6 @@ type Connection struct {
 	CreatedAt int64  `json:"createdAt"`
 	LastSeen  int64  `json:"lastSeen"`
 	ClosedAt  int64  `json:"closedAt,omitempty"`
-	PausedAt  int64  `json:"pausedAt,omitempty"`
 }
 
 // ConnectionStore 为内存运行态注册表（不跨重启；重启后旧代际连接整体失效，
@@ -32,21 +28,21 @@ func NewConnectionStore() *ConnectionStore {
 	return &ConnectionStore{conns: map[string]*Connection{}}
 }
 
-// UpsertActive 创建或恢复连接为在线（登录/启动/恢复成功时调用）。
-func (s *ConnectionStore) UpsertActive(auth Auth) Connection {
+// UpsertActive 登记登录或启动创建的运行连接。
+func (s *ConnectionStore) UpsertActive(auth Auth, ownerID string) Connection {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UnixMilli()
 	if c, ok := s.conns[auth.AuthorizationID]; ok {
 		c.AppKey = ApplicationKey(auth.AppPublicKeyHex)
 		c.Origin = auth.Origin
+		c.ownerID = ownerID
 		c.LastSeen = now
 		c.ClosedAt = 0
-		c.PausedAt = 0
 		return *c
 	}
 	c := &Connection{
-		ID: auth.AuthorizationID, AuthID: auth.AuthorizationID,
+		ID: auth.AuthorizationID, AuthID: auth.AuthorizationID, ownerID: ownerID,
 		AppKey:    ApplicationKey(auth.AppPublicKeyHex),
 		Origin:    auth.Origin,
 		CreatedAt: now, LastSeen: now,
@@ -56,7 +52,7 @@ func (s *ConnectionStore) UpsertActive(auth Auth) Connection {
 }
 
 // Touch 更新活跃时间（每次鉴权成功的业务调用）；连接不存在返回 false。
-// paused 连接的业务调用应在上层先拒绝，不经 Touch 自动复活。
+// 已断开的连接不能通过业务调用恢复。
 func (s *ConnectionStore) Touch(authID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,31 +60,6 @@ func (s *ConnectionStore) Touch(authID string) bool {
 	if !ok || c.ClosedAt != 0 {
 		return false
 	}
-	c.LastSeen = time.Now().UnixMilli()
-	return true
-}
-
-// Pause 暂停运行连接（保留授权）；已关闭/不存在返回 false。
-func (s *ConnectionStore) Pause(authID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.conns[authID]
-	if !ok || c.ClosedAt != 0 || c.PausedAt != 0 {
-		return false
-	}
-	c.PausedAt = time.Now().UnixMilli()
-	return true
-}
-
-// Resume 恢复暂停的连接（resume 握手成功时调用）。
-func (s *ConnectionStore) Resume(authID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.conns[authID]
-	if !ok || c.ClosedAt != 0 {
-		return false
-	}
-	c.PausedAt = 0
 	c.LastSeen = time.Now().UnixMilli()
 	return true
 }
@@ -103,6 +74,20 @@ func (s *ConnectionStore) Close(authID string) bool {
 	}
 	c.ClosedAt = time.Now().UnixMilli()
 	return true
+}
+
+// CloseOwner 终结指定钱包通道的运行连接，不撤销长期应用许可或已提交业务。
+func (s *ConnectionStore) CloseOwner(ownerID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, c := range s.conns {
+		if c.ownerID == ownerID && c.ClosedAt == 0 {
+			c.ClosedAt = time.Now().UnixMilli()
+			count++
+		}
+	}
+	return count
 }
 
 // CloseByApp 按 App 公钥关闭全部连接。
@@ -143,37 +128,15 @@ func (s *ConnectionStore) CloseStale(auths map[string]Auth, gen string) int {
 	return n
 }
 
-// SweepIdle 暂停长时间无活动的连接（兜底收敛；保留授权，由 resume 恢复）。
-// onlyWhenNoPending 为 true 时，有该应用待办则跳过（用户正待审批不算离线）。
-func (s *ConnectionStore) SweepIdle(now int64, idleMs int64, hasPending func(appKey string) bool) []Connection {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []Connection
-	for _, c := range s.conns {
-		if c.ClosedAt != 0 || c.PausedAt != 0 {
-			continue
-		}
-		if now-c.LastSeen < idleMs {
-			continue
-		}
-		if hasPending != nil && hasPending(c.AppKey) {
-			continue
-		}
-		c.PausedAt = now
-		out = append(out, *c)
-	}
-	return out
-}
-
-// IsOnline 报告连接是否在线（未关闭且未暂停）。
+// IsOnline 报告连接是否在线（未关闭）。
 func (s *ConnectionStore) IsOnline(authID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.conns[authID]
-	return ok && c.ClosedAt == 0 && c.PausedAt == 0
+	return ok && c.ClosedAt == 0
 }
 
-// List 返回全部连接记录（含已关闭/已暂停，供管理面展示）。
+// List 返回全部连接记录（含已关闭，供管理面展示）。
 func (s *ConnectionStore) List() []Connection {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -190,7 +153,7 @@ func (s *ConnectionStore) Online() []Connection {
 	defer s.mu.Unlock()
 	var out []Connection
 	for _, c := range s.conns {
-		if c.ClosedAt == 0 && c.PausedAt == 0 {
+		if c.ClosedAt == 0 {
 			out = append(out, *c)
 		}
 	}

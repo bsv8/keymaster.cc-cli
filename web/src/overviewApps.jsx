@@ -57,7 +57,7 @@ export function OverviewApps({ onBrowse }) {
       {entries.map(entry => {
         const name = entry.name || '未命名应用';
         const target = selectedDirectoryTarget(entry);
-        const icon = target.url ? entry.icon : deployments.find(d => d.indexseedhashhex === target.indexseedhashhex && d.status === 'serving')?.iconUrl;
+        const icon = target.url ? (() => { try { return new URL(entry.icon, target.url).href; } catch { return undefined; } })() : deployments.find(d => d.indexseedhashhex === target.indexseedhashhex && d.status === 'serving')?.iconUrl;
         return <li key={entry.appPublicKeyHex}><button type="button" className="overview-app-tile" data-testid={`overview-app-${entry.appPublicKeyHex}`} disabled={!workspace.ready || workspace.busy} onClick={() => launch(entry)} title={name}>
           <AppIcon source={icon} name={name} /><span className="overview-app-name">{name}</span>
           {entry.favorite && <span className="overview-app-favorite" aria-label="已收藏">★</span>}

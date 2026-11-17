@@ -768,24 +768,11 @@ func (d *Daemon) validatePaymentAuth(rec connect.PaymentRecord, approval connect
 	if a.Network != rec.Network || !strings.EqualFold(a.WalletPublicKey, rec.OwnerPublicKeyHex) {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已失效")
 	}
-	if d.connectMgr != nil && d.connectMgr.Connections() != nil {
-		if !d.connectMgr.Connections().IsOnline(a.AuthorizationID) {
-			// 缺记录视为存量授权首次补建在线；已暂停/关闭则拒绝广播。
-			found := false
-			for _, c := range d.connectMgr.Connections().List() {
-				if c.AuthID == a.AuthorizationID {
-					found = true
-					break
-				}
-			}
-			if found {
-				return connect.Auth{}, errDetail(kmapi.ErrNotFound, "连接已暂停或关闭，授权需重新握手")
-			}
-			d.connectMgr.Connections().UpsertActive(a)
-		} else {
-			d.connectMgr.Connections().Touch(a.AuthorizationID)
-		}
+	// 旧授权不能在广播前补建运行连接；失效按原付款终态规则收尾。
+	if d.connectMgr.Connections() == nil || !d.connectMgr.Connections().IsOnline(a.AuthorizationID) {
+		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "Connection closed; login again")
 	}
+	d.connectMgr.Connections().Touch(a.AuthorizationID)
 	return a, nil
 }
 

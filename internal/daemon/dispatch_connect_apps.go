@@ -132,7 +132,7 @@ func (d *Daemon) opConnectAppsList(ctx context.Context) (any, *kmapi.ErrorDetail
 	gen := d.connectMgr.Generation()
 	connections := []map[string]any{}
 	for _, c := range d.connectMgr.Connections().List() {
-		if c.ClosedAt != 0 || c.PausedAt != 0 {
+		if c.ClosedAt != 0 {
 			continue
 		}
 		a, ok := byID[c.AuthID]
@@ -162,14 +162,14 @@ func (d *Daemon) opConnectAppsList(ctx context.Context) (any, *kmapi.ErrorDetail
 	}, nil
 }
 
-// opConnectConnectionPause 暂停运行连接（保留授权）。
-// 钱包管理上下文专用（钱包页面 teardown 时尽力调用）；已暂停/已关闭幂等成功。
+// opConnectConnectionPause 终结运行连接（保留长期应用许可）。
+// 钱包管理上下文专用（钱包页面 teardown 时尽力调用）；已关闭幂等成功。
 func (d *Daemon) opConnectConnectionPause(ctx context.Context, p kmapi.ConnectConnectionPauseRequest) (any, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
 	}
 	if isAppCaller(ctx) {
-		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权暂停连接")
+		return nil, errDetail(kmapi.ErrOriginRejected, "App cannot end wallet-managed connections")
 	}
 	if strings.TrimSpace(p.AuthorizationID) == "" {
 		return nil, errDetail(kmapi.ErrBadRequest, "authorizationId 必填")
@@ -180,7 +180,7 @@ func (d *Daemon) opConnectConnectionPause(ctx context.Context, p kmapi.ConnectCo
 	}
 	_ = a
 	if d.connectMgr.Connections() != nil {
-		d.connectMgr.Connections().Pause(p.AuthorizationID)
+		d.connectMgr.Connections().Close(p.AuthorizationID)
 	}
 	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil

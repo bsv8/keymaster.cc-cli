@@ -6,9 +6,11 @@ import { t, setLang, resolveLang } from './i18n.js';
 import { watchTopics } from './subscribe.js';
 import { getClient, getInstanceId, getConnectionStatus, onConnectionStatus, retryConnection } from './client.js';
 import { initConnectReceiver, teardownAllLaunchedApps, sweepClosedLaunchedApps, sweepClosedPopup, pumpPendingApprovals } from './connect.js';
-import { ApplicationWorkspace, ApplicationLaunchDialog, WorkspaceTabs, useWorkspace, useApplicationWorkspace } from './workspace.jsx';
+import { ApplicationWorkspace, WorkspaceTabs, useWorkspace, useApplicationWorkspace } from './workspace.jsx';
 import { OverviewApps } from './overviewApps.jsx';
-import { GlobalApproval, AppCenter, DirectoryCenter } from './approvalCenter.jsx';
+import { GlobalApproval } from './approvalCenter.jsx';
+import { MarketPage, AppDetailPage } from './appMarket.jsx';
+import { PluginDiagnosticsPage } from './pluginDiagnostics.jsx';
 
 const TABS = [
   { id: 'overview', label: '概览' },
@@ -18,7 +20,7 @@ const TABS = [
   { id: 'collect', label: '采集' },
   { id: 'settings', label: '设置' },
   { id: 'apps', label: '应用市场' },
-  { id: 'connect', label: '连接' },
+  { id: 'plugins', label: '插件' },
 ];
 
 function useAppliedTheme(theme) {
@@ -432,32 +434,17 @@ function SettingsPage({ onTheme }) {
   );
 }
 
-/** 连接页只提供入口；工作区持有应用，导航不会结束应用连接。 */
-function ConnectPanel() {
-  const workspace = useApplicationWorkspace();
-  const [demoUrl, setDemoUrl] = useState('');
-  return <div>
-    <section className="card"><h2>启动应用</h2>
-      <p className="hint">确认应用与当前钱包后自动登录；打开方式在设置中统一选择。<span data-testid="application-open-mode-summary">{workspace.mode}</span></p>
-      {workspace.settingsError && <p className="error">{workspace.settingsError}</p>}
-      <div className="row">
-        <label className="inline-field" htmlFor="application-launch-url">{t('应用 URL')}<input id="application-launch-url" data-testid="launch-demo-url" value={demoUrl} onChange={e => setDemoUrl(e.target.value)} placeholder="应用完整 HTTP(S) URL" /></label>
-        <button type="button" data-testid="launch-app" disabled={!workspace.ready || workspace.busy} onClick={() => workspace.requestLaunch({ url: demoUrl.trim(), title: demoUrl.trim(), testId: 'launch-iframe-view' })}>打开应用</button>
-      </div>
-    </section>
-    <div className="mt"><AppCenter /></div>
-  </div>;
-}
+/** 工作区持有应用，内部路由导航不会结束应用连接。 */
 
 function App() {
-  const pageFromLocation = () => TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? 'overview';
+  const pageFromLocation = () => window.location.pathname.startsWith('/app/') ? window.location.pathname : TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? (window.location.pathname === '/settings/plugins' ? 'plugins' : 'overview');
   const [page, updatePage] = useState(pageFromLocation);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const setPage = (next) => {
     workspace.select(null);
-    const path = next === 'overview' ? '/' : `/${next}`;
+    const path = next === 'overview' ? '/' : next === 'plugins' ? '/settings/plugins' : next.startsWith('/') ? next : `/${next}`;
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
-    updatePage(next);
+    updatePage(pageFromLocation());
   };
   useEffect(() => {
     const onPopState = () => { updatePage(pageFromLocation()); workspace.select(null); };
@@ -650,7 +637,13 @@ function App() {
   const rootPath = (id) => (roots?.roots || []).find((r) => r.id === id)?.path || '—';
   const defaultRootPath = rootPath(roots?.defaultDownloadRootID);
 
-  if (conn !== 'connected' || !status) return <WalletFrame><h1>{conn === 'protocol-incompatible' ? '协议不兼容' : conn === 'disconnected' ? '后台连接已断开' : '正在读取钱包状态…'}</h1>{error && <p role="alert" className="error">{error}</p>}<button type="button" onClick={() => { void retryConnection().then(load).catch(cause => setError(String(cause.message || cause))); }}>重试连接</button></WalletFrame>;
+  // /settings/plugins 在未连接、未初始化、锁定、全新未创建钱包时都能打开：
+  // 该路由的渲染判断放在初始化与解锁页面门禁之前，只允许读取诊断，不扩大业务方法。
+  // 已解锁且已连接时走正常工作区布局（侧边菜单+Tab）；仅异常/未就绪时用 WalletFrame 承载。
+  const pluginsStandalone = typeof window !== 'undefined' && window.location.pathname === '/settings/plugins'
+    && !(conn === 'connected' && status && status.initialized && !status.locked && status.state === 'unlocked');
+  if (pluginsStandalone) return <WalletFrame wide><PluginDiagnosticsPage standalone /></WalletFrame>;
+  if (conn !== 'connected' || !status) return <WalletFrame><h1>{conn === 'protocol-incompatible' ? t('协议不兼容') : conn === 'disconnected' ? t('后台连接已断开') : '正在读取钱包状态…'}</h1>{error && <p role="alert" className="error">{error}</p>}<div className="row"><button type="button" onClick={() => { void retryConnection().then(load).catch(cause => setError(String(cause.message || cause))); }}>{t('重试')}</button><button type="button" className="ghost" onClick={() => { window.location.href = '/settings/plugins'; }}>{t('插件')}</button></div><p className="hint">{t('该页面不触发创建钱包、解锁或业务初始化')}</p></WalletFrame>;
   if (!status.initialized) return <WalletOnboarding onImporting={value => { initializing.current = value; if (!value) void load(); }} onImported={password => {
     unlockCredential.current.password = password;
     initializing.current = false;
@@ -659,7 +652,7 @@ function App() {
   }} />;
   if (status.locked || status.state !== 'unlocked') return <WalletUnlock credential={unlockCredential.current} onReady={load} />;
 
-  const title = t(TABS.find(tab => tab.id === page)?.label || 'Keymaster 后台');
+  const title = page.startsWith('/app/') ? '应用详情' : t(TABS.find(tab => tab.id === page)?.label || 'Keymaster 后台');
   return (
     <ApplicationWorkspace.Provider value={workspace}>
     <div className="layout">
@@ -668,7 +661,7 @@ function App() {
           <span className="spacer" />
           <span className="badge" data-testid="connection-state" data-state={conn}>{conn === 'connected' ? t('已连接') : conn === 'connecting' ? t('连接中') : conn === 'protocol-incompatible' ? t('协议不兼容') : t('已断开')}</span>
           {conn === 'disconnected' && <button type="button" className="ghost" onClick={() => retryConnection()}>{t('重试')}</button>}
-          <GlobalApproval wallet={{ network: info?.network, address: info?.address || status?.address }} onNavigateConnect={() => setPage('connect')} />
+          <GlobalApproval wallet={{ network: info?.network, address: info?.address || status?.address }} showSettings={page === 'settings'} />
           <StateBadge state={conn === 'connected' ? status?.state : undefined} locked={status?.locked ?? info?.locked} />
           {info?.network && <span className="badge">{info.network} · {info?.address ? `${info.address.slice(0, 8)}…` : ''}</span>}
         </header>
@@ -693,6 +686,7 @@ function App() {
         </div>
         <div className="workspace-route" role="tabpanel" aria-labelledby="internal-tab" hidden={!!workspace.active}>
         <div className="content">
+          {workspace.error && <p className="error" role="alert">{workspace.error}</p>}
           {error && <p className="error">{error}</p>}
       {page === 'overview' && (
         <>
@@ -813,10 +807,11 @@ function App() {
 
       {page === 'collect' && <CollectorPage />}
 
-      {page === 'settings' && <SettingsPage onTheme={setTheme} />}
+      {page === 'settings' && <><SettingsPage onTheme={setTheme} /><section className="card"><h2>应用通知</h2><div id="application-reminders-settings" /></section></>}
 
-      {page === 'apps' && <DirectoryCenter />}
-      {page === 'connect' && <ConnectPanel />}
+      {page === 'apps' && <MarketPage navigate={setPage} />}
+      {page.startsWith('/app/') && <AppDetailPage key={page} appId={page.slice(5)} navigate={setPage} />}
+      {page === 'plugins' && <PluginDiagnosticsPage />}
 
           <p className="hint">{t('主题跟随系统或设置页选择（settings 唯一来源，本页不写 localStorage）。远程访问请自备反向代理与认证。')}</p>
         </div>
@@ -825,7 +820,7 @@ function App() {
       </main>
       </div>
     </div>
-    <ApplicationLaunchDialog workspace={workspace} />
+
     </ApplicationWorkspace.Provider>
   );
 }

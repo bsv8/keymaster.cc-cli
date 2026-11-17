@@ -300,7 +300,7 @@ func (c *wsConn) handleRequest(req kmapi.Request) {
 		c.attachMu.Unlock()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = WithWalletCaller(ctx)
+	ctx = WithWalletCaller(context.WithValue(ctx, connectTransportKey, c))
 	c.inflight[req.ID] = cancel
 	c.inflightN++
 	c.inflightMu.Unlock()
@@ -594,6 +594,12 @@ func (c *wsConn) cleanup() {
 	}
 	c.closed = true
 	c.closeMu.Unlock()
+	// TCP 关闭或心跳超时都走这里，不依赖浏览器卸载消息。
+	if c.daemon.connectMgr != nil && c.daemon.connectMgr.Connections() != nil {
+		if c.daemon.connectMgr.Connections().CloseOwner(c.connID) > 0 {
+			c.daemon.publishConnect()
+		}
+	}
 	c.inflightMu.Lock()
 	for _, cancel := range c.inflight {
 		cancel()

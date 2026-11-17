@@ -288,10 +288,6 @@ func isAuto(ctx context.Context) bool {
 	return v
 }
 
-// idleConnectionMs 为连接闲置暂停阈值：15 分钟无鉴权活动且无该应用待办时暂停
-// 运行连接（保留授权，由 resume 重新握手恢复）。有待办的应用不算离线。
-const idleConnectionMs = int64(15 * 60 * 1000)
-
 // watchApprovalExpiry 为后台期限收敛：每 30s 扫描过期审批并终结、淘汰超期终态
 // 缓存、收敛闲置/孤儿连接，不依赖页面发送取消通知。
 // 关闭时随 lifecycle 退出；扫描本身幂等，重复调用不重复释放冻结。
@@ -307,18 +303,16 @@ func (d *Daemon) watchApprovalExpiry(lifecycle context.Context) {
 			if d.connectMgr != nil && d.connectMgr.Queue() != nil {
 				d.connectMgr.Queue().SweepTerminal(time.Now().UnixMilli())
 			}
-			d.sweepIdleConnections()
+			d.sweepInvalidConnections()
 		}
 	}
 }
 
-// sweepIdleConnections 收敛连接运行态：授权已消失/代际失效的关闭；长时间无活动
-// 且无待办的暂停（保留授权）。有待办的应用视为正待用户处理，不暂停。
-func (d *Daemon) sweepIdleConnections() {
+// sweepInvalidConnections 关闭授权已消失或代际失效的运行连接。
+func (d *Daemon) sweepInvalidConnections() {
 	if d.connectMgr == nil || d.connectMgr.Connections() == nil {
 		return
 	}
-	now := time.Now().UnixMilli()
 	byID := map[string]connect.Auth{}
 	for _, a := range d.connectMgr.AuthStore().List() {
 		byID[a.AuthorizationID] = a
@@ -333,18 +327,6 @@ func (d *Daemon) sweepIdleConnections() {
 			}
 			continue
 		}
-	}
-	pendingByApp := map[string]bool{}
-	for _, ap := range d.connectMgr.Queue().List() {
-		if ap.Status == "pending" {
-			pendingByApp[connect.ApplicationKey(ap.AppPublicKeyHex)] = true
-		}
-	}
-	paused := d.connectMgr.Connections().SweepIdle(now, idleConnectionMs, func(appKey string) bool {
-		return pendingByApp[appKey]
-	})
-	if len(paused) > 0 {
-		changed = true
 	}
 	if changed {
 		d.publishConnect()

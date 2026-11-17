@@ -2,8 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { getClient } from './client.js';
 import { generateKey, parseMaterial, describeKey, encryptMaterial } from './walletMaterial.js';
 
-export function WalletFrame({ children }) {
-  return <main className="wallet-entry"><header className="wallet-entry-brand"><img src="/favicon.svg" alt="" width="32" height="32" /><strong>Keymaster</strong></header><section className="wallet-entry-panel">{children}</section></main>;
+export function WalletFrame({ children, wide }) {
+  return <main className="wallet-entry"><header className="wallet-entry-brand"><img src="/favicon.svg" alt="" width="32" height="32" /><strong>Keymaster</strong></header><section className={`wallet-entry-panel${wide ? ' wallet-entry-panel--wide' : ''}`}>{children}</section></main>;
 }
 function Network({ value, onChange, fixed }) {
   return <fieldset className="wallet-network"><legend>BSV 网络</legend><div className="wallet-network-options">{[['main', '主网', 'Mainnet'], ['test', '测试网', 'Testnet']].map(([network, title, subtitle]) => <label key={network}><input type="radio" name="wallet-network" value={network} checked={value === network} disabled={fixed} onChange={() => onChange(network)} /><span><strong>{title}</strong><small>{subtitle}</small></span></label>)}</div><p className="hint">{fixed ? '网络由 WIF 确定。' : ''}网络在创建钱包后不可修改。</p></fieldset>;

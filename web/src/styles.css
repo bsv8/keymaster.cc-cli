@@ -262,3 +262,84 @@ button.overview-app-tile:hover:not(:disabled) { background: var(--bg); }
 .wallet-network-options label { display:flex!important; align-items:center; gap:10px; padding:14px; border:1px solid var(--border); border-radius:10px; flex:1; min-width:140px; }
 .wallet-network-options input { flex:none; }.wallet-network-options small { display:block; color:var(--muted); }
 .wallet-steps { display:flex; flex-wrap:wrap; gap:12px; list-style:none; padding:0; color:var(--muted); }.wallet-steps [aria-current=step] { color:var(--accent); font-weight:600; }
+/* 应用市场与独立详情 */
+.app-market{max-width:1100px;margin:auto;display:flex;flex-direction:column;gap:24px}.market-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.market-heading h1,.market-heading h2{margin:0}.market-heading input[type=search]{max-width:320px}.market-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr));gap:18px}.market-card{padding:22px;border:1px solid var(--border);border-radius:16px;background:var(--card);display:flex;flex-direction:column;gap:14px;min-width:0}.market-card-heading{display:flex;align-items:center;gap:16px;min-width:0}.market-card h3{font-size:16px;margin:0;overflow-wrap:anywhere}.market-card small{color:var(--muted)}.market-card>.hint{flex:1;line-height:1.6}.market-icon{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;background:var(--bg);border-radius:25%;overflow:hidden;font-size:28px;color:var(--accent)}.market-icon img{width:100%;height:100%;object-fit:cover}.market-star{color:#e5b400!important;font-size:26px!important;line-height:1;padding:8px!important}.market-add{display:flex;gap:16px;flex-wrap:wrap}.market-add label{display:flex;flex-direction:column;gap:8px}.activity-group{margin:18px 0}.activity-group header{display:flex;gap:10px;align-items:center}.activity-group header h3{font-size:14px}.activity-group ul{list-style:none;padding-left:16px;border-left:1px solid var(--border);margin-left:18px}.activity-group button{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}.activity-group time{width:100%;font-size:11px;color:var(--muted)}.activity-group [aria-pressed=true]{background:var(--bg)}
+
+/* ---------- 插件依赖图（/settings/plugins）：布局与控件对齐 keymaster.cc 插件页 ---------- */
+.plugin-manager { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ui-page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.ui-page-header__content { min-width: 0; flex: 1 1 auto; }
+.ui-page-header__title { margin: 0; font-size: 20px; font-weight: 650; }
+.ui-page-header__description { color: var(--muted); margin: 4px 0 0 0; font-size: 13px; }
+.ui-page-header__actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; flex-shrink: 0; }
+.pg-status { color: var(--muted); font-size: 12px; margin: 0; }
+.pg-context__grid { grid-template-columns: 150px 1fr; }
+.pg-problem { border: 1px solid var(--danger); background: var(--danger-soft); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-top: 10px; }
+.pg-problem pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 6px 0 0; color: var(--text); }
+.pg-problem--warn { border-color: var(--warn); background: var(--warn-soft); }
+.dependency-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.dependency-toolbar .pg-search { flex: 1 1 220px; min-width: 200px; max-width: 460px; display: flex; }
+.dependency-toolbar .pg-search input { width: 100%; }
+.dependency-zoom { display: flex; gap: 4px; align-items: center; }
+.dependency-zoom button { min-width: 40px; }
+.dependency-page-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; white-space: nowrap; cursor: pointer; }
+.dependency-page-toggle input { flex: none; width: auto; accent-color: var(--accent); }
+.dependency-legend { margin: 0; font-size: 13px; color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; }
+.dependency-canvas { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); padding: 12px; }
+.dependency-graph { display: block; height: auto; }
+.pg-group > rect { fill: var(--card); stroke: var(--border); stroke-width: 1.5; }
+.pg-group.is-focused > rect { stroke: var(--accent); stroke-width: 2.5; }
+.pg-group__name { fill: var(--text); font-size: 14px; font-weight: 600; }
+.pg-group__meta { fill: var(--muted); font-size: 12px; }
+.pg-group > g[role="button"] > rect { cursor: pointer; }
+.pg-group > g[role="button"]:hover > rect, .pg-group > g[role="button"]:focus-visible > rect { stroke: var(--accent); stroke-width: 2; }
+.pg-toggle { cursor: pointer; outline: none; }
+.pg-toggle rect { fill: var(--bg); stroke: var(--border); }
+.pg-toggle text { fill: var(--muted); }
+.pg-toggle:hover rect, .pg-toggle:focus-visible rect { stroke: var(--accent); }
+.pg-unit { cursor: pointer; outline: none; }
+.pg-unit rect { fill: var(--bg); stroke: var(--border); }
+.pg-unit:hover rect, .pg-unit:focus-visible rect { stroke: var(--accent); stroke-width: 2; }
+.pg-unit__title { fill: var(--text); font-size: 13px; font-weight: 600; }
+.pg-unit__meta { fill: var(--muted); font-size: 12px; }
+.pg-cross { stroke: var(--muted); stroke-width: 1.5; }
+.pg-assembly { fill: none; stroke: var(--muted); stroke-width: 1.2; opacity: 0.5; }
+.pg-assembly.is-optional { stroke-dasharray: 5 4; }
+.pg-assembly.is-highlighted { stroke: var(--accent); stroke-width: 2; opacity: 0.95; }
+/* 详情弹窗（对齐 cc plugin-function-dependencies 面板） */
+.ui-modal { border: 0; padding: 0; background: transparent; max-width: none; max-height: none; }
+.ui-modal::backdrop { background: rgba(10, 15, 30, 0.55); }
+.ui-modal__panel { position: relative; width: min(1040px, calc(100vw - 32px)); max-width: 1040px; max-height: 90dvh; display: flex; flex-direction: column; overflow: hidden; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25); }
+.ui-modal__header { margin: 0; padding: 14px 18px 10px; font-size: 15px; font-weight: 650; flex-shrink: 0; }
+.ui-modal__close { position: absolute; top: 10px; right: 12px; width: 28px; height: 28px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 16px; font-weight: 400; }
+.ui-modal__body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 18px 18px; display: flex; flex-direction: column; gap: 12px; }
+.ui-modal__body h3 { margin: 8px 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.pg-detail-note { color: var(--muted); font-size: 13px; margin: 0; }
+.pg-func-search { display: flex; flex: 1 1 180px; min-width: 160px; max-width: 320px; }
+.pg-func-search input { width: 100%; }
+.dependency-detail-tabs { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.dependency-detail-tabs [aria-pressed="true"] { background: var(--accent-soft); outline: 1px solid var(--accent); }
+.dependency-detail-summary { display: flex; flex-wrap: wrap; gap: 6px; }
+.dependency-detail-summary button { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; cursor: pointer; text-align: left; font-weight: 400; }
+.dependency-detail-summary button:hover, .dependency-detail-summary button.is-active { border-color: var(--accent); }
+.function-dependency-list { display: flex; flex-direction: column; gap: 10px; }
+.function-dependency { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg); }
+.function-dependency__flow { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1.5fr) 24px minmax(0, 1fr); gap: 8px; align-items: center; }
+.function-dependency__flow > div { padding: 8px; background: var(--card); border-radius: 6px; min-width: 0; }
+.function-dependency__flow code, .function-dependency__flow span, .function-dependency__flow strong { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.function-dependency__flow code { margin-top: 4px; color: var(--text); font-weight: 400; }
+.function-dependency__flow strong { color: var(--text); }
+.function-dependency__flow span { color: var(--muted); }
+.function-dependency__flow .function-dependency__arrow { font-size: 22px; text-align: center; color: var(--accent); padding: 0; }
+.function-dependency__source { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+.function-dependency__source code { overflow-wrap: anywhere; }
+.function-dependency__source button { padding: 2px 8px; font-size: 11px; font-weight: 400; }
+@media (max-width: 600px) {
+  .ui-page-header { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 10px; }
+  .ui-page-header__actions { justify-self: end; }
+  .function-dependency__flow { grid-template-columns: minmax(0, 1fr); }
+  .function-dependency__flow .function-dependency__arrow { display: none; }
+  .dependency-canvas { max-height: 60vh; }
+}
+/* 插件页在 WalletFrame 中放宽承载 */
+.wallet-entry-panel--wide { max-width: 1180px; }

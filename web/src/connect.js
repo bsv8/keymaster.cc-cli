@@ -25,6 +25,7 @@ try { popupOpenerAtInit = window.opener || null; } catch { popupOpenerAtInit = n
 // 窗口方式 source 为预留的 child window；iframe 方式为 iframe contentWindow。
 // 窗口关闭、卸载或后台重启后由钱包整体生命周期 teardown 丢弃旧上下文，
 // 旧启动上下文不得继续建立连接。
+const appKeys = new Map();
 const launchedApps = new Map(); // handle -> { receiver, holder }
 let launchedSeq = 0;
 
@@ -69,9 +70,9 @@ function isContextAlive(entry) {
   return true;
 }
 
-// 暂停该连接的后台运行态（保留授权，由 resume 恢复）：窗口/连接 teardown 时尽力上报。
-// 上报失败由后台闲置收敛兜底；已关闭/已暂停幂等成功。
-function pauseConnectionsForReceiver(recv) {
+// 终结该连接的后台运行态（不恢复旧连接）：窗口/连接 teardown 时尽力上报。
+// 上报为宿主内部清理，不等待回复，也不要求应用在关闭时通知。
+function endConnectionsForReceiver(recv) {
   const m = authzByReceiver.get(recv);
   if (!m || m.size === 0) return;
   const ids = [...m.values()];
@@ -155,11 +156,17 @@ export function registerLaunchedApp({ origin, getSource, kind = 'window', child 
   return handle;
 }
 
+export function launchedAppState(handle) {
+  const app = launchedApps.get(handle);
+  if (!app) return { valid: false };
+  return { valid: !appKeys.has(app.receiver) || !!authzByReceiver.get(app.receiver)?.size, applicationKey: appKeys.get(app.receiver), authorizationIds: [...(authzByReceiver.get(app.receiver)?.values() || [])] };
+}
+
 // 关闭/卸载/后台重启时处理启动连接：中止该连接的在途请求、取消该连接尚未批准的
 // 后台待办（已终态的不强行回滚）、尽力发送官方 closing 通知、丢弃协议运行态与本地授权映射，
 // 而不是只从 Map 删除入口后任其超时，更不让已关闭连接的待办继续执行。
 // 退出（logout）只撤销该连接实际持有的授权；此处不主动撤销后台授权，
-// 后续重建连接按同 App 同来源替换旧授权，后台重启则整批失效。
+// 后续重建连接创建独立授权，后台重启则整批失效。
 export function teardownLaunchedApp(handle, { notify = true } = {}) {
   const app = launchedApps.get(handle);
   if (!app) return false;
@@ -174,8 +181,9 @@ export function teardownLaunchedApp(handle, { notify = true } = {}) {
     }
   }
   inflightByReceiver.delete(recv);
-  pauseConnectionsForReceiver(recv);
+  endConnectionsForReceiver(recv);
   authzByReceiver.delete(recv);
+  appKeys.delete(recv);
   dropPendingForReceiver(recv);
   try {
     if (notify && source && !source.closed) recv.sendClosing(source);
@@ -220,7 +228,7 @@ export function teardownAllLaunchedApps() {
 }
 
 // popup 单例 Receiver 的运行期清理：后台重启等场景下旧绑定与授权一律失效，
-// 由后续 resume 心跳或重新登录重建，不沿用旧映射；该连接尚未批准的后台待办一并取消。
+// 由用户重新登录或从钱包重新打开应用建立新连接，不沿用旧映射；该连接尚未批准的后台待办一并取消。
 export function teardownPopupReceiver({ notify = true } = {}) {
   if (!receiver) return;
   const inflight = inflightByReceiver.get(receiver);
@@ -230,7 +238,7 @@ export function teardownPopupReceiver({ notify = true } = {}) {
     }
   }
   inflightByReceiver.delete(receiver);
-  pauseConnectionsForReceiver(receiver);
+  endConnectionsForReceiver(receiver);
   authzByReceiver.delete(receiver);
   dropPendingForReceiver(receiver);
   try {
@@ -279,6 +287,15 @@ export async function initConnectReceiver(onApproval) {
   });
   window.addEventListener('message', async (ev) => {
     const msg = { source: ev.source, origin: ev.origin, data: ev.data };
+    if (msg.data?.v === 1 && msg.data.type === 'client_unloaded' && typeof msg.data.bindingId === 'string') {
+      for (const [handle, app] of launchedApps) {
+        const source = app.holder.getSource();
+        if ((!ev.source || ev.source === source) && source && app.receiver.matchesBinding(source, ev.origin, msg.data.bindingId)) teardownLaunchedApp(handle, { notify: false });
+      }
+      if (receiver && window.opener && (!ev.source || ev.source === window.opener) && receiver.matchesBinding(window.opener, ev.origin, msg.data.bindingId)) teardownPopupReceiver({ notify: false });
+      return;
+    }
+
     // popup（Demo 主动打开钱包）：保持原有语义，与启动应用互不干扰。
     try {
       if (receiver.isAllowedPeer(msg)) {
@@ -392,7 +409,7 @@ function sdkError(method, perr) {
 }
 
 function isEstablishing(method) {
-  return method === 'connect.login' || method === 'connect.resume' || method === 'connect.launch';
+  return method === 'connect.login' || method === 'connect.launch';
 }
 
 async function handleRequest(req, recv) {
@@ -406,34 +423,6 @@ async function handleRequest(req, recv) {
     const params = { ...(req.params || {}) };
 
     if (isEstablishing(method)) {
-      // 已持有授权的 reconnect 心跳：官方 Receiver 把 reconnect 转成 connect.resume
-      // 并携带 authorizationId；宿主只复核既有授权，不重复审批、不新建授权。
-      if (method === 'connect.resume' && req.authorizationId) {
-        try {
-          const resumed = await client.call({ signal }, 'connect.request.exec', {
-            method, origin, authorizationId: req.authorizationId, requestId: req.id,
-          });
-          // 同一连接的心跳/刷新恢复成功：沿用原授权，本连接继续持有，不新建映射到他处。
-          // 刷新后的新连接先由后台验证记录中的授权，再建立新映射，不要求新 Receiver 事先已有映射。
-          authzOf(recv).set(origin, req.authorizationId);
-          recv.replyResult(req, resumed);
-        } catch (e) {
-          const message = e?.message || '恢复连接失败，请重新登录';
-          // 授权已不存在/过期/代际失效：显式收回并回 authorization_expired，调用方清除本地记录。
-          // proof 无效或身份不匹配：回 invalid_request，保留原记录，不创建新授权。
-          if (e?.code === 'NOT_FOUND') {
-            try {
-              req.source.postMessage({ v: 1, type: 'revoked', authorizationId: req.authorizationId }, origin);
-            } catch { /* 窗口关闭时静默 */ }
-            recv.replyError(req, { code: 'authorization_expired', message });
-          } else if (e?.code === 'BAD_REQUEST') {
-            recv.replyError(req, { code: 'invalid_request', message });
-          } else {
-            recv.replyError(req, { code: 'internal_error', message });
-          }
-        }
-        return;
-      }
       if ('appIdentity' in params) {
         recv.replyError(req, { code: 'invalid_request', message: 'App 身份字段已删除' });
         return;
@@ -447,7 +436,7 @@ async function handleRequest(req, recv) {
       } else if (res) {
         // launch 直接返回授权结果（发起即授权，不经审批），只绑定本次连接；
         // 登录/恢复的心跳恢复同样直接回执。旧连接不得借新连接的授权执行业务。
-        if (req.method === 'connect.launch' && res.authorizationId) authzOf(recv).set(origin, res.authorizationId);
+        if (req.method === 'connect.launch' && res.authorizationId) { authzOf(recv).set(origin, res.authorizationId); appKeys.set(recv, req.params?.publicationProof?.publication?.appPublicKeyHex); }
         recv.replyResult(req, res);
       }
       return;
@@ -664,9 +653,9 @@ async function claimPendingApproval(approvalId, entry) {
   try {
     traceApproval("reply.start", { method: entry.method });
     entry.receiver.replyResult(entry.ctx, toSdkResult(entry.method, exec.result, exec.binaries || {}));
-    if (entry.method === 'connect.login' || entry.method === 'connect.resume' || entry.method === 'connect.launch') {
+    if (entry.method === 'connect.login' || entry.method === 'connect.launch') {
       const authorizationId = exec.result?.authorizationId;
-      if (authorizationId) authzOf(entry.receiver).set(entry.origin, authorizationId);
+      if (authorizationId) { authzOf(entry.receiver).set(entry.origin, authorizationId); appKeys.set(entry.receiver, entry.ctx.params?.publicationProof?.publication?.appPublicKeyHex); }
     }
   } catch (error) {
     traceApproval("reply.failed", { method: entry.method, code: error?.code, name: error?.name });
