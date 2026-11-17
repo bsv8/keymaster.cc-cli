@@ -125,7 +125,7 @@ func ResolveBaseURL(explicitAPI, dataDir string) (string, error) {
 		return "", err
 	}
 	if len(cands) == 0 {
-		return "", fmt.Errorf("无本机配置且未提供 --api，请提供 --api 或先运行 km init/daemon")
+		return "", fmt.Errorf("无本机配置且未提供 --api，请提供 --api 或先运行 km daemon（未初始化时用浏览器完成初始化）")
 	}
 	return cands[0].URL, nil
 }
@@ -151,7 +151,7 @@ func settingsAddr(dataDir string) (string, error) {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
-		return "", fmt.Errorf("无本机配置且未提供 --api，请提供 --api 或先运行 km init/daemon: %w", err)
+		return "", fmt.Errorf("无本机配置且未提供 --api，请提供 --api 或先运行 km daemon（未初始化时用浏览器完成初始化）: %w", err)
 	}
 	var settings struct {
 		Port int `json:"port"`
@@ -224,8 +224,8 @@ func DialExternal(ctx context.Context, rawURL string) (*kmapi.UnifiedClient, err
 //   - 候选按需读取；远程已连接时不要求本地钱包存在。
 //   - 仅连接失败尝试下一级，并记录每一级失败原因；业务错误、锁定、
 //     非法地址、协议不兼容、调用者取消直接返回。
-//   - 前两级均不可连时，检查本地初始化状态再竞争独占锁；未初始化引导
-//     km init，不自动建钱包；锁被占用明确报错，不抢锁、不起第二个实例。
+//   - 前两级均不可连时，先持独占锁打开后台，再检查钱包状态；
+//     空目录引导 Web 初始化，不自动建钱包；锁被占用不抢锁、不起第二实例。
 //   - 返回的 warning 说明回退过程与最终选择；显式远端不可达后落到本地
 //     时必须讲清“当前操作的是本地钱包，非远程”。
 func OpenSession(ctx context.Context, explicitAPI, dataDir string, readPassword PasswordReader) (*Session, string, error) {
@@ -295,17 +295,7 @@ func fallbackWarning(explicitAPI string, used Candidate, failures []string) stri
 }
 
 func openEmbeddedOrInitHint(ctx context.Context, dir string, readPassword PasswordReader) (*Session, string, error) {
-	layout, err := ResolveLayout(dir)
-	if err != nil {
-		return nil, "", err
-	}
-	if !layout.HasInitMarkers() {
-		if layout.HasAnyWallet() {
-			return nil, "", fmt.Errorf("数据不完整或为旧版，请先运行 km init（迁移或修复）")
-		}
-		return nil, "", fmt.Errorf("尚未初始化，请先运行 km init")
-	}
-	return openEmbeddedWithWarning(ctx, layout.Dir, readPassword)
+	return openEmbeddedWithWarning(ctx, dir, readPassword)
 }
 
 func openEmbedded(ctx context.Context, dir string, readPassword PasswordReader) (*Session, error) {
@@ -317,12 +307,6 @@ func openEmbeddedWithWarning(ctx context.Context, dir string, readPassword Passw
 	layout, err := ResolveLayout(dir)
 	if err != nil {
 		return nil, "", err
-	}
-	if !layout.HasInitMarkers() {
-		if layout.HasAnyWallet() {
-			return nil, "", fmt.Errorf("数据不完整或为旧版，请先运行 km init（迁移或修复）")
-		}
-		return nil, "", fmt.Errorf("尚未初始化，请先运行 km init")
 	}
 	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir})
 	if err != nil {
@@ -337,6 +321,11 @@ func openEmbeddedWithWarning(ctx context.Context, dir string, readPassword Passw
 			_ = d.Close()
 		}
 	}()
+	// Open owns the lock and loads the wallet before this decision. A genuinely
+	// empty wallet still needs Web initialization; incomplete data is rejected.
+	if d.State() == daemon.StateUninitialized {
+		return nil, "", fmt.Errorf("尚未初始化，请先启动 km daemon 并用浏览器完成初始化")
+	}
 	if err := d.Start(ctx); err != nil {
 		return nil, "", err
 	}

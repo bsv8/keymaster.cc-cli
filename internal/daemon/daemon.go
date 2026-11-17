@@ -71,6 +71,7 @@ type Daemon struct {
 	publicKey    string
 	address      string
 	unlockMu     sync.Mutex
+	initMu       sync.Mutex
 	balanceMu    sync.Mutex
 	balanceCache *balanceSnapshot
 	// balanceWatching 标记余额采集循环已启动；lastPublished 记录上次
@@ -103,6 +104,10 @@ type Daemon struct {
 
 	deployments *appdeployment.Manager
 	connectMgr  *connect.Manager
+
+	// portOverride forces the HTTP listen port for this run only (0 = from
+	// settings or default). Set once in Open from Options, read in ServeHTTP.
+	portOverride int
 
 	// paymentHeld 为冻结的付款计划（批准前冻结，批准后原样广播）。
 	// 仅内存持有，重启后按持久 rawHex 直接广播，不重新选币。
@@ -191,6 +196,12 @@ func Open(opts Options) (*Daemon, error) {
 		return nil, err
 	}
 	d := &Daemon{layout: layout, state: StateUninitialized, lockGuard: guard, events: events.New()}
+	if opts.PortOverride != 0 {
+		// Port override is runtime-only; the file value stays authoritative
+		// for the next restart unless updated through the API. Applies to
+		// initialized and uninitialized starts alike.
+		d.portOverride = opts.PortOverride
+	}
 	d.connectMgr = connect.NewManager(filepath.Join(layout.Dir, "protocol"), filepath.Join(layout.Dir, "apps"))
 	d.deployments = appdeployment.New(filepath.Join(layout.Dir, "apps", "deployments"), d.downloadDeploymentFile, d.invalidateDeployment)
 	d.connectMgr.SetGeneration(d.events.InstanceID())
@@ -235,11 +246,6 @@ func Open(opts Options) (*Daemon, error) {
 			// A root that is temporarily inaccessible must show an error, not
 			// delete configuration or fail the whole daemon.
 			fmt.Fprintf(os.Stderr, "km: 打开售卖目录时部分失败: %v\n", err)
-		}
-		if port := opts.PortOverride; port != 0 {
-			// Port override is runtime-only; the file value is authoritative
-			// for the next restart unless updated through the API.
-			_ = port
 		}
 		return d.finishOpen()
 	}
@@ -450,7 +456,7 @@ func (d *Daemon) Unlock(password string) error {
 	}
 	if d.state == StateUninitialized || d.store == nil {
 		d.mu.Unlock()
-		return errors.New("尚未初始化，请先运行 km init")
+		return errors.New("尚未初始化，请先启动 km daemon 并用浏览器完成初始化")
 	}
 	d.mu.Unlock()
 	raw, err := os.ReadFile(d.layout.KeyPath)
@@ -643,7 +649,7 @@ func (d *Daemon) ServeHTTP(ctx context.Context) (string, error) {
 	}
 	if d.store == nil {
 		// Uninitialized daemon still serves a minimal status surface so CLI
-		// can report "please run km init" without a second process.
+		// can report uninitialized status without a second process.
 	}
 	port := DefaultPort()
 	if d.store != nil {
@@ -651,6 +657,9 @@ func (d *Daemon) ServeHTTP(ctx context.Context) (string, error) {
 		if err == nil && settings.Port != 0 {
 			port = settings.Port
 		}
+	}
+	if d.portOverride != 0 {
+		port = d.portOverride
 	}
 	d.mu.Unlock()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

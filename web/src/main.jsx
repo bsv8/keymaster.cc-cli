@@ -435,28 +435,58 @@ function ConnectPanel() {
 function WalletInit({ onDone }) {
   const [mode, setMode] = React.useState('new');
   const [password, setPassword] = React.useState('');
+  const [confirmation, setConfirmation] = React.useState('');
   const [network, setNetwork] = React.useState('test');
   const [keyMaterial, setKeyMaterial] = React.useState('');
   const [err, setErr] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const submitting = React.useRef(false);
+  const confirmInput = React.useRef(null);
   const submit = async (e) => {
-    e.preventDefault(); setErr('');
+    e.preventDefault();
+    if (submitting.current) return;
+    setErr('');
+    if (mode === 'new' && password !== confirmation) {
+      confirmInput.current.setCustomValidity('两次密码不一致，请重新确认');
+      confirmInput.current.reportValidity();
+      return;
+    }
+    submitting.current = true; setBusy(true);
     try {
       const c = await getClient();
       if (mode === 'new') await c.walletCreate(password, network);
-      else await c.walletImport(password, keyMaterial);
-      setPassword(''); setKeyMaterial(''); await onDone();
+      // Published SDK's convenience method lacks network; use the official
+      // registered method and the updated APIProtocol v1 request definition.
+      else await c.call(undefined, 'wallet.import', { password, keyMaterial, network });
+      setPassword(''); setConfirmation(''); setKeyMaterial(''); await onDone();
     } catch (e) { setErr(String(e?.message || e)); }
+    finally { submitting.current = false; setBusy(false); }
   };
-  return (<form data-testid="wallet-init" onSubmit={submit}>
-    {err && <p className="error">{err}</p>}
-    <div className="row">
-      <select data-testid="wallet-init-mode" value={mode} onChange={(e) => setMode(e.target.value)}><option value="new">新建</option><option value="import">导入 KeyHold</option></select>
-      <select data-testid="wallet-init-network" value={network} onChange={(e) => setNetwork(e.target.value)}><option value="test">test</option><option value="main">main</option></select>
-    </div>
-    <div className="row"><input data-testid="wallet-init-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="钱包密码" autoComplete="off" /></div>
-    {mode === 'import' && <textarea rows={4} value={keyMaterial} onChange={(e) => setKeyMaterial(e.target.value)} placeholder="纯 KeyHold JSON" className="mono" />}
-    <div className="row"><button data-testid="wallet-init-submit" type="submit">执行</button></div>
-    <p className="hint">失败不覆盖已有钱包，不留下半套状态。</p>
+  return (<form data-testid="wallet-init" method="post" onSubmit={submit} aria-busy={busy}>
+    <p role="alert" className="error">{err}</p>
+    <fieldset disabled={busy}>
+      <legend>初始化钱包</legend>
+      <label htmlFor="wallet-init-mode">创建方式</label>
+      <select id="wallet-init-mode" name="mode" data-testid="wallet-init-mode" value={mode} onChange={(e) => {
+        setMode(e.target.value); setPassword(''); setConfirmation(''); setKeyMaterial(''); setErr('');
+        confirmInput.current?.setCustomValidity('');
+      }}><option value="new">新建</option><option value="import">导入 KeyHold</option></select>
+      {mode === 'import' && <>
+        <p id="wallet-import-hint" className="hint">仅导入加密密钥，不恢复原钱包的网络、业务记录或未决资金责任。请使用 KeyHold 文件原密码，并重新确认网络。</p>
+        <label htmlFor="wallet-init-key">纯 KeyHold JSON（必填）</label>
+        <textarea id="wallet-init-key" name="keyMaterial" data-testid="wallet-init-key" rows={6} required aria-describedby="wallet-import-hint" spellCheck={false} value={keyMaterial} onChange={(e) => setKeyMaterial(e.target.value)} className="mono" />
+      </>}
+      <label htmlFor="wallet-init-password">{mode === 'new' ? '设置钱包密码（必填）' : 'KeyHold 原密码（必填）'}</label>
+      <input id="wallet-init-password" name="password" data-testid="wallet-init-password" type="password" required value={password} onChange={(e) => { setPassword(e.target.value); confirmInput.current?.setCustomValidity(''); }} autoComplete="off" />
+      {mode === 'new' && <>
+        <label htmlFor="wallet-init-confirmation">确认密码（必填）</label>
+        <input id="wallet-init-confirmation" name="confirmation" data-testid="wallet-init-confirmation" ref={confirmInput} type="password" required value={confirmation} onChange={(e) => { setConfirmation(e.target.value); e.target.setCustomValidity(''); }} autoComplete="off" />
+      </>}
+      <label htmlFor="wallet-init-network">最后确认钱包网络</label>
+      <select id="wallet-init-network" name="network" data-testid="wallet-init-network" value={network} onChange={(e) => setNetwork(e.target.value)}><option value="test">test（测试网）</option><option value="main">main（主网）</option></select>
+      <div className="row"><button data-testid="wallet-init-submit" type="submit">{busy ? '正在初始化…' : mode === 'new' ? '创建钱包' : '导入密钥'}</button></div>
+    </fieldset>
+    <p className="hint">成功后进入锁定状态，已有钱包不会被覆盖。</p>
   </form>);
 }
 

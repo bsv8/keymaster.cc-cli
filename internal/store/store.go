@@ -76,10 +76,6 @@ func (s *Store) SaveExact(name string, data []byte) error {
 		temporary.Close()
 		return fmt.Errorf("store: write %s: %w", name, err)
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}
@@ -120,10 +116,6 @@ func (s *Store) Save(name string, data []byte) error {
 	if _, err := temporary.Write(data); err != nil {
 		temporary.Close()
 		return fmt.Errorf("store: write %s: %w", name, err)
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
 	}
 	if err := temporary.Close(); err != nil {
 		return err

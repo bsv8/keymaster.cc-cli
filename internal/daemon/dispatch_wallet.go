@@ -5,7 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -23,6 +23,14 @@ func hmacBinding(priv []byte, network, pubHex string) string {
 }
 
 func (d *Daemon) opWalletCreate(ctx context.Context, p kmapi.WalletCreateRequest) (any, *kmapi.ErrorDetail) {
+	d.initMu.Lock()
+	defer d.initMu.Unlock()
+	if e := d.needRunning(); e != nil {
+		return nil, e
+	}
+	if ctx.Err() != nil {
+		return nil, errDetail(kmapi.ErrStopping, "初始化请求已取消")
+	}
 	if p.Password == "" {
 		return nil, errDetail(kmapi.ErrBadRequest, "密码不能为空")
 	}
@@ -52,9 +60,6 @@ func (d *Daemon) opWalletCreate(ctx context.Context, p kmapi.WalletCreateRequest
 	if err != nil {
 		return nil, errDetail(kmapi.ErrInternal, "解析 KeyHold 失败")
 	}
-	if _, err := keyhold.Unlock(doc, p.Password); err != nil {
-		return nil, errDetail(kmapi.ErrBadRequest, "密码验证失败")
-	}
 	pubHex := doc.PublicKeyHex
 	unlocked, err := keyhold.Unlock(doc, p.Password)
 	if err != nil {
@@ -71,14 +76,24 @@ func (d *Daemon) opWalletCreate(ctx context.Context, p kmapi.WalletCreateRequest
 }
 
 func (d *Daemon) opWalletImport(ctx context.Context, p kmapi.WalletImportRequest) (any, *kmapi.ErrorDetail) {
+	d.initMu.Lock()
+	defer d.initMu.Unlock()
+	if e := d.needRunning(); e != nil {
+		return nil, e
+	}
+	if ctx.Err() != nil {
+		return nil, errDetail(kmapi.ErrStopping, "初始化请求已取消")
+	}
 	if p.Password == "" {
 		return nil, errDetail(kmapi.ErrBadRequest, "密码不能为空")
 	}
 	if strings.TrimSpace(p.KeyMaterial) == "" {
 		return nil, errDetail(kmapi.ErrBadRequest, "keyMaterial 必填")
 	}
-	network := "test"
-	// keyMaterial 可能含 network 字段？首版 network 固定 test，调用方通过设置切换？按 spec WalletImportRequest 只有 password+keyMaterial，先用 test。
+	network := strings.ToLower(strings.TrimSpace(p.Network))
+	if network != "test" && network != "main" {
+		return nil, errDetail(kmapi.ErrBadRequest, "网络必须是 test 或 main")
+	}
 	if d.layout.HasInitMarkers() {
 		return nil, errDetail(kmapi.ErrConflict, "已经初始化，不覆盖")
 	}
@@ -106,43 +121,48 @@ func (d *Daemon) opWalletImport(ctx context.Context, p kmapi.WalletImportRequest
 }
 
 func (d *Daemon) persistNewWallet(network, pubHex, auth string, keyRaw []byte) *kmapi.ErrorDetail {
-	// 先写 info/settings（可恢复标记），再写 key.json；失败清理半套。
+	if d.layout.HasAnyWallet() {
+		return errDetail(kmapi.ErrConflict, "已有钱包材料，拒绝覆盖")
+	}
+	if err := d.layout.EnsureDirs(); err != nil {
+		return errDetail(kmapi.ErrInternal, err.Error())
+	}
+	// The daemon owns the directory lock and serializes initialization. Exclusive
+	// creation is still used for the Key so an existing wallet is never replaced.
+	keyFile, err := os.OpenFile(d.layout.KeyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return errDetail(kmapi.ErrInternal, "创建钱包文件失败: "+err.Error())
+	}
+	_, writeErr := keyFile.Write(keyRaw)
+	if err := errors.Join(writeErr, keyFile.Close()); err != nil {
+		return errDetail(kmapi.ErrInternal, errors.Join(err, os.Remove(d.layout.KeyPath)).Error())
+	}
 	store := appconfig.New(d.layout.Dir)
 	if err := store.Init(network, pubHex, auth); err != nil {
-		return errDetail(kmapi.ErrInternal, "初始化失败: "+err.Error())
-	}
-	var v any
-	if err := json.Unmarshal(keyRaw, &v); err != nil {
-		_ = os.Remove(d.layout.InfoPath)
-		_ = os.Remove(d.layout.SettingsPath)
-		return errDetail(kmapi.ErrBadRequest, "导入文件无效")
-	}
-	pretty, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		_ = os.Remove(d.layout.InfoPath)
-		_ = os.Remove(d.layout.SettingsPath)
-		return errDetail(kmapi.ErrInternal, err.Error())
-	}
-	if err := os.WriteFile(d.layout.KeyPath, pretty, 0o600); err != nil {
-		_ = os.Remove(d.layout.InfoPath)
-		_ = os.Remove(d.layout.SettingsPath)
-		_ = os.Remove(d.layout.KeyPath)
-		return errDetail(kmapi.ErrInternal, err.Error())
+		return errDetail(kmapi.ErrInternal, "初始化失败: "+errors.Join(err, os.Remove(d.layout.KeyPath)).Error())
 	}
 	// 重载后台状态为已锁定（需解锁后可用）。
+	tasks := newTaskManager(d.layout, store)
+	tasks.events = d.events
+	tasks.onTerminal = func() { go d.refreshBalance("task-terminal") }
+	roots := newRootsManager(d.layout, store)
+	collectors := newCollectorsManager(d.layout.Dir, store, d.collectorSign)
+	if err := roots.openAll(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "km: 初始化售卖目录: %v\n", err)
+	}
+	d.mu.Lock()
 	d.store = store
 	d.publicKey = pubHex
 	if addr, err := addressFor(pubHex, network == "main"); err == nil {
 		d.address = addr
 	}
-	d.mu.Lock()
-	d.state = StateLocked
+	d.tasks = tasks
+	d.roots = roots
+	d.collectors = collectors
+	if d.state != StateStopping {
+		d.state = StateLocked
+	}
 	d.mu.Unlock()
-	d.tasks = newTaskManager(d.layout, store)
-	d.tasks.events = d.events
-	d.roots = newRootsManager(d.layout, store)
-	d.collectors = newCollectorsManager(d.layout.Dir, store, d.collectorSign)
-	_ = d.roots.openAll(context.Background())
-	_ = fmt.Sprintf
+	d.publishWallet()
 	return nil
 }

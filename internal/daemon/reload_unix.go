@@ -34,9 +34,12 @@ func (d *Daemon) watchReload(ctx context.Context) {
 
 // refreshAndFeed re-checks all roots and queues new mappings to collectors.
 func (d *Daemon) refreshAndFeed(ctx context.Context) {
-	if d.roots == nil {
+	d.mu.Lock()
+	roots := d.roots
+	d.mu.Unlock()
+	if roots == nil {
 		return
 	}
-	d.roots.refreshAll(ctx)
+	roots.refreshAll(ctx)
 	d.feedCollectors()
 }

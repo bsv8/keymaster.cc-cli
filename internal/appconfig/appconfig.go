@@ -205,7 +205,8 @@ func (s *Store) InfoPath() string { return s.infoPath }
 // SettingsPath returns the settings.json path (for diagnostics).
 func (s *Store) SettingsPath() string { return s.settingsPath }
 
-// writeFileAtomic writes data atomically with 0600.
+// writeFileAtomic writes a 0600 temporary file, closes it, then replaces the target
+// with the ordinary OS rename operation; it does not force a storage flush.
 func writeFileAtomic(path string, data []byte) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -224,10 +225,6 @@ func writeFileAtomic(path string, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("写入文件失败: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
@@ -463,6 +460,8 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 	for _, p := range []string{s.infoPath, s.settingsPath} {
 		if _, err := os.Stat(p); err == nil {
 			return fmt.Errorf("文件已存在，拒绝覆盖: %s", p)
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
 	info := &Info{
@@ -486,23 +485,14 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 	if err != nil {
 		return err
 	}
-	// Recoverable two-file commit: write info first with a pending marker,
-	// then settings, then clear the marker. A crash leaves the marker so the
-	// next startup reports damage instead of a half-complete wallet.
-	marker := filepath.Join(s.dir, "vault", ".init-pending")
-	if err := writeFileAtomic(marker, []byte("init\n")); err != nil {
-		return err
-	}
+	// Ordinary writes: report errors and clean up only this attempt's files.
 	if err := writeFileAtomic(s.infoPath, append(infoRaw, '\n')); err != nil {
-		_ = os.Remove(marker)
 		return err
 	}
 	if err := writeFileAtomic(s.settingsPath, append(settingsRaw, '\n')); err != nil {
-		_ = os.Remove(s.infoPath)
-		_ = os.Remove(marker)
-		return err
+		return errors.Join(err, os.Remove(s.infoPath))
 	}
-	_ = os.Remove(marker)
+
 	s.info = info
 	s.settings = settings
 	return nil
@@ -513,9 +503,6 @@ func (s *Store) Init(network, publicKeyHex, networkAuthHex string) error {
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := os.Stat(filepath.Join(s.dir, "vault", ".init-pending")); err == nil {
-		return errors.New("初始化未完成（存在 .init-pending），请重新执行 init 或从备份恢复")
-	}
 	infoRaw, err := os.ReadFile(s.infoPath)
 	if err != nil {
 		return fmt.Errorf("读取 info.json 失败: %w", err)
@@ -705,7 +692,7 @@ func (s *Store) Snapshot() (Info, Settings, error) {
 	return info, settings, nil
 }
 
-// saveLocked persists both files atomically; caller holds s.mu and has
+// saveLocked replaces each file in sequence; caller holds s.mu and has
 // already bumped revisions.
 func (s *Store) saveLocked() error {
 	infoRaw, err := json.MarshalIndent(s.info, "", "  ")

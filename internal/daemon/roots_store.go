@@ -24,10 +24,11 @@ type rootHandle struct {
 }
 
 type rootsManager struct {
-	mu     sync.Mutex
-	layout datadir.Layout
-	store  *appconfig.Store
-	roots  map[string]*rootHandle
+	mu       sync.Mutex
+	layout   datadir.Layout
+	store    *appconfig.Store
+	roots    map[string]*rootHandle
+	database *catalog.Database
 	// inflight counts live seller sessions bound to each root. A deleted
 	// root keeps its catalog open until its sessions drain, then is reaped.
 	inflight map[string]int
@@ -48,7 +49,15 @@ func (m *rootsManager) openOne(ctx context.Context, r appconfig.Root, seedPrice,
 		h.err = err.Error()
 		return h
 	}
-	cat, err := catalog.Open(ctx, r.Path, filepath.Join(dir, "catalog.sqlite"))
+	if m.database == nil {
+		db, err := catalog.OpenDatabase(ctx, filepath.Join(m.layout.SellDir, "catalog.sqlite"))
+		if err != nil {
+			h.err = err.Error()
+			return h
+		}
+		m.database = db
+	}
+	cat, err := m.database.OpenRoot(ctx, r.ID, r.Path)
 	if err != nil {
 		h.err = err.Error()
 		// Pricing can still open for display even when the directory is
@@ -104,6 +113,10 @@ func (m *rootsManager) closeAll() {
 		}
 	}
 	m.roots = map[string]*rootHandle{}
+	if m.database != nil {
+		_ = m.database.Close()
+		m.database = nil
+	}
 }
 
 func (m *rootsManager) list() []rootHandle {

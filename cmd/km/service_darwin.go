@@ -232,12 +232,12 @@ func serviceInstall(globalDataDir string, args []string) int {
 		return exitOK
 	}
 	if layout.HasAnyWallet() {
-		fmt.Println("检测到旧版或半套数据，请先完成迁移或修复再启用服务：")
-		fmt.Printf("  %s init --data-dir %s\n", target, layout.Dir)
+		fmt.Println("检测到旧版或半套数据（存在半套或损坏文件），请从备份恢复，或清空目录后用浏览器重新初始化再启用服务。")
+		fmt.Printf("  %s daemon --data-dir %s\n", target, layout.Dir)
 		return exitOK
 	}
-	fmt.Println("尚未初始化，请先完成指定目录的初始化再启用服务：")
-	fmt.Printf("  %s init --data-dir %s\n", target, layout.Dir)
+	fmt.Println("尚未初始化：先启动后台再用浏览器完成初始化，然后启用服务：")
+	fmt.Printf("  %s daemon --data-dir %s\n", target, layout.Dir)
 	return exitOK
 }
 
@@ -412,12 +412,12 @@ func privilegedInstallOrUpgrade(layout datadir.Layout, exe, target, _ string) in
 		return exitOK
 	}
 	if layout.HasAnyWallet() {
-		fmt.Println("检测到旧版或半套数据，请先完成迁移或修复再启用服务：")
-		fmt.Printf("  %s init --data-dir %s\n", target, layout.Dir)
+		fmt.Println("检测到旧版或半套数据（存在半套或损坏文件），请从备份恢复，或清空目录后用浏览器重新初始化再启用服务。")
+		fmt.Printf("  %s daemon --data-dir %s\n", target, layout.Dir)
 		return exitOK
 	}
-	fmt.Println("尚未初始化，请先完成指定目录的初始化再启用服务：")
-	fmt.Printf("  %s init --data-dir %s\n", target, layout.Dir)
+	fmt.Println("尚未初始化：先启动后台再用浏览器完成初始化，然后启用服务：")
+	fmt.Printf("  %s daemon --data-dir %s\n", target, layout.Dir)
 	return exitOK
 }
 

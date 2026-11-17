@@ -161,10 +161,6 @@ func (l *Ledger) Save() (failure error) {
 		temporary.Close()
 		return fmt.Errorf("ledger: write ledger: %w", err)
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}

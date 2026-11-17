@@ -228,10 +228,7 @@ func appendJournal(s *store.Store, poolID string, entry PaymentJournalEntry) err
 	if _, err := file.Write(append(encoded, '\n')); err != nil {
 		return fmt.Errorf("bitfs: append pool journal: %w", err)
 	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("bitfs: sync pool journal: %w", err)
-	}
-	return nil
+	return file.Close()
 }
 
 func decodeKind5(raw []byte) (*content.SignedContentRequest, *content.PaymentAuthorization, error) {

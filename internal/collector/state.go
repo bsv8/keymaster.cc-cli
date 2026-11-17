@@ -141,10 +141,6 @@ func (s *Store) saveLocked() error {
 		temporary.Close()
 		return fmt.Errorf("collector: 写入状态失败: %w", err)
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}

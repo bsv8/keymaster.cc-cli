@@ -15,10 +15,10 @@ Keymaster CLI（命令 `km`）：单二进制 Go 程序，下载与售卖 BitFS 
 ## 构建
 
 当前后台 API 和 Web 连接已接入 WebLoom 插件运行时，前后台共享
-`pluginmanifest/catalog.json` 的方法归属。Go 框架尚未发布，因此本地构建要求相邻
-`../WebLoom/go`；Web 使用相邻 WebLoom 的 file 依赖，构建 Web 前先在 WebLoom
-运行 `pnpm install --frozen-lockfile && pnpm build`，再在本项目 `web/` 执行
-`npm ci && npm run build`。Go 构建将已生成的 Web dist 嵌入二进制。
+`pluginmanifest/catalog.json` 的方法归属。Go 使用正式
+`github.com/bsv8/WebLoom/go@v0.6.1` 与 `github.com/bsv8/KeymasterAPIProtocol@v0.1.2`；
+Web 使用 `webloom-framework@0.6.1` 和 `keymaster-api-protocol@0.1.2` 的精确发布版本。
+在本项目 `web/` 执行 `npm ci && npm run build`，再构建 Go；生成的 Web dist 嵌入二进制。
 业务对象与存储尚未全部从 Daemon 收回所属插件，不能将 API 接入视为完整存储改造。
 
 ```sh
@@ -37,8 +37,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o km ./cmd/km
 
 ```sh
 km install [--data-dir DIR]   # 安装程序、检查初始化状态、生成 systemd 服务（可重复，保留钱包与业务数据）
-km init [--data-dir DIR]      # 独立初始化钱包和设置（网络最后选择），不支持覆盖已有钱包
-km daemon [--data-dir DIR]    # 运行后台，已有钱包时以锁定状态启动，仅监听 127.0.0.1
+km daemon [--data-dir DIR]    # 运行后台；未初始化时 serve Web 供浏览器初始化，已有钱包时以锁定状态启动，仅监听 127.0.0.1
 km unlock [--api URL]          # 隐藏输入密码，提交给后台解锁（与 Web 共用流程）
 km info [--api URL]            # 网络、锁定、地址/二维码、余额（可用/占用口径、时间/缓存/错误）
 km get <seedhashhex> [--api URL]  # 提交任务并显示进度；断开只停显示，后台继续；取消用 km get --cancel <seed>
@@ -84,23 +83,22 @@ manager 无持久化、恢复、交易审批或冲突取证。实例销毁丢弃
 systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项见
 `BSV8_Engineering/docs/keymaster.cc-cli/运维与部署.md`。
 
-首次运行（数据目录无 `key.json`/`info.json`/`settings.json`）用 `km init` 在交互式终端完成：新建 key 或导入纯 KeyHold → 两次密码 → 其他设置 → 最后选择网络（`test`/`main`）→ 完整校验后持久化；管道安装交互从 `/dev/tty` 读取，无终端明确结束。systemd 只启动 `km daemon`（锁定状态），密码只经 `km unlock`（终端隐藏输入）或 Web 解锁页提交，不存参数/环境/配置/systemd 凭据。
+首次运行（数据目录无 `vault/key.json`、`vault/info.json`、`background/settings.json`）先启动 `km daemon`，再用浏览器打开其输出地址完成初始化：新建 key 或导入纯 KeyHold → 设置密码 → 最后选择网络（`test`/`main`）→ 完整校验后持久化（`key.json` 只存纯 KeyHold）；终端 `km init` 已退役。systemd 只启动 `km daemon`，密码只经 `km unlock`（终端隐藏输入）或 Web 页面提交，不存参数/环境/配置/systemd 凭据。
 
 ## 配置（新布局）
 
 | 文件 | 内容 | 恢复出厂 |
 |---|---|---|
-| `key.json` | 官方纯 KeyHold 文档（0600） | 保留 |
-| `info.json` | 网络、公钥、网络绑定、售卖根列表、默认下载根 ID（`version`+`revision`，网络身份禁普通改） | 保留 |
-| `settings.json` | 端口、主题、语言、缺省价格、调度等普通参数（`version`+`revision`） | 重置 |
+| `vault/key.json` | 官方纯 KeyHold 文档（0600） | 保留 |
+| `vault/info.json` | 网络、公钥、网络绑定、售卖根列表、默认下载根 ID（`version`+`revision`，网络身份禁普通改） | 保留 |
+| `background/settings.json` | 端口、主题、语言、缺省价格、调度等普通参数（`version`+`revision`） | 重置 |
 | 业务数据 | 任务、账本、会话、恢复证据、索引 | 不受影响 |
 
 - 目录默认 `~/.km`（0600/0700），系统服务建议 `/var/lib/km`，支持 `--data-dir` 显式指定。
 - `info.json`/`settings.json` 统一经模块读写：读取最新→改字段→补缺省→完整校验→原子持久化→发布；后台串行更新，版本号拒绝旧页覆盖；损坏/未知版本/半套文件不作首次安装；写失败不报成功。
 - 端口可重置，恢复出厂回默认，后台重启生效。`admin.apiKey`/token 已删除，无登录页。
-- `key.json` 只在初始化/迁移写入；密码不持久化、不进日志/浏览器存储；解锁串行防重复 KDF；重启需重解锁。
+- `key.json` 只在 Web 初始化写入；密码不持久化、不进日志/浏览器存储；解锁串行防重复 KDF；重启需重解锁。
 - 网络（`bsvNetwork`）最后选择并绑定；WOC 端点由网络推导。
-- 旧 `config.json` + 网络绑定外壳迁移：验证密码/公钥/HMAC 后，内部 KeyHold 密文原样存 `key.json`（不重加密），绑定移入 `info.json`，保留原文件备份。
 
 ### dev 服务覆盖
 
@@ -112,17 +110,21 @@ systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项�
 
 临时目录不写回 `config.json`；公钥与完整地址中的 PeerID 必须一致。费率不写入 env，从服务查询。完整默认身份和两端配置说明见 `../BSV8_Engineering/docs/keymaster.cc/服务缺省与开发覆盖.md`。
 
-## 目录布局（新布局）
+存储介质与普通文件写入规则见[工程文档](../BSV8_Engineering/docs/keymaster.cc-cli/架构与数据.md#存储介质与提交规则)。纯 KeyHold 只包含密钥材料，不是完整钱包备份。
+
+## 目录布局
 
 | 路径 | 用途 |
 |---|---|
-| `key.json` | 纯 KeyHold（0600） |
-| `info.json` | 网络身份 + 售卖根 + 默认下载根 |
-| `settings.json` | 普通参数（端口/主题/语言/价格/调度） |
-| `client/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
-| `client/unresolved/` | 未决资金历史 |
-| `server/roots/<rootID>/` | 每根 `catalog.sqlite` + `pricing.json`（多根，`rootID+相对路径` 身份） |
-| `server/sessions/` | 售卖会话证据（绑定原根，删根不删历史责任，不改用他根同名文件） |
+| `vault/key.json` | 纯 KeyHold（0600） |
+| `vault/info.json` | 网络身份 + 售卖根 + 默认下载根 |
+| `background/settings.json` | 普通参数（端口/主题/语言/价格/调度） |
+| `download/<seed-hash>/` | 下载/账本/付款日志/staging/组装状态/调度器快照 |
+| `download/unresolved/` | 未决资金历史 |
+| `sell/catalog.sqlite` | Sell 共用内容索引，按 root_id 隔离；SQLite 直接放所属插件根目录 |
+| `sell/roots/<rootID>/pricing.json` | 每根独立定价 |
+| `protocol/`、`apps/`、`collector/` | 各插件的授权/付款、应用部署与采集数据 |
+| `sell/sessions/` | 售卖会话证据（绑定原根，删根不删历史责任，不改用他根同名文件） |
 
 ## dev 调试日志
 
@@ -134,11 +136,11 @@ systemd 部署模板与凭据流程见 `deploy/README.md`；运维注意事项�
 
 ## 售卖目录与内容索引
 
-售卖目录始终以磁盘为准：Admin 每次直接列文件系统，再关联 SQLite 中已计算的内容映射；不保存另一份文件树。数据库位于配置文件同目录的 `server/catalog.sqlite`，必须位于售卖目录之外。Admin、需求发现与卖方执行共用一个 Catalog，不保留各自的目录快照。
+售卖目录始终以磁盘为准：Admin 每次直接列文件系统，再关联 SQLite 中已计算的内容映射；不保存另一份文件树。数据库位于 Sell 插件根目录的 `sell/catalog.sqlite`，必须位于售卖目录之外。Admin、需求发现与卖方执行共用一个 Catalog，不保留各自的目录快照。
 
 启动、每 5 秒和 SIGHUP 都执行普通核对：只以相对路径和文件长度判断是否需要计算 MasterSeed；同路径、同长度直接复用 SQLite，不比较修改时间、不重算全文件哈希。因此同路径同长度的内容替换不会被自动识别。Admin 的“强制重新索引”可显式完整重算；普通“刷新目录与索引”只处理新增和长度变化。实际交付的数据块仍验证请求的块哈希，不把索引复用当作交付正确性的证明。
 
-SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一个队列串行执行，哈希计算不占写事务。同一售卖根目录、同一数据库均有进程锁，拒绝多个管理进程；数据库绑定原根目录，不能拿到另一目录直接复用。不可读目录报错，不当作空目录清理；不可索引文件在 Admin 显示失败，新文件尚未完成映射时显示“尚未索引”。
+SQLite 使用 WAL、最多 4 个只读连接与单写连接；所有写入经一个队列串行执行，哈希计算不占写事务。同一售卖根目录、同一数据库均有进程锁，拒绝多个管理进程；数据库内每个 root_id 绑定原根目录，所有查询和清理按 root_id 隔离。不可读目录报错，不当作空目录清理；不可索引文件在 Admin 显示失败，新文件尚未完成映射时显示“尚未索引”。
 
 ## 退出码
 

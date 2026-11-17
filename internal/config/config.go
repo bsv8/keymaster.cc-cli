@@ -169,10 +169,6 @@ func writeFileAtomic(path string, data []byte) error {
 		temporary.Close()
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}
@@ -394,10 +390,6 @@ func (c *Config) Save(path string) error {
 	if _, err := temporary.Write(encoded); err != nil {
 		temporary.Close()
 		return fmt.Errorf("写入配置文件失败: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
 	}
 	if err := temporary.Close(); err != nil {
 		return err

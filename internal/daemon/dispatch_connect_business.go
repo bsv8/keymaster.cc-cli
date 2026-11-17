@@ -12,7 +12,7 @@ import (
 // execIdentityGet 执行已批准的身份凭证：复核原授权与生命周期后签名 CBOR 信封 v2。
 // 信封为 [2, requestId(approvalId), aud, iat, exp, text, pubkeyBytes, projection, network]。
 func (d *Daemon) execIdentityGet(ctx context.Context, a connect.Approval) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	if d.store == nil {
+	if !d.isInitialized() {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	if d.isStopping() {
@@ -87,7 +87,7 @@ func (d *Daemon) execIdentityGet(ctx context.Context, a connect.Approval) (any, 
 
 // execIntentSign 执行已批准的意图签名：信封 v2 10 项，内容摘要必须与附件一致。
 func (d *Daemon) execIntentSign(ctx context.Context, a connect.Approval) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	if d.store == nil {
+	if !d.isInitialized() {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	if d.isStopping() {

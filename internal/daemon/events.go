@@ -72,9 +72,11 @@ func wants(topics []string, t string) bool {
 // 调用；注册期间暂存的变化在快照发送后按序重放，不遗漏（at-least-once，
 // 接收方按全量状态幂等应用）。
 func (d *Daemon) buildSnapshot(topics []string) (kmapi.SnapshotEvent, error) {
-	if d.store == nil {
-		return kmapi.SnapshotEvent{}, fmt.Errorf("尚未初始化")
-	}
+	// Capture bootstrap publication once. A subscriber registered before this
+	// snapshot receives the later wallet event even when initialization races it.
+	d.mu.Lock()
+	store, daemonState := d.store, d.state
+	d.mu.Unlock()
 	snap := kmapi.SnapshotEvent{
 		ProtocolVersion: events.ProtocolVersion,
 		InstanceID:      d.events.InstanceID(),
@@ -90,9 +92,6 @@ func (d *Daemon) buildSnapshot(topics []string) (kmapi.SnapshotEvent, error) {
 			"apiVersion": DaemonAPIVersion,
 		}
 	}
-	d.mu.Lock()
-	daemonState := d.state
-	d.mu.Unlock()
 	if wants(topics, kmapi.TopicWallet) {
 		topicList = append(topicList, kmapi.TopicWallet)
 		state[kmapi.TopicWallet] = map[string]any{
@@ -100,7 +99,14 @@ func (d *Daemon) buildSnapshot(topics []string) (kmapi.SnapshotEvent, error) {
 			"locked": daemonState != StateUnlocked,
 		}
 	}
-	info, settings, err := d.store.Snapshot()
+	// Preserve the subscription, but expose no uninitialized business state.
+	// Connect-only subscriptions remain registered for future Connect events.
+	if store == nil {
+		snap.Topics = topicList
+		snap.State = state
+		return snap, nil
+	}
+	info, settings, err := store.Snapshot()
 	if err != nil {
 		return kmapi.SnapshotEvent{}, err
 	}
@@ -160,8 +166,6 @@ func (d *Daemon) buildSnapshot(topics []string) (kmapi.SnapshotEvent, error) {
 	}
 	return snap, nil
 }
-
-
 
 // publishTask 发布下载任务变化。调用者在任务持久化成功后调用。
 func (d *Daemon) publishTask(t *Task) {

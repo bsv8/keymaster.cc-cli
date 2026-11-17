@@ -4,8 +4,7 @@
 // New model:
 //
 //	km install [--data-dir DIR]     install binary + systemd unit (repeatable)
-//	km init [--data-dir DIR]        initialize wallet + settings (network last)
-//	km daemon [--data-dir DIR]      run background, locked start, serves HTTP
+//	km daemon [--data-dir DIR]      run background (serves Web for init when fresh), locked start otherwise
 //	km unlock [--api URL]           hidden TTY password, shared unlock flow
 //	km info [--api URL]             network, lock, address, QR, balance
 //	km get <seed> [--api URL]       submit task, stream progress, disconnect safe
@@ -17,7 +16,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,18 +23,15 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	keyhold "github.com/bsv8/KeyHold/go/v2"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"golang.org/x/term"
 
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
-	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/daemonrun"
-	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
 	"github.com/bsv8/keymaster.cc-cli/internal/session"
 	"github.com/bsv8/keymaster.cc-cli/internal/tray"
 )
@@ -101,7 +96,7 @@ func run(args []string) int {
 			a == "-listen" || strings.HasPrefix(a, "-listen=") ||
 			a == "-discover" || strings.HasPrefix(a, "-discover=") ||
 			a == "-legacy-direct" || a == "-discover=false":
-			fmt.Fprintln(os.Stderr, "km: 旧入口已退役，请使用新命令：km install | init | daemon | unlock | info | get <seed>")
+			fmt.Fprintln(os.Stderr, "km: 旧入口已退役，请使用新命令：km install | daemon | unlock | info | get <seed>")
 			usage(os.Stderr)
 			return exitUsage
 		case a == "-h" || a == "--help":
@@ -125,7 +120,9 @@ func run(args []string) int {
 	case "install":
 		return cmdInstall(g, cmdArgs)
 	case "init":
-		return cmdInit(g, cmdArgs)
+		fmt.Fprintln(os.Stderr, "km: 终端初始化已退役，请先启动后台再用浏览器完成初始化：km daemon [--data-dir DIR]，然后打开页面上的新建/导入钱包")
+		usage(os.Stderr)
+		return exitUsage
 	case "daemon":
 		return cmdDaemon(g, cmdArgs)
 	case "internal-tray":
@@ -154,9 +151,8 @@ func run(args []string) int {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `用法:
   km install [--data-dir DIR]   安装程序、检查初始化状态、生成系统服务
-  km init [--data-dir DIR]      独立初始化钱包和设置，不启动长期业务
-  km daemon [--data-dir DIR] [--no-tray]
-                         运行后台，已有钱包时以锁定状态启动；默认启用 Web Admin 与托盘
+  km daemon [--data-dir DIR] [--port PORT] [--no-tray]
+                         运行后台；未初始化时 serve Web 供浏览器初始化，已有钱包时以锁定状态启动；--port 只覆盖本次监听端口，不写回文件；默认启用 Web Admin 与托盘
   km unlock [--api URL] [--data-dir DIR]
   km info [--api URL] [--data-dir DIR]
   km get <seedhashhex> [--api URL] [--data-dir DIR]
@@ -168,7 +164,7 @@ func usage(w io.Writer) {
 
 说明:
   后台仅监听 127.0.0.1，无 token；远程访问由用户反向代理与认证负责，远程解锁请用 HTTPS。
-  缺少初始化数据时 daemon 提示执行 init，不在服务进程中等待交互。
+  初始化在浏览器完成（新建/导入 KeyHold，网络最后选择，key.json 只存纯 KeyHold）；终端不再提供 init。
   本地 info/get 无外部后台时内嵌启动（需密码+独占锁），退出即关闭；unlock 仅用于外部后台。`)
 }
 
@@ -182,39 +178,6 @@ func isSeedHash(s string) bool {
 		}
 	}
 	return true
-}
-
-// ttyReader returns a reader for interactive prompts: /dev/tty when stdin is
-// piped (e.g. curl | sh install), otherwise stdin. Without a terminal it
-// returns an error instead of silently using empty passwords.
-func ttyReader() (*os.File, func(), error) {
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		return os.Stdin, func() {}, nil
-	}
-	f, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
-	if err != nil {
-		return nil, nil, errors.New("没有交互终端，结束引导（请在终端中运行）")
-	}
-	return f, func() { f.Close() }, nil
-}
-
-func promptLine(prompt string) (string, error) {
-	tty, closeTTY, err := ttyReader()
-	if err != nil {
-		return "", err
-	}
-	defer closeTTY()
-	fmt.Fprint(os.Stderr, prompt)
-	reader := bufio.NewReader(tty)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(line), nil
-}
-
-func readHiddenPassword(prompt string) (string, error) {
-	return readHiddenPasswordWithContext(context.Background(), prompt)
 }
 
 // readHiddenPasswordWithContext reads a hidden password from the terminal
@@ -281,216 +244,9 @@ func readHiddenPasswordWithContext(ctx context.Context, prompt string) (string, 
 	}
 }
 
-func cmdInit(g globalFlags, args []string) int {
-	if len(args) != 0 {
-		fmt.Fprintln(os.Stderr, "km init 不接受参数")
-		return exitUsage
-	}
-	layout, err := session.ResolveLayout(g.dataDir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	guard, err := dlock.Acquire(layout.Dir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 数据目录已有后台在运行，init 与后台互斥")
-		return exitError
-	}
-	defer guard.Release()
-	if err := layout.EnsureDirs(); err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	if layout.HasInitMarkers() {
-		fmt.Fprintln(os.Stderr, "km: 已经初始化（存在 key.json/info.json/settings.json），不覆盖")
-		return exitError
-	}
-	if layout.HasAnyWallet() {
-		fmt.Fprintln(os.Stderr, "km: 数据目录存在半套或损坏文件，不能当成首次安装；请从备份恢复后重试")
-		return exitError
-	}
-	// Fresh init: new key or import, password, other settings (defaults), network last.
-	fmt.Fprintln(os.Stderr, "初始化新钱包（网络最后选择）。")
-	choice, err := promptLine("新建 key 还是导入 KeyHold？输入 new/import: ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	var importedRaw []byte
-	var privateKey []byte
-	var publicKeyHex string
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "new", "n", "":
-		first, err := readHiddenPassword("设置钱包密码: ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		if first == "" {
-			fmt.Fprintln(os.Stderr, "km: 密码不能为空")
-			return exitError
-		}
-		second, err := readHiddenPassword("再次输入密码: ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		if first != second {
-			fmt.Fprintln(os.Stderr, "km: 两次密码不一致")
-			return exitError
-		}
-		key, err := secp256k1.GeneratePrivateKey()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 生成私钥失败:", err)
-			return exitError
-		}
-		serialized := key.Serialize()
-		// Export pure KeyHold now; network binding comes after network choice.
-		raw, err := keyhold.ExportPrivateKey(keyhold.PrivateKeyExportInput{
-			PrivateKey: serialized,
-			Password:   first,
-			Label:      "km wallet",
-			Parameters: keyhold.RecommendedParameters(),
-		})
-		for i := range serialized {
-			serialized[i] = 0
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 创建 KeyHold 失败:", err)
-			return exitError
-		}
-		doc, err := keyhold.Parse(raw)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 解析 KeyHold 失败:", err)
-			return exitError
-		}
-		importedRaw = raw
-		publicKeyHex = doc.PublicKeyHex
-		// Verify password immediately so typos are caught before network choice.
-		if _, err := keyhold.Unlock(doc, first); err != nil {
-			fmt.Fprintln(os.Stderr, "km: 验证密码失败:", err)
-			return exitError
-		}
-		privateKey = nil // new key: private only in KeyHold; unlock later via password
-		_ = privateKey
-	case "import", "i":
-		path, err := promptLine("纯 KeyHold 文件路径: ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 读取导入文件失败:", err)
-			return exitError
-		}
-		doc, err := keyhold.Parse(raw)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 导入文件不是有效的纯 KeyHold:", err)
-			return exitError
-		}
-		password, err := readHiddenPassword("导入 KeyHold 解密密码: ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		result, err := keyhold.Unlock(doc, password)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "km: 解密失败（密码错误或文件损坏）")
-			return exitError
-		}
-		for i := range result.PrivateKey {
-			result.PrivateKey[i] = 0
-		}
-		importedRaw = raw
-		publicKeyHex = doc.PublicKeyHex
-	default:
-		fmt.Fprintln(os.Stderr, "km: 请输入 new 或 import")
-		return exitUsage
-	}
-	// Other settings use defaults in this step; network is last.
-	network, err := promptLine("选择网络 test | main（最后一步）: ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	network = strings.ToLower(strings.TrimSpace(network))
-	if network != "test" && network != "main" {
-		fmt.Fprintln(os.Stderr, "km: 网络必须是 test 或 main")
-		return exitError
-	}
-	// Full validation before persisting: KeyHold valid, pubkey known, network chosen.
-	doc, err := keyhold.Parse(importedRaw)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 内部 KeyHold 无效:", err)
-		return exitError
-	}
-	if doc.PublicKeyHex != publicKeyHex {
-		fmt.Fprintln(os.Stderr, "km: 钱包公钥不一致")
-		return exitError
-	}
-	authHex := computeInitAuth(importedRaw, network, publicKeyHex)
-	_ = authHex
-	// Persist: info+settings first (recoverable marker), then key.json.
-	// We need the private key to compute the HMAC binding; for a new key we
-	// no longer have it in memory (only KeyHold). Re-derive via password?
-	// For "new" we still have the password in scope? No (first/second out of
-	// scope). Rework: retain password for binding computation.
-	fmt.Fprintln(os.Stderr, "km: 初始化需要重新验证密码以生成网络绑定。")
-	bindPassword, err := readHiddenPassword("再次输入钱包密码（生成网络绑定）: ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km:", err)
-		return exitError
-	}
-	unlocked, err := keyhold.Unlock(doc, bindPassword)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 密码错误，初始化取消（未写入半套数据）")
-		return exitError
-	}
-	auth := computeHMAC(unlocked.PrivateKey, network, unlocked.PublicKeyHex)
-	for i := range unlocked.PrivateKey {
-		unlocked.PrivateKey[i] = 0
-	}
-	if unlocked.PublicKeyHex != publicKeyHex {
-		fmt.Fprintln(os.Stderr, "km: 钱包公钥不一致")
-		return exitError
-	}
-	store := appconfig.New(layout.Dir)
-	if err := store.Init(network, publicKeyHex, auth); err != nil {
-		fmt.Fprintln(os.Stderr, "km: 初始化失败:", err)
-		return exitError
-	}
-	// Write pure KeyHold verbatim (pretty) last; HasInitMarkers requires all three.
-	var pretty []byte
-	{
-		var v any
-		if err := json.Unmarshal(importedRaw, &v); err != nil {
-			_ = os.Remove(layout.InfoPath)
-			_ = os.Remove(layout.SettingsPath)
-			fmt.Fprintln(os.Stderr, "km: 导入文件无效")
-			return exitError
-		}
-		pretty, err = json.MarshalIndent(v, "", "  ")
-		if err != nil {
-			_ = os.Remove(layout.InfoPath)
-			_ = os.Remove(layout.SettingsPath)
-			fmt.Fprintln(os.Stderr, "km:", err)
-			return exitError
-		}
-		pretty = append(pretty, '\n')
-	}
-	if err := write0600(layout.KeyPath, pretty); err != nil {
-		_ = os.Remove(layout.InfoPath)
-		_ = os.Remove(layout.SettingsPath)
-		fmt.Fprintln(os.Stderr, "km: 写入钱包失败:", err)
-		return exitError
-	}
-	fmt.Printf("已创建钱包: %s（网络 %s）\n", layout.Dir, network)
-	return exitOK
-}
-
 func cmdDaemon(g globalFlags, args []string) int {
 	noTray := false
+	port := 0
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
@@ -499,7 +255,30 @@ func cmdDaemon(g globalFlags, args []string) int {
 		case "--no-tray=false":
 			noTray = false
 		default:
-			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--no-tray]")
+			if v, ok := strings.CutPrefix(a, "--port="); ok {
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 1 || n > 65535 {
+					fmt.Fprintln(os.Stderr, "km: --port 必须是 1-65535")
+					return exitUsage
+				}
+				port = n
+				continue
+			}
+			if a == "--port" {
+				i++
+				if i >= len(args) {
+					fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--port PORT] [--no-tray]")
+					return exitUsage
+				}
+				n, err := strconv.Atoi(args[i])
+				if err != nil || n < 1 || n > 65535 {
+					fmt.Fprintln(os.Stderr, "km: --port 必须是 1-65535")
+					return exitUsage
+				}
+				port = n
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "用法: km daemon [--data-dir DIR] [--port PORT] [--no-tray]")
 			return exitUsage
 		}
 	}
@@ -521,10 +300,11 @@ func cmdDaemon(g globalFlags, args []string) int {
 	defer stop()
 	// Ctrl-C keeps the historic exit code; all lifecycle rules
 	// (tray isolation, serialized restart, close-and-wait) live in
-	// daemonrun. Missing init, lock conflicts and startup failures
-	// are reported there with the same messages as before.
+	// daemonrun. Uninitialized dirs start to serve Web init; partial
+	// dirs, lock conflicts and startup failures are reported there.
 	return daemonrun.Run(ctx, daemonrun.Options{
 		DataDir:          layout.Dir,
+		Port:             port,
 		Tray:             mode,
 		ExitCodeOnSignal: exitCancelled,
 	})

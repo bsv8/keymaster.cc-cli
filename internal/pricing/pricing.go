@@ -122,10 +122,6 @@ func (p *Pricing) saveLocked() error {
 		temporary.Close()
 		return err
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}

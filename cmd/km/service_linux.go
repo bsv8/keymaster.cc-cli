@@ -107,10 +107,6 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -426,12 +422,12 @@ func activateUnitAfterInstall(layoutHasInit, layoutHasWallet bool, target, dataD
 		return exitOK
 	}
 	if layoutHasWallet {
-		fmt.Println("检测到旧版或半套数据，请先完成迁移或修复再启用服务：")
-		fmt.Printf("  sudo -u km %s init --data-dir %s\n", target, dataDir)
+		fmt.Println("检测到旧版或半套数据（存在半套或损坏文件），请从备份恢复，或清空目录后用浏览器重新初始化再启用服务。")
+		fmt.Printf("  sudo -u km %s daemon --data-dir %s\n", target, dataDir)
 		return exitOK
 	}
-	fmt.Println("尚未初始化，请先完成指定目录的初始化再启用服务：")
-	fmt.Printf("  sudo -u km %s init --data-dir %s\n", target, dataDir)
+	fmt.Println("尚未初始化：先启动后台再用浏览器完成初始化，然后启用服务：")
+	fmt.Printf("  sudo -u km %s daemon --data-dir %s\n", target, dataDir)
 	return exitOK
 }
 

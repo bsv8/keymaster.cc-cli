@@ -58,7 +58,10 @@ const (
 // Options configures one daemonrun execution.
 type Options struct {
 	DataDir string
-	Tray    TrayMode
+	// Port overrides the listen port for this run only (0 = settings/default).
+	// The file value stays authoritative; the override is never persisted.
+	Port int
+	Tray TrayMode
 	// Logf receives lifecycle diagnostics (stderr in practice).
 	Logf func(format string, args ...any)
 	// ExitCodeOnSignal is returned after an orderly shutdown triggered by
@@ -135,15 +138,10 @@ func (c *Controller) runOne(ctx context.Context, sighup <-chan os.Signal) (int, 
 		c.opts.Logf("km: %v", err)
 		return exitError, false
 	}
-	if !layout.HasInitMarkers() {
-		if layout.HasAnyWallet() {
-			c.opts.Logf("km: 数据不完整或为旧版，请先运行 km init（迁移或修复）")
-		} else {
-			c.opts.Logf("km: 尚未初始化，请先运行 km init")
-		}
-		return exitError, false
-	}
-	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir})
+
+	// 全新目录（无初始化标记、无钱包材料）允许启动：只 serve Web 与最小
+	// 状态面，初始化在浏览器完成（新建/导入 KeyHold，网络最后选择）。
+	d, err := daemon.Open(daemon.Options{DataDir: layout.Dir, PortOverride: c.opts.Port})
 	if err != nil {
 		if errors.Is(err, dlock.ErrActive) {
 			c.opts.Logf("km: 数据目录已有后台在运行")
@@ -163,7 +161,12 @@ func (c *Controller) runOne(ctx context.Context, sighup <-chan os.Signal) (int, 
 		_ = d.Close()
 		return exitError, false
 	}
-	c.opts.Logf("km 后台已启动（锁定状态，Web Admin: %s）: http://%s/ 数据目录: %s", "开", addr, layout.Dir)
+	c.opts.Logf("km 后台已启动（Web Admin: %s）: http://%s/ 数据目录: %s", "开", addr, layout.Dir)
+	if d.State() == daemon.StateUninitialized {
+		c.opts.Logf("km: 尚未初始化，请用浏览器打开上面地址完成初始化（新建/导入钱包）")
+	} else {
+		c.opts.Logf("km: 已锁定，解锁后可用（锁定状态启动）")
+	}
 
 	c.maybeStartTray()
 	watcher := c.startStatusWatcher(d, addr)

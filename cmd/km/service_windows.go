@@ -229,7 +229,7 @@ func serviceInstall(globalDataDir string, args []string) int {
 		return exitError
 	}
 	_ = exec.Command("sc.exe", "description", kmServiceName, "Keymaster CLI daemon (locked start)").Run()
-	fmt.Printf("已安装 Windows 服务 %q: %s（程序、钱包、配置和业务数据保留；需先 km init 初始化）\n", kmServiceName, binPath)
+	fmt.Printf("已安装 Windows 服务 %q: %s（程序、钱包、配置和业务数据保留；需先启动后台并用浏览器完成初始化）\n", kmServiceName, binPath)
 	fmt.Printf("数据目录: %s\n", dataDir)
 	return exitOK
 }

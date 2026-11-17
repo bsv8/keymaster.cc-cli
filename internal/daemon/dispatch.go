@@ -58,9 +58,15 @@ func decodeStrict(raw json.RawMessage, v any) error {
 	return dec.Decode(v)
 }
 
+func (d *Daemon) isInitialized() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.store != nil
+}
+
 func (d *Daemon) needInit() *kmapi.ErrorDetail {
-	if d.store == nil {
-		return errDetail(kmapi.ErrNotInitialized, "尚未初始化，请先运行 km init")
+	if !d.isInitialized() {
+		return errDetail(kmapi.ErrNotInitialized, "尚未初始化，请先启动 km daemon 并用浏览器完成初始化")
 	}
 	return nil
 }
@@ -106,6 +112,16 @@ func (d *Daemon) Dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, nil, &kmapi.ErrorDetail{Code: per.Code, Message: per.Message}
 		}
 		return nil, nil, errDetail(kmapi.ErrBadRequest, "未知方法")
+	}
+
+	// Before initialization only bootstrap commands and state observation are
+	// allowed. Keep this gate shared by WS and in-process calls, rather than
+	// relying on every business handler to remember a nil-store check.
+	if method != kmapi.MethodStatusGet && method != kmapi.MethodWalletCreate &&
+		method != kmapi.MethodWalletImport && method != kmapi.MethodEventsSubscribe {
+		if e := d.needInit(); e != nil {
+			return nil, nil, e
+		}
 	}
 
 	result, err := d.plugins.Call(ctx, apiCapability(method), apiRequest{params: params, attachments: attachments})
@@ -744,9 +760,6 @@ func (d *Daemon) opTasksCancel(ctx context.Context, p kmapi.TaskCancelRequest) (
 }
 
 func (d *Daemon) opEventsSubscribe(ctx context.Context, p kmapi.EventsSubscribeRequest) (any, *kmapi.ErrorDetail) {
-	if e := d.needInit(); e != nil {
-		return nil, e
-	}
 	topics := p.Topics
 	for _, t := range topics {
 		if !isKnownTopic(t) {

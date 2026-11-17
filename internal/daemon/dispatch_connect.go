@@ -286,7 +286,7 @@ func (d *Daemon) validateConnectAuth(authorizationID, origin string) (connect.Au
 	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
 	}
-	if d.store == nil {
+	if !d.isInitialized() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	info, _, err := d.store.Snapshot()
@@ -354,7 +354,7 @@ func (d *Daemon) lookupValidAuth(authorizationID, origin string) (connect.Auth, 
 	if a.Generation == "" || a.Generation != d.connectMgr.Generation() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
 	}
-	if d.store == nil {
+	if !d.isInitialized() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	info, _, err := d.store.Snapshot()
@@ -750,7 +750,7 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	if canonical != rec.Origin {
 		return nil, nil, errDetail(kmapi.ErrBadRequest, "来源不匹配")
 	}
-	if d.store == nil {
+	if !d.isInitialized() {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	if d.isStopping() {
@@ -859,7 +859,7 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 	case a.Method == "cipher.encrypt" || a.Method == "cipher.decrypt":
 		return d.execCipherApproved(ctx, a)
 	case a.Method == "connect.login" || a.Method == "connect.resume":
-		if d.store == nil {
+		if !d.isInitialized() {
 			return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 		}
 		if d.isStopping() {
@@ -948,7 +948,7 @@ func toInt64(v any) (int64, bool) {
 }
 
 func (d *Daemon) execConnectCipher(ctx context.Context, auth connect.Auth, method string, params map[string]any, attachments map[string][]byte, origin string) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	if d.store == nil {
+	if !d.isInitialized() {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	if d.isStopping() {

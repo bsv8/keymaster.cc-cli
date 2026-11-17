@@ -288,7 +288,7 @@ func paymentResultFromRecord(r connect.PaymentRecord) map[string]any {
 // opConnectPaymentPay 实现 payment.pay：幂等落库 → 冻结输入和保存预览 → 审批 → 提交。
 // 首次调用冻结并创建审批返回 approvalId；批准后经 approvalId 认领执行原计划，不重新选币。
 func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, params map[string]any, origin, requestID string) (any, map[string][]byte, *kmapi.ErrorDetail) {
-	if d.store == nil {
+	if !d.isInitialized() {
 		return nil, nil, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	if d.isStopping() {
@@ -752,7 +752,7 @@ func (d *Daemon) validatePaymentAuth(rec connect.PaymentRecord, approval connect
 	if a.Generation != rec.Generation {
 		return connect.Auth{}, errDetail(kmapi.ErrNotFound, "授权已过期，请重新登录")
 	}
-	if d.store == nil {
+	if !d.isInitialized() {
 		return connect.Auth{}, errDetail(kmapi.ErrNotInitialized, "尚未初始化")
 	}
 	info, _, err := d.store.Snapshot()

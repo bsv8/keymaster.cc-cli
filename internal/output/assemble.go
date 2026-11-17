@@ -369,10 +369,6 @@ func writeAssembled(path string, payloads [][]byte) error {
 			return fmt.Errorf("output: write temporary file: %w", err)
 		}
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}

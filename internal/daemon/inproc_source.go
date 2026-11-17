@@ -11,9 +11,6 @@ func (d *Daemon) SubscribeEvents(topics []string) (kmapi.SnapshotEvent, <-chan k
 			return kmapi.SnapshotEvent{}, nil, nil, &kmapi.ErrorDetail{Code: kmapi.ErrBadRequest, Message: "未知订阅主题"}
 		}
 	}
-	if d.store == nil {
-		return kmapi.SnapshotEvent{}, nil, nil, &kmapi.ErrorDetail{Code: kmapi.ErrNotInitialized, Message: "尚未初始化"}
-	}
 	sub := d.events.Subscribe(topics)
 	snap, err := d.buildSnapshot(topics)
 	if err != nil {
