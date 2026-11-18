@@ -436,7 +436,10 @@ async function handleRequest(req, recv) {
       } else if (res) {
         // launch 直接返回授权结果（发起即授权，不经审批），只绑定本次连接；
         // 登录/恢复的心跳恢复同样直接回执。旧连接不得借新连接的授权执行业务。
-        if (req.method === 'connect.launch' && res.authorizationId) { authzOf(recv).set(origin, res.authorizationId); appKeys.set(recv, req.params?.publicationProof?.publication?.appPublicKeyHex); }
+        // 已验证 App 公钥由后台随回执提供，用于维护本地视图状态；
+        // 内部字段在发给 App 的公开回执前移除。
+        if (req.method === 'connect.launch' && res.authorizationId) { authzOf(recv).set(origin, res.authorizationId); appKeys.set(recv, res.appPublicKeyHex); }
+        delete res.appPublicKeyHex;
         recv.replyResult(req, res);
       }
       return;
@@ -652,10 +655,14 @@ async function claimPendingApproval(approvalId, entry) {
   pendingApproval.delete(approvalId);
   try {
     traceApproval("reply.start", { method: entry.method });
+    // 已验证 App 公钥由后台随回执提供，用于维护本地视图状态；
+    // 内部字段在发给 App 的公开回执前移除。
+    const verifiedAppKey = exec.result?.appPublicKeyHex;
+    delete exec.result?.appPublicKeyHex;
     entry.receiver.replyResult(entry.ctx, toSdkResult(entry.method, exec.result, exec.binaries || {}));
     if (entry.method === 'connect.login' || entry.method === 'connect.launch') {
       const authorizationId = exec.result?.authorizationId;
-      if (authorizationId) { authzOf(entry.receiver).set(entry.origin, authorizationId); appKeys.set(entry.receiver, entry.ctx.params?.publicationProof?.publication?.appPublicKeyHex); }
+      if (authorizationId) { authzOf(entry.receiver).set(entry.origin, authorizationId); appKeys.set(entry.receiver, verifiedAppKey); }
     }
   } catch (error) {
     traceApproval("reply.failed", { method: entry.method, code: error?.code, name: error?.name });

@@ -21,6 +21,8 @@ import (
 
 type Download func(context.Context, string) ([]byte, error)
 type Record struct {
+	PublicationID    string                    `json:"-"`
+	AppVersion       string                    `json:"appVersion"`
 	IconURL          string                    `json:"iconUrl,omitempty"`
 	Display          apppublication.AppDisplay `json:"display"`
 	DeploymentID     string                    `json:"deploymentId"`
@@ -177,7 +179,12 @@ func (m *Manager) install(ctx context.Context, seed string) (Record, error) {
 			return Record{}, closeErr
 		}
 	}
-	record := Record{Display: payload.FilesDisplay(), DeploymentID: seed, AppPublicKeyHex: payload.AppPublicKeyHex, Indexseedhashhex: seed, Status: "installed"}
+	publicationID, err := apppublication.PublicationID(payload)
+	if err != nil {
+		return Record{}, err
+	}
+
+	record := Record{PublicationID: publicationID, AppVersion: payload.AppVersion, Display: payload.FilesDisplay(), DeploymentID: seed, AppPublicKeyHex: payload.AppPublicKeyHex, Indexseedhashhex: seed, Status: "installed"}
 	raw, _ := json.Marshal(record)
 	if err = os.WriteFile(filepath.Join(candidate, "record.json"), raw, 0400); err != nil {
 		return Record{}, err
@@ -254,7 +261,7 @@ func (m *Manager) read(id string) (Record, map[string]file, error) {
 	if err != nil {
 		return record, nil, err
 	}
-	if seed != id || payload.AppPublicKeyHex != record.AppPublicKeyHex || payload.FilesDisplay() != record.Display {
+	if seed != id || payload.AppVersion != record.AppVersion || payload.AppPublicKeyHex != record.AppPublicKeyHex || payload.FilesDisplay() != record.Display {
 		return record, nil, fmt.Errorf("deployment identity mismatch")
 	}
 	files := map[string]file{"index.html": {entry, "text/html"}}
@@ -289,6 +296,11 @@ func (m *Manager) read(id string) (Record, map[string]file, error) {
 	if err != nil {
 		return record, nil, err
 	}
+	record.PublicationID, err = apppublication.PublicationID(payload)
+	if err != nil {
+		return record, nil, err
+	}
+
 	record.Status = "installed"
 	record.Origin = ""
 	record.URL = ""

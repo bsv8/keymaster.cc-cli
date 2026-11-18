@@ -475,7 +475,7 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 			b, _ := json.Marshal(p.Params)
 			_ = json.Unmarshal(b, &paramsMap)
 		}
-		appHex, deploymentID, identityErr := d.verifiedConnectIdentity(paramsMap, canonical)
+		appHex, deploymentID, _, _, identityErr := d.verifiedConnectSource(paramsMap, canonical)
 		if identityErr != nil {
 			return nil, nil, errDetail(kmapi.ErrOriginRejected, identityErr.Error())
 		}
@@ -657,7 +657,8 @@ func (d *Daemon) opConnectLaunchIssue(ctx context.Context, p kmapi.ConnectLaunch
 
 // execConnectLaunch 消费钱包签发的一次性令牌并直接签发授权。
 // 用户在钱包点击启动即视为同意：不进入审批队列，不弹第二次登录审批。
-// 令牌先消费再校验，重放、错误来源、身份或权限不匹配、过期或运行代际失效一律拒绝。
+// 令牌先原子消费再校验，重放与并发双发一律只生效一次；消费后的任何失败
+// （身份、目录或授权写入）都补偿归还令牌，调用方可凭同一令牌重试。
 // 授权的身份与许可范围以签发时绑定的为准，消费 proof 仅作一致性核对。
 func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecRequest) (any, map[string][]byte, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
@@ -724,8 +725,8 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	// 授权，显式退出按 authorizationId 撤销本连接，整来源断开仍走
 	// connect.auth.revoke（按 App 公钥全撤）。
 	// 启动消费 proof 仅作一致性核对：提交的证明须与令牌绑定的来源一致，
-	// 不一致直接拒绝；身份必须来自有效证明或本地可信部署登记。
-	launchAppHex, deploymentID, identityErr := d.verifiedConnectIdentity(paramsMap, canonical)
+	// 不一致直接拒绝；身份、展示、版本与目录入口合用这一条已验证结果。
+	launchAppHex, deploymentID, publication, display, identityErr := d.verifiedConnectSource(paramsMap, canonical)
 	if identityErr != nil {
 		return nil, nil, errDetail(kmapi.ErrOriginRejected, identityErr.Error())
 	}
@@ -741,29 +742,21 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 		Generation:      d.connectMgr.Generation(),
 		AppPublicKeyHex: launchAppHex, DeploymentID: deploymentID, DeploymentGeneration: rec.DeploymentGeneration,
 	}
-	display, displayErr := d.verifiedConnectDisplay(paramsMap, canonical)
-	if displayErr != nil {
-		return nil, nil, errDetail(kmapi.ErrOriginRejected, displayErr.Error())
+	if err := d.connectMgr.Directory().Resolve("", publication); err != nil {
+		return nil, nil, errDetail(kmapi.ErrOriginRejected, err.Error())
 	}
 	if err := d.connectMgr.Directory().RememberDisplay(launchAppHex, display); err != nil {
 		return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
 	}
 	// 目录事务先提交；失败时尚未保存授权或登记活动连接。
 	if rec.URL != "" {
-		if err := d.connectMgr.Directory().ResolveURL(rec.URL, launchAppHex, display); err != nil {
+		if err := d.connectMgr.Directory().ResolveURL(rec.URL, publication, display); err != nil {
 			return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
 		}
 	}
-	var launchSaveErr error
-	d.connectMgr.SerializedAuthChange(func() {
-		launchSaveErr = d.connectMgr.AuthStore().Save(savedAuth)
-		if launchSaveErr == nil && d.connectMgr.Connections() != nil {
-			if !d.registerConnectConnection(ctx, savedAuth) {
-				launchSaveErr = context.Canceled
-			}
-		}
-	})
-	if launchSaveErr != nil {
+	// 授权保存与传输绑定在同一关闭锁内完成：传输已关闭不保存，已保存
+	// 必已绑定，不留下游离授权；失败时归还令牌供重试。
+	if err := d.saveConnectAuth(ctx, savedAuth); err != nil {
 		return nil, nil, errDetail(kmapi.ErrInternal, "保存授权失败")
 	}
 	appKey := launchAppHex
@@ -773,8 +766,11 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	})
 
 	d.publishConnect()
+	// appPublicKeyHex 是给 CLI Web 宿主维护本地视图状态的内部字段，
+	// 宿主在把公开回执发给 App 前移除。
 	return map[string]any{
 		"authorizationId": authorizationID,
+		"appPublicKeyHex": launchAppHex,
 		"networkIdentity": map[string]any{
 			"bsvNetwork": info.BsvNetwork, "publicKeyHex": walletPub,
 		},
@@ -825,8 +821,8 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 		d.mu.Unlock()
 		// 同一来源允许多个独立授权并存（各连接独立授权、独立撤销）：
 		// 重新登录只新增本连接授权，不撤销该来源既有授权、不关闭既有连接。
-		// 建连时验证发布身份：审批参数可能携带 SDK 提交的 URL 来源证明；
-		// 验签并核对可信来源一致后记入授权快照。证明无效直接拒绝，不创建授权；
+		// 建连时验证发布身份：审批参数可能携带 SDK 提交的发布记录字符串；
+		// 解码验签并核对可信来源一致后记入授权快照。证明无效直接拒绝，不创建授权；
 		// 缺少有效 URL 证明或可信部署登记时拒绝创建正式授权。
 		loginAppHex := a.AppPublicKeyHex
 		if connect.ApplicationKey(loginAppHex) == "" {
@@ -838,9 +834,16 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 				return nil, nil, errDetail(kmapi.ErrOriginRejected, "deployment no longer active")
 			}
 		}
-		display, displayErr := d.verifiedConnectDisplay(a.Params, a.Origin)
-		if displayErr != nil {
+		// 认领复核：已验证发布的公钥必须与审批保存的身份一致。
+		_, _, publication, display, materialErr := d.verifiedConnectSource(a.Params, a.Origin)
+		if materialErr != nil {
 			return nil, nil, errDetail(kmapi.ErrOriginRejected, "应用资料验证失败")
+		}
+		if publication.AppPublicKeyHex != loginAppHex {
+			return nil, nil, errDetail(kmapi.ErrOriginRejected, "verified App identity differs from approval")
+		}
+		if err := d.connectMgr.Directory().Resolve("", publication); err != nil {
+			return nil, nil, errDetail(kmapi.ErrOriginRejected, err.Error())
 		}
 		if err := d.connectMgr.Directory().RememberDisplay(loginAppHex, display); err != nil {
 			return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
@@ -851,20 +854,16 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 			Generation:      d.connectMgr.Generation(),
 			AppPublicKeyHex: loginAppHex, DeploymentID: a.DeploymentID, DeploymentGeneration: a.DeploymentGeneration,
 		}
-		var loginSaveErr error
-		d.connectMgr.SerializedAuthChange(func() {
-			loginSaveErr = d.connectMgr.AuthStore().Save(savedLoginAuth)
-			if loginSaveErr == nil && d.connectMgr.Connections() != nil {
-				if !d.registerConnectConnection(ctx, savedLoginAuth) {
-					loginSaveErr = context.Canceled
-				}
-			}
-		})
-		if loginSaveErr != nil {
+		// 授权保存与传输绑定在同一关闭锁内完成：传输已关闭不保存，已保存
+		// 必已绑定，不留下游离授权。
+		if err := d.saveConnectAuth(ctx, savedLoginAuth); err != nil {
 			return nil, nil, errDetail(kmapi.ErrInternal, "保存授权失败")
 		}
+		// appPublicKeyHex 是给 CLI Web 宿主维护本地视图状态的内部字段，
+		// 宿主在把公开回执发给 App 前移除。
 		return map[string]any{
 			"authorizationId": authorizationID,
+			"appPublicKeyHex": loginAppHex,
 			"networkIdentity": map[string]any{
 				"bsvNetwork": info.BsvNetwork, "publicKeyHex": walletPub,
 			},

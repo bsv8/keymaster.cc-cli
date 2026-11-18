@@ -20,13 +20,12 @@ import (
 )
 
 const (
-	PublicationMeta           = "keymaster-app"
-	PublicationDomain         = "keymaster.app-publication.v1"
-	MaxPublicationRecordBytes = 128 * 1024
-	MaxHTMLBytes              = 16 * 1024 * 1024
-	MaxFilesEntries           = 100000
-	MaxManifestPathLength     = 512
-	FileBlockSize             = 256 * 1024
+	PublicationMeta       = "keymaster-app"
+	PublicationDomain     = "keymaster.app-publication.v1"
+	MaxHTMLBytes          = 16 * 1024 * 1024
+	MaxFilesEntries       = 100000
+	MaxManifestPathLength = 512
+	FileBlockSize         = 256 * 1024
 )
 
 var (
@@ -51,6 +50,7 @@ type FilesChannel struct {
 	Files            []AppFileEntry `json:"files"`
 }
 type Publication struct {
+	AppVersion      string        `json:"appVersion"`
 	Version         int           `json:"version"`
 	Kind            string        `json:"kind"`
 	AppPublicKeyHex string        `json:"appPublicKeyHex"`
@@ -279,7 +279,7 @@ func parsePublication(value any) (*Publication, error) {
 		return nil, fmt.Errorf("publication object required")
 	}
 	kind, _ := m["kind"].(string)
-	keys := []string{"version", "kind", "appPublicKeyHex", "name", "description"}
+	keys := []string{"version", "appVersion", "kind", "appPublicKeyHex", "name", "description"}
 	switch kind {
 	case "url":
 		keys = append(keys, "url")
@@ -300,6 +300,9 @@ func parsePublication(value any) (*Publication, error) {
 	var p Publication
 	if e = json.Unmarshal(raw, &p); e != nil {
 		return nil, e
+	}
+	if err := ValidateAppVersion(p.AppVersion); err != nil {
+		return nil, err
 	}
 	if p.Version != 1 {
 		return nil, fmt.Errorf("version invalid")
@@ -367,9 +370,6 @@ func parsePublication(value any) (*Publication, error) {
 	return &p, nil
 }
 func DecodePublication(content string) (*PublicationProof, error) {
-	if len(content) > MaxPublicationRecordBytes {
-		return nil, fmt.Errorf("publication record too large")
-	}
 	parts := strings.Split(content, ".")
 	if len(parts) != 2 || validateSigHex(parts[1]) != nil {
 		return nil, fmt.Errorf("publication encoding invalid")
@@ -398,6 +398,17 @@ func DecodePublication(content string) (*PublicationProof, error) {
 	}
 	return &PublicationProof{Publication: p, SignatureHex: parts[1]}, nil
 }
+
+// PublicationID identifies the complete verified publication across its channels.
+func PublicationID(p *Publication) (string, error) {
+	canonical, err := CanonicalPublication(p)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(digest[:]), nil
+}
+
 func CanonicalPublication(p *Publication) (string, error) {
 	raw, e := json.Marshal(p)
 	if e != nil {
@@ -562,37 +573,6 @@ func VerifyEntryBytes(b []byte) (*Publication, []byte, []byte, string, error) {
 	return p, a, seed, hash, nil
 }
 
-// DecodeProofJSON validates every wrapper and publication field before typed decoding.
-func DecodeProofJSON(raw []byte) (*PublicationProof, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var value any
-	if err := dec.Decode(&value); err != nil {
-		return nil, err
-	}
-	wrapper, err := exact(value, "publication", "signatureHex")
-	if err != nil {
-		return nil, err
-	}
-	p, err := parsePublication(wrapper["publication"])
-	if err != nil {
-		return nil, err
-	}
-	sig, ok := wrapper["signatureHex"].(string)
-	if !ok || validateSigHex(sig) != nil {
-		return nil, fmt.Errorf("invalid publication signature")
-	}
-	proof := &PublicationProof{Publication: p, SignatureHex: sig}
-	canonical, err := CanonicalPublication(p)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = DecodePublication(base64.RawURLEncoding.EncodeToString([]byte(canonical)) + "." + sig); err != nil {
-		return nil, err
-	}
-	return proof, nil
-}
-
 func pathLess(a, b string) bool {
 	left, right := utf16.Encode([]rune(a)), utf16.Encode([]rune(b))
 	for i := 0; i < len(left) && i < len(right); i++ {
@@ -601,4 +581,32 @@ func pathLess(a, b string) bool {
 		}
 	}
 	return len(left) < len(right)
+}
+
+// ValidateAppVersion 校验大、中、小三段非负整数，不允许前导零或后缀。
+func ValidateAppVersion(value string) error {
+	if !regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(value) {
+		return fmt.Errorf("invalid appVersion")
+	}
+	return nil
+}
+
+// CompareAppVersions 按整数大小比较，不依赖机器整数宽度。
+func CompareAppVersions(a, b string) int {
+	left, right := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		if len(left[i]) < len(right[i]) {
+			return -1
+		}
+		if len(left[i]) > len(right[i]) {
+			return 1
+		}
+		if left[i] < right[i] {
+			return -1
+		}
+		if left[i] > right[i] {
+			return 1
+		}
+	}
+	return 0
 }

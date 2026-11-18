@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
 	"github.com/bsv8/keymaster.cc-cli/apppublication"
@@ -106,10 +105,13 @@ func (d *Daemon) opConnectDeploymentInstall(ctx context.Context, p kmapi.Connect
 	if err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
-	if err := d.connectMgr.Directory().ResolveSeed(r.Indexseedhashhex, r.AppPublicKeyHex, r.Display); err != nil {
+	if err := d.connectMgr.Directory().ResolveSeed(r.Indexseedhashhex, r.AppPublicKeyHex, r.AppVersion, r.PublicationID, r.Display); err != nil {
 		return nil, errDetail(kmapi.ErrInternal, err.Error())
 	}
-	return kmapi.ConnectDeploymentInstallResponse{DeploymentID: r.DeploymentID, AppPublicKeyHex: r.AppPublicKeyHex, Indexseedhashhex: r.Indexseedhashhex}, nil
+	return struct {
+		kmapi.ConnectDeploymentInstallResponse
+		AppVersion string `json:"appVersion"`
+	}{kmapi.ConnectDeploymentInstallResponse{DeploymentID: r.DeploymentID, AppPublicKeyHex: r.AppPublicKeyHex, Indexseedhashhex: r.Indexseedhashhex}, r.AppVersion}, nil
 }
 func (d *Daemon) opConnectDeploymentStart(ctx context.Context, p kmapi.ConnectDeploymentStartRequest) (any, *kmapi.ErrorDetail) {
 	if e := d.deploymentAccess(ctx); e != nil {
@@ -119,7 +121,10 @@ func (d *Daemon) opConnectDeploymentStart(ctx context.Context, p kmapi.ConnectDe
 	if err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
-	return kmapi.ConnectDeploymentStartResponse{DeploymentID: r.DeploymentID, Origin: r.Origin, URL: r.URL, AppPublicKeyHex: r.AppPublicKeyHex, Indexseedhashhex: r.Indexseedhashhex}, nil
+	return struct {
+		kmapi.ConnectDeploymentStartResponse
+		AppVersion string `json:"appVersion"`
+	}{kmapi.ConnectDeploymentStartResponse{DeploymentID: r.DeploymentID, Origin: r.Origin, URL: r.URL, AppPublicKeyHex: r.AppPublicKeyHex, Indexseedhashhex: r.Indexseedhashhex}, r.AppVersion}, nil
 }
 func (d *Daemon) opConnectDeploymentStop(ctx context.Context, p kmapi.ConnectDeploymentStopRequest) (any, *kmapi.ErrorDetail) {
 	if e := d.deploymentAccess(ctx); e != nil {
@@ -141,22 +146,30 @@ func (d *Daemon) opConnectDeploymentList(ctx context.Context) (any, *kmapi.Error
 	return map[string]any{"deployments": records}, nil
 }
 
-// verifiedConnectIdentity 只信任当前监听登记或有效 URL proof，绝不采用页面自报 Files 身份。
-func (d *Daemon) verifiedConnectIdentity(params map[string]any, origin string) (string, string, error) {
+// verifiedConnectSource 只信任当前监听登记或有效 URL 发布记录，绝不采用页面自报 Files 身份。
+// 同一处理阶段解码一次并复用结果：身份、版本、展示与目录入口共用这份已验证发布。
+func (d *Daemon) verifiedConnectSource(params map[string]any, origin string) (string, string, connect.DirectoryEntry, apppublication.AppDisplay, error) {
 	if r, ok := d.deployments.Identity(origin); ok {
-		return r.AppPublicKeyHex, r.DeploymentID, nil
+		entry := connect.DirectoryEntry{PublicationID: r.PublicationID, AppVersion: r.AppVersion, AppPublicKeyHex: r.AppPublicKeyHex, Name: r.Display.Name, Description: r.Display.Description, Icon: r.Display.Icon, URLs: []connect.DirectoryURL{}, Files: []connect.DirectoryFiles{{Indexseedhashhex: r.Indexseedhashhex, Display: r.Display}}}
+		return r.AppPublicKeyHex, r.DeploymentID, entry, r.Display, nil
 	}
 	if d.deployments.WasDeploymentOrigin(origin) {
-		return "", "", fmt.Errorf("Files deployment origin is no longer active")
+		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, fmt.Errorf("Files deployment origin is no longer active")
 	}
-	key, present, err := connect.VerifyLoginPublicationProof(params, origin)
+	p, present, err := connect.VerifiedPublication(params, origin)
 	if err != nil {
-		return "", "", err
+		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, err
 	}
 	if !present {
-		return "", "", fmt.Errorf("verified App identity is required")
+		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, fmt.Errorf("verified App identity is required")
 	}
-	return key, "", nil
+	publicationID, err := apppublication.PublicationID(p)
+	if err != nil {
+		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, err
+	}
+
+	entry := connect.DirectoryEntry{PublicationID: publicationID, AppVersion: p.AppVersion, AppPublicKeyHex: p.AppPublicKeyHex, Name: p.Name, Description: p.Description, Icon: p.Display().Icon, URLs: []connect.DirectoryURL{{URL: p.URL.Address, Origin: origin, Display: p.Display()}}, Files: []connect.DirectoryFiles{}}
+	return p.AppPublicKeyHex, "", entry, p.Display(), nil
 }
 
 func (d *Daemon) deploymentGeneration(origin string) string {
@@ -164,23 +177,4 @@ func (d *Daemon) deploymentGeneration(origin string) string {
 		return r.Generation
 	}
 	return ""
-}
-
-func (d *Daemon) verifiedConnectDisplay(params map[string]any, origin string) (apppublication.AppDisplay, error) {
-	if r, ok := d.deployments.Identity(origin); ok {
-		return r.Display, nil
-	}
-	raw, err := json.Marshal(params["publicationProof"])
-	if err != nil {
-		return apppublication.AppDisplay{}, err
-	}
-	proof, err := apppublication.DecodeProofJSON(raw)
-	if err != nil {
-		return apppublication.AppDisplay{}, err
-	}
-	p, err := apppublication.VerifyPublication(proof, origin)
-	if err != nil {
-		return apppublication.AppDisplay{}, err
-	}
-	return p.Display(), nil
 }

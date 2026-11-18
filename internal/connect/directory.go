@@ -8,6 +8,7 @@ import (
 	whatwg "github.com/nlnwa/whatwg-url/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -15,12 +16,14 @@ import (
 const DirectoryTTL = int64(600000)
 
 type DirectoryURL struct {
-	Display    apppublication.AppDisplay `json:"display"`
-	URL        string                    `json:"url"`
-	Origin     string                    `json:"origin"`
-	VerifiedAt int64                     `json:"verifiedAt,omitempty"`
+	PublicationID string                    `json:"publicationId,omitempty"`
+	Display       apppublication.AppDisplay `json:"display"`
+	URL           string                    `json:"url"`
+	Origin        string                    `json:"origin"`
+	VerifiedAt    int64                     `json:"verifiedAt,omitempty"`
 }
 type DirectoryFiles struct {
+	PublicationID    string                    `json:"publicationId,omitempty"`
 	Display          apppublication.AppDisplay `json:"display"`
 	Indexseedhashhex string                    `json:"indexseedhashhex"`
 	VerifiedAt       int64                     `json:"verifiedAt,omitempty"`
@@ -30,6 +33,8 @@ type DirectorySelection struct {
 	Indexseedhashhex string `json:"indexseedhashhex,omitempty"`
 }
 type DirectoryEntry struct {
+	PublicationID   string              `json:"publicationId,omitempty"`
+	AppVersion      string              `json:"appVersion"`
 	AppPublicKeyHex string              `json:"appPublicKeyHex"`
 	Name            string              `json:"name,omitempty"`
 	Description     string              `json:"description,omitempty"`
@@ -104,6 +109,12 @@ func ValidateDirectorySnapshot(entries []DirectoryEntry) error {
 	}
 	seen := map[string]bool{}
 	for i, e := range entries {
+		if err := apppublication.ValidateAppVersion(e.AppVersion); err != nil {
+			return err
+		}
+		if len(e.URLs) > 1 || len(e.Files) > 1 {
+			return fmt.Errorf("multiple current publication channels")
+		}
 		if _, err := apppublication.ValidateAppPubKey(e.AppPublicKeyHex); err != nil {
 			return err
 		}
@@ -117,6 +128,9 @@ func ValidateDirectorySnapshot(entries []DirectoryEntry) error {
 		urls := map[string]bool{}
 		seeds := map[string]bool{}
 		for j, u := range e.URLs {
+			if u.PublicationID != "" && !isSeed(u.PublicationID) {
+				return fmt.Errorf("invalid URL publication digest")
+			}
 			if _, err := apppublication.ParseDisplay(apppublication.DisplayMap(u.Display)); err != nil {
 				return err
 			}
@@ -128,6 +142,9 @@ func ValidateDirectorySnapshot(entries []DirectoryEntry) error {
 			entries[i].URLs[j].URL = full
 		}
 		for _, f := range e.Files {
+			if f.PublicationID != "" && !isSeed(f.PublicationID) {
+				return fmt.Errorf("invalid Files publication digest")
+			}
 			if _, err := apppublication.ParseDisplay(apppublication.DisplayMap(f.Display)); err != nil {
 				return err
 			}
@@ -323,9 +340,50 @@ func (s *DirectoryStore) Resolve(id string, e DirectoryEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.transactLocked(func(f *directoryFile) error {
-		if old, ok := f.Local[e.AppPublicKeyHex]; ok {
-			e = mergeDirectory(old, e)
+		var market DirectoryEntry
+		for _, listed := range f.Market.Entries {
+			if listed.AppPublicKeyHex != e.AppPublicKeyHex {
+				continue
+			}
+			if apppublication.CompareAppVersions(e.AppVersion, listed.AppVersion) < 0 {
+				return fmt.Errorf("older appVersion rejected")
+			}
+			market = listed
+			break
 		}
+		key := e.AppPublicKeyHex
+		e.Selected = nil
+		if old, ok := f.Local[key]; ok {
+			if apppublication.CompareAppVersions(e.AppVersion, old.AppVersion) < 0 {
+				return fmt.Errorf("older appVersion rejected")
+			}
+			// Independent channel checks may fill in another channel only when
+			// both attest to the identical signed publication.
+			if e.PublicationID != "" && e.PublicationID == old.PublicationID {
+				if len(e.URLs) == 0 {
+					e.URLs = old.URLs
+				}
+				if len(e.Files) == 0 {
+					e.Files = old.Files
+				}
+			}
+		}
+		if e.PublicationID != "" && market.AppVersion == e.AppVersion {
+			for _, channel := range market.URLs {
+				if len(e.URLs) == 0 && channel.PublicationID == e.PublicationID {
+					e.URLs = []DirectoryURL{channel}
+				}
+			}
+			for _, channel := range market.Files {
+				if len(e.Files) == 0 && channel.PublicationID == e.PublicationID {
+					e.Files = []DirectoryFiles{channel}
+				}
+			}
+		}
+		if selected, ok := f.Selection[key]; ok && !directoryHasSelection(e, selected) {
+			delete(f.Selection, key)
+		}
+
 		e.Local = true
 		f.Local[e.AppPublicKeyHex] = e
 		if id != "" {
@@ -334,42 +392,28 @@ func (s *DirectoryStore) Resolve(id string, e DirectoryEntry) error {
 		return nil
 	})
 }
+func directoryHasSelection(entry DirectoryEntry, sel DirectorySelection) bool {
+	if (sel.URL == "") == (sel.Indexseedhashhex == "") {
+		return false
+	}
+	for _, channel := range entry.URLs {
+		if sel.URL != "" && channel.URL == sel.URL {
+			return true
+		}
+	}
+	for _, channel := range entry.Files {
+		if sel.Indexseedhashhex != "" && channel.Indexseedhashhex == sel.Indexseedhashhex {
+			return true
+		}
+	}
+	return false
+}
+
 func mergeDirectory(a, b DirectoryEntry) DirectoryEntry {
-	seenURL := map[string]bool{}
-	for _, u := range a.URLs {
-		seenURL[u.URL] = true
+	if apppublication.CompareAppVersions(b.AppVersion, a.AppVersion) <= 0 {
+		return a
 	}
-	for _, u := range b.URLs {
-		for i, old := range a.URLs {
-			if old.URL == u.URL {
-				a.URLs[i] = u
-			}
-		}
-		if !seenURL[u.URL] {
-			a.URLs = append(a.URLs, u)
-			seenURL[u.URL] = true
-		}
-	}
-	seenSeed := map[string]bool{}
-	for _, f := range a.Files {
-		seenSeed[f.Indexseedhashhex] = true
-	}
-	for _, f := range b.Files {
-		if !seenSeed[f.Indexseedhashhex] {
-			a.Files = append(a.Files, f)
-			seenSeed[f.Indexseedhashhex] = true
-		}
-	}
-	if a.Name == "" {
-		a.Name = b.Name
-	}
-	if a.Description == "" {
-		a.Description = b.Description
-	}
-	if a.Icon == "" {
-		a.Icon = b.Icon
-	}
-	return a
+	return b
 }
 func (s *DirectoryStore) listLocked() []DirectoryEntry {
 	out := []DirectoryEntry{}
@@ -382,7 +426,8 @@ func (s *DirectoryStore) listLocked() []DirectoryEntry {
 		}
 		e.MarketListed = listed
 		e.Favorite = s.state.Favorites[key]
-		if selected, ok := s.state.Selection[key]; ok {
+		e.Selected = nil
+		if selected, ok := s.state.Selection[key]; ok && directoryHasSelection(e, selected) {
 			copy := selected
 			e.Selected = &copy
 		}
@@ -437,10 +482,25 @@ func (s *DirectoryStore) listLocked() []DirectoryEntry {
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Favorite && !out[j].Favorite })
 	return out
 }
+func publicDirectoryEntries(entries []DirectoryEntry) []DirectoryEntry {
+	for i := range entries {
+		entries[i].PublicationID = ""
+		entries[i].URLs = slices.Clone(entries[i].URLs)
+		for j := range entries[i].URLs {
+			entries[i].URLs[j].PublicationID = ""
+		}
+		entries[i].Files = slices.Clone(entries[i].Files)
+		for j := range entries[i].Files {
+			entries[i].Files[j].PublicationID = ""
+		}
+	}
+	return entries
+}
+
 func (s *DirectoryStore) List() []DirectoryEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.listLocked()
+	return publicDirectoryEntries(s.listLocked())
 }
 func (s *DirectoryStore) View() map[string]any {
 	s.mu.Lock()
@@ -450,7 +510,7 @@ func (s *DirectoryStore) View() map[string]any {
 		pending = append(pending, p)
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].PendingID < pending[j].PendingID })
-	out := map[string]any{"entries": s.listLocked(), "pending": pending, "knownApplications": s.state.Displays, "favorites": s.state.Favorites}
+	out := map[string]any{"entries": publicDirectoryEntries(s.listLocked()), "pending": pending, "knownApplications": s.state.Displays, "favorites": s.state.Favorites}
 	if s.loadError != nil {
 		out["marketError"] = s.loadError.Error()
 	} else if s.marketError != "" {
@@ -569,6 +629,38 @@ func (s *DirectoryStore) CompleteMarketFetch(entries []DirectoryEntry, at int64,
 	}
 	if cause == nil {
 		cause = s.transactLocked(func(f *directoryFile) error {
+			for _, incoming := range entries {
+				unchanged := false
+				for _, old := range f.Market.Entries {
+					if incoming.AppPublicKeyHex != old.AppPublicKeyHex {
+						continue
+					}
+					if apppublication.CompareAppVersions(incoming.AppVersion, old.AppVersion) < 0 {
+						return fmt.Errorf("older appVersion rejected")
+					}
+					unchanged = old.AppVersion == incoming.AppVersion &&
+						slices.Equal(old.URLs, incoming.URLs) && slices.Equal(old.Files, incoming.Files)
+					break
+				}
+				// Seeing the same market publication again does not submit it again.
+				if unchanged && f.Local[incoming.AppPublicKeyHex].PublicationID != "" {
+					continue
+				}
+
+				if sel, ok := f.Selection[incoming.AppPublicKeyHex]; ok && !directoryHasSelection(incoming, sel) {
+					delete(f.Selection, incoming.AppPublicKeyHex)
+				}
+				if old, ok := f.Local[incoming.AppPublicKeyHex]; ok {
+					if apppublication.CompareAppVersions(incoming.AppVersion, old.AppVersion) < 0 {
+						return fmt.Errorf("older appVersion rejected")
+					}
+					// Refresh the saved snapshot without clearing its local ownership.
+					updated := incoming
+					updated.Local = true
+					updated.Selected = nil
+					f.Local[incoming.AppPublicKeyHex] = updated
+				}
+			}
 			f.Market = MarketCache{Entries: entries, LastSuccessfulFetchAt: at}
 			return nil
 		})
@@ -587,7 +679,7 @@ func (s *DirectoryStore) GetCache() (MarketCache, map[string]DirectoryEntry, map
 }
 
 // ResolveURL 在钱包实际验证本次启动后才把匹配的 pending URL 归并。
-func (s *DirectoryStore) ResolveURL(url, key string, display apppublication.AppDisplay) error {
+func (s *DirectoryStore) ResolveURL(url string, publication DirectoryEntry, display apppublication.AppDisplay) error {
 	full, origin, err := CanonicalEntryURL(url)
 	if err != nil {
 		return err
@@ -601,7 +693,8 @@ func (s *DirectoryStore) ResolveURL(url, key string, display apppublication.AppD
 	}
 	s.mu.Unlock()
 	for _, p := range ids {
-		if err := s.Resolve(p.PendingID, DirectoryEntry{AppPublicKeyHex: key, Name: display.Name, Description: display.Description, Icon: display.Icon, URLs: []DirectoryURL{{URL: full, Origin: origin, Display: display}}, Files: []DirectoryFiles{}}); err != nil {
+		publication.URLs = []DirectoryURL{{URL: full, Origin: origin, Display: display}}
+		if err := s.Resolve(p.PendingID, publication); err != nil {
 			return err
 		}
 	}
@@ -609,7 +702,7 @@ func (s *DirectoryStore) ResolveURL(url, key string, display apppublication.AppD
 }
 
 // ResolveSeed 仅由安装器在整包验证完成后调用，失败下载不得认领 App 公钥。
-func (s *DirectoryStore) ResolveSeed(seed, key string, display apppublication.AppDisplay) error {
+func (s *DirectoryStore) ResolveSeed(seed, key, version, publicationID string, display apppublication.AppDisplay) error {
 	s.mu.Lock()
 	pending := []DirectoryPending{}
 	for _, p := range s.state.Pending {
@@ -619,7 +712,7 @@ func (s *DirectoryStore) ResolveSeed(seed, key string, display apppublication.Ap
 	}
 	s.mu.Unlock()
 	for _, p := range pending {
-		if err := s.Resolve(p.PendingID, DirectoryEntry{AppPublicKeyHex: key, Name: display.Name, Description: display.Description, Icon: display.Icon, URLs: []DirectoryURL{}, Files: []DirectoryFiles{{Indexseedhashhex: seed, Display: display}}}); err != nil {
+		if err := s.Resolve(p.PendingID, DirectoryEntry{PublicationID: publicationID, AppVersion: version, AppPublicKeyHex: key, Name: display.Name, Description: display.Description, Icon: display.Icon, URLs: []DirectoryURL{}, Files: []DirectoryFiles{{Indexseedhashhex: seed, Display: display}}}); err != nil {
 			return err
 		}
 	}
