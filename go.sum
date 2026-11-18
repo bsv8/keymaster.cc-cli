@@ -24,6 +24,8 @@ github.com/bsv8/KeymasterAPIProtocol v0.1.3 h1:nrWy6eDX5vxDjR6sXPSIIzFWEC5nS7s9o
 github.com/bsv8/KeymasterAPIProtocol v0.1.3/go.mod h1:U4+GXS/iLJ57/Wl6PCuVGyhUSW5zIEotJO+a7ajzJas=
 github.com/bsv8/KeymasterAPIProtocol v0.1.4 h1:GTV6R1A5Vz4uoSJ3pgIrhor0/NalGcVfBLXs0WfUvoE=
 github.com/bsv8/KeymasterAPIProtocol v0.1.4/go.mod h1:U4+GXS/iLJ57/Wl6PCuVGyhUSW5zIEotJO+a7ajzJas=
+github.com/bsv8/KeymasterAPIProtocol v0.1.5 h1:DZBwTqxGlO8FO7GDQhxuFQFdxnuid95YyqGgoPqYsug=
+github.com/bsv8/KeymasterAPIProtocol v0.1.5/go.mod h1:U4+GXS/iLJ57/Wl6PCuVGyhUSW5zIEotJO+a7ajzJas=
 github.com/bsv8/MasterSeed v1.1.0 h1:ew2FpSdf9cEMpvmAndYEnCd6XwLjiiw9wRxIGjIpwqY=
 github.com/bsv8/MasterSeed v1.1.0/go.mod h1:ULMCjerY24hd1aSwb2FXrYrQmjE0xCdbQ1iCbQTIVME=
 github.com/bsv8/MultisigPool/v4 v4.0.0 h1:7r7MjHpo2R/73trH9XYlEg0NIn6nemKzcue3z4TlsZE=

@@ -8,7 +8,7 @@ require (
 	github.com/bsv8/BitFSProtocol v0.6.0
 	github.com/bsv8/ChannelProtocol v0.6.0
 	github.com/bsv8/KeyHold/go/v2 v2.1.0
-	github.com/bsv8/KeymasterAPIProtocol v0.1.4
+	github.com/bsv8/KeymasterAPIProtocol v0.1.5
 	github.com/bsv8/MasterSeed v1.1.0
 	github.com/bsv8/SatSubscriptionProtocol v0.3.0
 	github.com/bsv8/bitcoin-libp2p v0.3.2
