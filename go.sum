@@ -32,6 +32,8 @@ github.com/bsv8/WebLoom/go v0.6.2 h1:k51WY1vVuM88/Q8z3BwcyoCzGeKGgZMOaZn9J9DCMVk
 github.com/bsv8/WebLoom/go v0.6.2/go.mod h1:fPvG3Nl/RPFEYvyOllwSV45anCuD/49f1iEISuCyOkE=
 github.com/bsv8/bitcoin-libp2p v0.3.2 h1:4cSGmB2hSNlzY903sRbxTe2w0DuG4UR5BnByhhk1c0s=
 github.com/bsv8/bitcoin-libp2p v0.3.2/go.mod h1:MqJ6OJVnBEPeBHZuZ5pWPGkUMG8QcBaYZAzYPSe4K0w=
+github.com/bsv8/keymaster.cc-bitfs v0.1.0 h1:vR0tp49vD6EcUXznqDrCd1765GMRLXNOgN7EeajmYAQ=
+github.com/bsv8/keymaster.cc-bitfs v0.1.0/go.mod h1:8j+4nRsECClRmBPc9A+CurJI3Krnu4KGMiV8+LCAiLw=
 github.com/bsv8/keymaster.cc-download-scheduler v0.3.0 h1:VsK412bbThTn8JE7DDxJ2CoDWKbEWOsmKs/zUo4FIF8=
 github.com/bsv8/keymaster.cc-download-scheduler v0.3.0/go.mod h1:pKsznjt7kretRmV/RVu0V3LxqIsaZZWB60KILOgp4bs=
 github.com/bsv8/keymaster.cc-utxo-manager v0.7.0 h1:z/T1O51UglrytpSPtMjcsUl3VQ1NpklW+WsC3ERJz2M=

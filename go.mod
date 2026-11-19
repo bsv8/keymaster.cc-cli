@@ -22,6 +22,7 @@ require (
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/nlnwa/whatwg-url v0.6.2
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/sync v0.24.0
 	golang.org/x/term v0.47.0
 	modernc.org/sqlite v1.61.0
 )
@@ -42,8 +43,9 @@ require (
 	filippo.io/keygen v1.0.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bsv8/MultisigPool/v4 v4.0.0
+	github.com/bsv8/MultisigPool/v4 v4.0.0 // indirect
 	github.com/bsv8/WebLoom/go v0.6.2
+	github.com/bsv8/keymaster.cc-bitfs v0.1.0
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
@@ -120,7 +122,6 @@ require (
 	golang.org/x/exp v0.0.0-20260718201538-764159d718ef // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.61.0
-	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0
 	golang.org/x/telemetry v0.0.0-20261009151841-97e8ea77aa2a // indirect
 	golang.org/x/text v0.43.0 // indirect
