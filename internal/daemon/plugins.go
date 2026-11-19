@@ -87,7 +87,7 @@ func (d *Daemon) finishOpen() (*Daemon, error) {
 	}
 	runtime, err := webloom.Start(context.Background(), []webloom.Plugin{
 		d.vaultAPIPlugin(), d.sellAPIPlugin(), d.collectorAPIPlugin(), d.downloadAPIPlugin(),
-		d.appsAPIPlugin(), d.protocolAPIPlugin(), d.backgroundAPIPlugin(),
+		d.appsAPIPlugin(), d.marketAPIPlugin(), d.protocolAPIPlugin(), d.backgroundAPIPlugin(),
 	})
 	if err != nil {
 		logPluginStartupFailure(err)

@@ -7,9 +7,9 @@ export const PLUGIN_GRAPH = {
       "pluginId": "apps",
       "name": "应用管理",
       "summary": "应用目录、部署与启动管理",
-      "duties": "负责应用目录的增删、收藏与选择，以及 Files 部署的安装、启动、停止与查询；钱包主动启动签发一次性令牌。",
+      "duties": "负责应用目录的删除、收藏与选择（收录由市场同步与手工来源负责），以及 Files 部署的安装、启动、停止与查询；钱包主动启动签发一次性令牌。",
       "boundary": "正式方法已由 apps.daemon 承接；应用目录身份、部署登记与启动令牌的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
-      "data": "应用目录与部署登记归属 apps 目录；启动令牌只在内存持有，不持久化。",
+      "data": "应用目录与部署登记归属 apps 目录（目录发布资料仅由 market 插件批次写入）；启动令牌只在内存持有，不持久化。",
       "webUnitId": "apps.web",
       "goUnitId": "apps.daemon",
       "methods": [
@@ -17,7 +17,6 @@ export const PLUGIN_GRAPH = {
         "connect.deployment.list",
         "connect.deployment.start",
         "connect.deployment.stop",
-        "connect.directory.add",
         "connect.directory.favorite",
         "connect.directory.list",
         "connect.directory.remove",
@@ -75,6 +74,25 @@ export const PLUGIN_GRAPH = {
         "tasks.get",
         "tasks.list",
         "tasks.subscribe"
+      ]
+    },
+    {
+      "pluginId": "market",
+      "name": "市场与手工来源",
+      "summary": "市场同步状态、手动刷新与手工来源、待验证项管理",
+      "duties": "负责拉取各市场完整目录并按来源批次提交 Connect 目录（逐 App 结果）、市场配置的登记与移除、手工 URL 验签与 Files 整包验证、待验证项的提交、重试与移除。",
+      "boundary": "正式方法已由 market.daemon 承接；目录数据的唯一写入方是本插件（批次提交），市场拉取与验证复用 Daemon 装配的既有能力。",
+      "data": "市场配置、按来源同步记录、在途批次日志、手工来源与待验证项归属 apps/market-state.json；目录发布资料经批次提交写入 apps/directory.json。",
+      "webUnitId": "market.web",
+      "goUnitId": "market.daemon",
+      "methods": [
+        "connect.market.add",
+        "connect.market.configure",
+        "connect.market.discard",
+        "connect.market.remove",
+        "connect.market.retry",
+        "connect.market.state",
+        "connect.market.sync"
       ]
     },
     {
@@ -151,7 +169,6 @@ export const PLUGIN_GRAPH = {
         "connect.deployment.list",
         "connect.deployment.start",
         "connect.deployment.stop",
-        "connect.directory.add",
         "connect.directory.favorite",
         "connect.directory.list",
         "connect.directory.remove",
@@ -233,6 +250,30 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "provides": [
         "download.api"
+      ],
+      "dependencies": []
+    },
+    {
+      "pluginId": "market",
+      "unitId": "market.daemon",
+      "runtime": "go",
+      "provides": [
+        "connect.market.add",
+        "connect.market.configure",
+        "connect.market.discard",
+        "connect.market.remove",
+        "connect.market.retry",
+        "connect.market.state",
+        "connect.market.sync"
+      ],
+      "dependencies": []
+    },
+    {
+      "pluginId": "market",
+      "unitId": "market.web",
+      "runtime": "web",
+      "provides": [
+        "market.api"
       ],
       "dependencies": []
     },
@@ -325,7 +366,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "refreshRoots",
       "file": "web/src/main.jsx",
-      "line": 624,
+      "line": 625,
       "kind": "convenience",
       "via": "refreshCatalog"
     },
@@ -337,7 +378,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "saveDesc",
       "file": "web/src/main.jsx",
-      "line": 173,
+      "line": 174,
       "kind": "convenience",
       "via": "collectorDescribe"
     },
@@ -349,7 +390,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "flush",
       "file": "web/src/main.jsx",
-      "line": 152,
+      "line": 153,
       "kind": "convenience",
       "via": "collectorFlush"
     },
@@ -361,7 +402,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 137,
+      "line": 138,
       "kind": "convenience",
       "via": "collectorHistory"
     },
@@ -373,7 +414,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "retry",
       "file": "web/src/main.jsx",
-      "line": 162,
+      "line": 163,
       "kind": "convenience",
       "via": "collectorRetry"
     },
@@ -385,7 +426,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 135,
+      "line": 136,
       "kind": "convenience",
       "via": "collectorStatus"
     },
@@ -584,7 +625,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "browse",
       "file": "web/src/main.jsx",
-      "line": 79,
+      "line": 80,
       "kind": "convenience",
       "via": "browse"
     },
@@ -596,7 +637,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 537,
+      "line": 538,
       "kind": "convenience",
       "via": "listFiles"
     },
@@ -608,7 +649,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 531,
+      "line": 532,
       "kind": "convenience",
       "via": "info"
     },
@@ -631,7 +672,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "addRootPath",
       "file": "web/src/main.jsx",
-      "line": 590,
+      "line": 591,
       "kind": "convenience",
       "via": "addRoot"
     },
@@ -643,7 +684,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 534,
+      "line": 535,
       "kind": "convenience",
       "via": "listRoots"
     },
@@ -655,7 +696,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "removeRoot",
       "file": "web/src/main.jsx",
-      "line": 615,
+      "line": 616,
       "kind": "convenience",
       "via": "removeRoot"
     },
@@ -667,7 +708,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "setDefault",
       "file": "web/src/main.jsx",
-      "line": 606,
+      "line": 607,
       "kind": "convenience",
       "via": "setDefaultRoot"
     },
@@ -679,7 +720,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 253,
+      "line": 254,
       "kind": "convenience",
       "via": "getSettings"
     },
@@ -691,7 +732,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 543,
+      "line": 544,
       "kind": "convenience",
       "via": "getSettings"
     },
@@ -715,7 +756,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "reset",
       "file": "web/src/main.jsx",
-      "line": 325,
+      "line": 326,
       "kind": "convenience",
       "via": "resetSettings"
     },
@@ -727,7 +768,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "save",
       "file": "web/src/main.jsx",
-      "line": 285,
+      "line": 286,
       "kind": "convenience",
       "via": "updateSettings"
     },
@@ -751,7 +792,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 524,
+      "line": 525,
       "kind": "convenience",
       "via": "status"
     },
@@ -763,7 +804,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "cancelTask",
       "file": "web/src/main.jsx",
-      "line": 578,
+      "line": 579,
       "kind": "convenience",
       "via": "cancelTask"
     },
@@ -775,7 +816,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "submitTask",
       "file": "web/src/main.jsx",
-      "line": 568,
+      "line": 569,
       "kind": "convenience",
       "via": "createTask"
     },
@@ -787,7 +828,7 @@ export const PLUGIN_GRAPH = {
       "runtime": "web",
       "caller": "load",
       "file": "web/src/main.jsx",
-      "line": 540,
+      "line": 541,
       "kind": "convenience",
       "via": "listTasks"
     },
@@ -901,7 +942,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_protocol.go",
       "regLine": 34,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 132,
+      "implLine": 133,
       "runtime": "go"
     },
     {
@@ -912,7 +953,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_protocol.go",
       "regLine": 14,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 45,
+      "implLine": 46,
       "runtime": "go"
     },
     {
@@ -934,7 +975,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_protocol.go",
       "regLine": 22,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 84,
+      "implLine": 85,
       "runtime": "go"
     },
     {
@@ -945,7 +986,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_protocol.go",
       "regLine": 26,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 104,
+      "implLine": 105,
       "runtime": "go"
     },
     {
@@ -956,7 +997,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_protocol.go",
       "regLine": 18,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 60,
+      "implLine": 61,
       "runtime": "go"
     },
     {
@@ -976,9 +1017,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDeploymentInstall",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 58,
+      "regLine": 50,
       "implFile": "internal/daemon/dispatch_connect_deployment.go",
-      "implLine": 100,
+      "implLine": 136,
       "runtime": "go"
     },
     {
@@ -987,9 +1028,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDeploymentList",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 82,
+      "regLine": 74,
       "implFile": "internal/daemon/dispatch_connect_deployment.go",
-      "implLine": 138,
+      "implLine": 180,
       "runtime": "go"
     },
     {
@@ -998,9 +1039,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDeploymentStart",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 66,
+      "regLine": 58,
       "implFile": "internal/daemon/dispatch_connect_deployment.go",
-      "implLine": 116,
+      "implLine": 151,
       "runtime": "go"
     },
     {
@@ -1009,20 +1050,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDeploymentStop",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 74,
+      "regLine": 66,
       "implFile": "internal/daemon/dispatch_connect_deployment.go",
-      "implLine": 129,
-      "runtime": "go"
-    },
-    {
-      "method": "connect.directory.add",
-      "pluginId": "apps",
-      "unitId": "apps.daemon",
-      "handler": "opConnectDirectoryAdd",
-      "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 26,
-      "implFile": "internal/daemon/dispatch_connect_directory.go",
-      "implLine": 75,
+      "implLine": 171,
       "runtime": "go"
     },
     {
@@ -1031,9 +1061,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDirectoryFavorite",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 42,
+      "regLine": 34,
       "implFile": "internal/daemon/dispatch_connect_directory.go",
-      "implLine": 115,
+      "implLine": 62,
       "runtime": "go"
     },
     {
@@ -1044,7 +1074,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_apps.go",
       "regLine": 22,
       "implFile": "internal/daemon/dispatch_connect_directory.go",
-      "implLine": 53,
+      "implLine": 23,
       "runtime": "go"
     },
     {
@@ -1053,9 +1083,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDirectoryRemove",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 34,
+      "regLine": 26,
       "implFile": "internal/daemon/dispatch_connect_directory.go",
-      "implLine": 102,
+      "implLine": 48,
       "runtime": "go"
     },
     {
@@ -1064,9 +1094,9 @@ export const PLUGIN_GRAPH = {
       "unitId": "apps.daemon",
       "handler": "opConnectDirectorySelect",
       "regFile": "internal/daemon/plugin_apps.go",
-      "regLine": 50,
+      "regLine": 42,
       "implFile": "internal/daemon/dispatch_connect_directory.go",
-      "implLine": 125,
+      "implLine": 73,
       "runtime": "go"
     },
     {
@@ -1088,7 +1118,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_apps.go",
       "regLine": 14,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 601,
+      "implLine": 602,
       "runtime": "go"
     },
     {
@@ -1121,7 +1151,7 @@ export const PLUGIN_GRAPH = {
       "regFile": "internal/daemon/plugin_protocol.go",
       "regLine": 42,
       "implFile": "internal/daemon/dispatch_connect.go",
-      "implLine": 388,
+      "implLine": 389,
       "runtime": "go"
     },
     {
@@ -1460,7 +1490,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.guard",
       "file": "internal/daemon/daemon.go",
-      "line": 577,
+      "line": 606,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1469,7 +1499,34 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.recoverPanic",
       "file": "internal/daemon/daemon.go",
-      "line": 577,
+      "line": 606,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "appHasUsage",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.AuthStore",
+      "file": "internal/daemon/market_manager.go",
+      "line": 49,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "appHasUsage",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.Permissions",
+      "file": "internal/daemon/market_manager.go",
+      "line": 54,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "appHasUsage",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.History",
+      "file": "internal/daemon/market_manager.go",
+      "line": 59,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1494,7 +1551,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDirectoryAdd",
+      "callee": "d.opConnectDirectoryRemove",
       "file": "internal/daemon/plugin_apps.go",
       "line": 31,
       "kind": "direct",
@@ -1503,7 +1560,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDirectoryRemove",
+      "callee": "d.opConnectDirectoryFavorite",
       "file": "internal/daemon/plugin_apps.go",
       "line": 39,
       "kind": "direct",
@@ -1512,7 +1569,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDirectoryFavorite",
+      "callee": "d.opConnectDirectorySelect",
       "file": "internal/daemon/plugin_apps.go",
       "line": 47,
       "kind": "direct",
@@ -1521,7 +1578,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDirectorySelect",
+      "callee": "d.opConnectDeploymentInstall",
       "file": "internal/daemon/plugin_apps.go",
       "line": 55,
       "kind": "direct",
@@ -1530,7 +1587,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDeploymentInstall",
+      "callee": "d.opConnectDeploymentStart",
       "file": "internal/daemon/plugin_apps.go",
       "line": 63,
       "kind": "direct",
@@ -1539,7 +1596,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDeploymentStart",
+      "callee": "d.opConnectDeploymentStop",
       "file": "internal/daemon/plugin_apps.go",
       "line": 71,
       "kind": "direct",
@@ -1548,18 +1605,9 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "appsAPIPlugin",
       "callerPluginId": "",
-      "callee": "d.opConnectDeploymentStop",
-      "file": "internal/daemon/plugin_apps.go",
-      "line": 79,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "appsAPIPlugin",
-      "callerPluginId": "",
       "callee": "d.opConnectDeploymentList",
       "file": "internal/daemon/plugin_apps.go",
-      "line": 83,
+      "line": 75,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1730,33 +1778,6 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 341,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "close",
-      "callerPluginId": "",
-      "callee": "d.mu.Unlock",
-      "file": "internal/daemon/daemon.go",
-      "line": 345,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "close",
-      "callerPluginId": "",
-      "callee": "d.stopDispatchAccepting",
-      "file": "internal/daemon/daemon.go",
-      "line": 348,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "close",
-      "callerPluginId": "",
-      "callee": "d.deployments.Close",
-      "file": "internal/daemon/daemon.go",
       "line": 350,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
@@ -1764,7 +1785,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "close",
       "callerPluginId": "",
-      "callee": "d.startMu.Lock",
+      "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
       "line": 354,
       "kind": "direct",
@@ -1773,7 +1794,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "close",
       "callerPluginId": "",
-      "callee": "d.startMu.Unlock",
+      "callee": "d.stopDispatchAccepting",
       "file": "internal/daemon/daemon.go",
       "line": 357,
       "kind": "direct",
@@ -1782,16 +1803,25 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "close",
       "callerPluginId": "",
-      "callee": "d.stopPaymentRetry",
+      "callee": "d.deployments.Close",
       "file": "internal/daemon/daemon.go",
-      "line": 362,
+      "line": 359,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
     {
       "callerHandler": "close",
       "callerPluginId": "",
-      "callee": "d.watchWg.Wait",
+      "callee": "d.startMu.Lock",
+      "file": "internal/daemon/daemon.go",
+      "line": 363,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "close",
+      "callerPluginId": "",
+      "callee": "d.startMu.Unlock",
       "file": "internal/daemon/daemon.go",
       "line": 366,
       "kind": "direct",
@@ -1800,9 +1830,27 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "close",
       "callerPluginId": "",
+      "callee": "d.stopPaymentRetry",
+      "file": "internal/daemon/daemon.go",
+      "line": 371,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "close",
+      "callerPluginId": "",
+      "callee": "d.watchWg.Wait",
+      "file": "internal/daemon/daemon.go",
+      "line": 375,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "close",
+      "callerPluginId": "",
       "callee": "d.wsMu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 380,
+      "line": 389,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1811,7 +1859,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.wsMu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 386,
+      "line": 395,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1820,7 +1868,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.waitDispatchDrain",
       "file": "internal/daemon/daemon.go",
-      "line": 391,
+      "line": 400,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1829,7 +1877,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.plugins.Close",
       "file": "internal/daemon/daemon.go",
-      "line": 394,
+      "line": 403,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1838,7 +1886,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.tasks.stopAllAndWait",
       "file": "internal/daemon/daemon.go",
-      "line": 398,
+      "line": 407,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1847,7 +1895,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.waitSeller",
       "file": "internal/daemon/daemon.go",
-      "line": 403,
+      "line": 412,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1856,7 +1904,25 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.collectors.stop",
       "file": "internal/daemon/daemon.go",
-      "line": 407,
+      "line": 416,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "close",
+      "callerPluginId": "",
+      "callee": "d.marketCancel",
+      "file": "internal/daemon/daemon.go",
+      "line": 427,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "close",
+      "callerPluginId": "",
+      "callee": "d.market.Wait",
+      "file": "internal/daemon/daemon.go",
+      "line": 433,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1865,7 +1931,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.events.Close",
       "file": "internal/daemon/daemon.go",
-      "line": 417,
+      "line": 443,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1874,7 +1940,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.roots.closeAll",
       "file": "internal/daemon/daemon.go",
-      "line": 420,
+      "line": 446,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1883,7 +1949,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 422,
+      "line": 448,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1892,7 +1958,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 423,
+      "line": 449,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1901,7 +1967,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.lockGuard.Release",
       "file": "internal/daemon/daemon.go",
-      "line": 430,
+      "line": 456,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1910,7 +1976,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.closeOnce.Do",
       "file": "internal/daemon/daemon.go",
-      "line": 328,
+      "line": 337,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -1919,7 +1985,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.close",
       "file": "internal/daemon/daemon.go",
-      "line": 331,
+      "line": 340,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2270,7 +2336,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 171,
+      "line": 212,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2675,7 +2741,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isInitialized",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 924,
+      "line": 913,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2684,7 +2750,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isStopping",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 927,
+      "line": 916,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2693,7 +2759,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 930,
+      "line": 919,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2702,7 +2768,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 935,
+      "line": 924,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2711,16 +2777,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 939,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "execConnectLaunch",
-      "callerPluginId": "",
-      "callee": "d.connectMgr.LaunchStore",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 684,
+      "line": 928,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2738,7 +2795,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isInitialized",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 700,
+      "line": 701,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2756,7 +2813,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 708,
+      "line": 707,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2765,7 +2822,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 711,
+      "line": 710,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2774,7 +2831,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 716,
+      "line": 714,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2783,7 +2840,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 721,
+      "line": 718,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2792,7 +2849,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.verifiedConnectSource",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 741,
+      "line": 735,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2801,7 +2858,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deploymentGeneration",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 750,
+      "line": 742,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2810,7 +2867,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 757,
+      "line": 748,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "execConnectLaunch",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.Permissions",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 754,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2819,25 +2885,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Directory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 760,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "execConnectLaunch",
-      "callerPluginId": "",
-      "callee": "d.connectMgr.Directory",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 764,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "execConnectLaunch",
-      "callerPluginId": "",
-      "callee": "d.connectMgr.Directory",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 770,
+      "line": 758,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2846,7 +2894,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.saveConnectAuth",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 777,
+      "line": 763,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2855,7 +2903,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.History",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 782,
+      "line": 767,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2864,7 +2912,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 787,
+      "line": 772,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2873,7 +2921,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.execPaymentApproved",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 815,
+      "line": 800,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2882,7 +2930,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.execIdentityGet",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 817,
+      "line": 802,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2891,7 +2939,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.execIntentSign",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 819,
+      "line": 804,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2900,7 +2948,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.execCipherApproved",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 821,
+      "line": 806,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2909,7 +2957,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isInitialized",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 823,
+      "line": 808,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2918,7 +2966,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isStopping",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 826,
+      "line": 811,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2927,7 +2975,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 829,
+      "line": 814,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2936,7 +2984,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 838,
+      "line": 823,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2945,7 +2993,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 840,
+      "line": 825,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2954,7 +3002,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 851,
+      "line": 836,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2963,7 +3011,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.verifiedConnectSource",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 857,
+      "line": 842,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "execConnectMethod",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.Permissions",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 852,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2972,16 +3029,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Directory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 864,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "execConnectMethod",
-      "callerPluginId": "",
-      "callee": "d.connectMgr.Directory",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 867,
+      "line": 856,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2990,7 +3038,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 873,
+      "line": 862,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -2999,7 +3047,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.saveConnectAuth",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 878,
+      "line": 867,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3600,6 +3648,15 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "finishOpen",
       "callerPluginId": "",
+      "callee": "d.marketAPIPlugin",
+      "file": "internal/daemon/plugins.go",
+      "line": 90,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "finishOpen",
+      "callerPluginId": "",
       "callee": "d.protocolAPIPlugin",
       "file": "internal/daemon/plugins.go",
       "line": 90,
@@ -3719,7 +3776,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.APIHandler",
       "file": "internal/daemon/daemon.go",
-      "line": 584,
+      "line": 613,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3728,7 +3785,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.guard",
       "file": "internal/daemon/daemon.go",
-      "line": 586,
+      "line": 615,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3737,7 +3794,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.recoverPanic",
       "file": "internal/daemon/daemon.go",
-      "line": 586,
+      "line": 615,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "initMarketManager",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.Directory",
+      "file": "internal/daemon/market_manager.go",
+      "line": 26,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3746,7 +3812,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.events.InstanceID",
       "file": "internal/daemon/daemon.go",
-      "line": 564,
+      "line": 593,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3863,7 +3929,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 272,
+      "line": 281,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3872,7 +3938,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 273,
+      "line": 282,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3881,7 +3947,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.startMu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 638,
+      "line": 667,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3890,7 +3956,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.startMu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 639,
+      "line": 668,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3908,7 +3974,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 321,
+      "line": 322,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3917,7 +3983,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 335,
+      "line": 336,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3926,7 +3992,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 340,
+      "line": 341,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3935,7 +4001,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isInitialized",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 343,
+      "line": 344,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3944,7 +4010,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 346,
+      "line": 347,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3953,7 +4019,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 350,
+      "line": 351,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -3962,7 +4028,70 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 352,
+      "line": 353,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketState",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 16,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketSync",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 24,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketConfigure",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 32,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketDiscard",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 40,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketAdd",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 48,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketRemove",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 56,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "marketAPIPlugin",
+      "callerPluginId": "",
+      "callee": "d.opConnectMarketRetry",
+      "file": "internal/daemon/plugin_market.go",
+      "line": 64,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4160,7 +4289,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.sweepExpiredApprovals",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 143,
+      "line": 144,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4169,7 +4298,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 152,
+      "line": 153,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4178,7 +4307,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.SerializedAuthChange",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 168,
+      "line": 169,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4187,7 +4316,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.validateConnectAuth",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 170,
+      "line": 171,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4196,7 +4325,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 172,
+      "line": 173,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4205,7 +4334,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.rejectPaymentByApproval",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 174,
+      "line": 175,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4213,15 +4342,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 176,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectApprovalsDecide",
-      "callerPluginId": "protocol",
-      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 177,
       "kind": "direct",
@@ -4230,16 +4350,16 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
-      "callee": "d.connectMgr.Queue",
+      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 184,
+      "line": 178,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
     {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
-      "callee": "d.grantAutoPermission",
+      "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 185,
       "kind": "direct",
@@ -4248,9 +4368,18 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
+      "callee": "d.grantAutoPermission",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 186,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectApprovalsDecide",
+      "callerPluginId": "protocol",
       "callee": "d.sweepExpiredApprovals",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 196,
+      "line": 197,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4259,7 +4388,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 202,
+      "line": 203,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4267,15 +4396,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 208,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectApprovalsDecide",
-      "callerPluginId": "protocol",
-      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 209,
       "kind": "direct",
@@ -4284,9 +4404,18 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
+      "callee": "d.publishConnect",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 210,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectApprovalsDecide",
+      "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 214,
+      "line": 215,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4295,7 +4424,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.sweepExpiredApprovals",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 217,
+      "line": 218,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4304,7 +4433,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 227,
+      "line": 228,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4313,7 +4442,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.rejectPaymentByApproval",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 229,
+      "line": 230,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4321,15 +4450,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 231,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectApprovalsDecide",
-      "callerPluginId": "protocol",
-      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 232,
       "kind": "direct",
@@ -4338,9 +4458,9 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectApprovalsDecide",
       "callerPluginId": "protocol",
-      "callee": "d.recordApprovalHistory",
+      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 239,
+      "line": 233,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4349,7 +4469,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 241,
+      "line": 240,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4358,7 +4478,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 243,
+      "line": 242,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectApprovalsDecide",
+      "callerPluginId": "protocol",
+      "callee": "d.recordApprovalHistory",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 244,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4367,7 +4496,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.rejectPaymentByApproval",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 251,
+      "line": 252,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4376,7 +4505,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 253,
+      "line": 254,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4385,7 +4514,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.sweepExpiredApprovals",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 49,
+      "line": 50,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4394,7 +4523,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 50,
+      "line": 51,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4466,7 +4595,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 88,
+      "line": 89,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4475,7 +4604,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 89,
+      "line": 90,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4484,7 +4613,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.SerializedAuthChange",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 113,
+      "line": 114,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4493,7 +4622,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 114,
+      "line": 115,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4502,7 +4631,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Connections",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 116,
+      "line": 117,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4511,7 +4640,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.History",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 122,
+      "line": 123,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4520,7 +4649,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 123,
+      "line": 124,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4529,7 +4658,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 65,
+      "line": 66,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4538,7 +4667,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 68,
+      "line": 69,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4547,7 +4676,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Connections",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 70,
+      "line": 71,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4592,7 +4721,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deploymentAccess",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 101,
+      "line": 137,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4601,16 +4730,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deployments.Install",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 104,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectDeploymentInstall",
-      "callerPluginId": "apps",
-      "callee": "d.connectMgr.Directory",
-      "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 108,
+      "line": 140,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4619,7 +4739,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deploymentAccess",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 139,
+      "line": 181,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4628,7 +4748,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deployments.List",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 142,
+      "line": 184,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4637,7 +4757,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deploymentAccess",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 117,
+      "line": 152,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectDeploymentStart",
+      "callerPluginId": "apps",
+      "callee": "d.verifyDirectoryFilesDeployment",
+      "file": "internal/daemon/dispatch_connect_deployment.go",
+      "line": 158,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4646,7 +4775,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deployments.Start",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 120,
+      "line": 162,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4655,7 +4784,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deploymentAccess",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 130,
+      "line": 172,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4664,34 +4793,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deployments.Stop",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 133,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectDirectoryAdd",
-      "callerPluginId": "apps",
-      "callee": "d.connectMgr.Directory",
-      "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 85,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectDirectoryAdd",
-      "callerPluginId": "apps",
-      "callee": "d.opConnectDeploymentInstall",
-      "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 92,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectDirectoryAdd",
-      "callerPluginId": "apps",
-      "callee": "d.publishConnect",
-      "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 99,
+      "line": 175,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4700,7 +4802,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.connectMgr.Directory",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 119,
+      "line": 66,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4709,7 +4811,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 122,
+      "line": 69,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4718,43 +4820,52 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.connectMgr.Directory",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 57,
+      "line": 27,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
     {
       "callerHandler": "opConnectDirectoryList",
       "callerPluginId": "apps",
-      "callee": "d.directoryMarketURL",
+      "callee": "d.connectMgr.Directory",
+      "file": "internal/daemon/dispatch_connect_directory.go",
+      "line": 30,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectDirectoryList",
+      "callerPluginId": "apps",
+      "callee": "d.connectMgr.Permissions",
+      "file": "internal/daemon/dispatch_connect_directory.go",
+      "line": 36,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectDirectoryRemove",
+      "callerPluginId": "apps",
+      "callee": "d.connectMgr.Directory",
+      "file": "internal/daemon/dispatch_connect_directory.go",
+      "line": 55,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectDirectoryRemove",
+      "callerPluginId": "apps",
+      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect_directory.go",
       "line": 58,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
     {
-      "callerHandler": "opConnectDirectoryRemove",
-      "callerPluginId": "apps",
-      "callee": "d.connectMgr.Directory",
-      "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 109,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectDirectoryRemove",
-      "callerPluginId": "apps",
-      "callee": "d.publishConnect",
-      "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 112,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
       "callerHandler": "opConnectDirectorySelect",
       "callerPluginId": "apps",
       "callee": "d.connectMgr.Directory",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 132,
+      "line": 80,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4763,7 +4874,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 135,
+      "line": 83,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4771,15 +4882,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
       "callee": "d.sweepExpiredApprovals",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 401,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectExec",
-      "callerPluginId": "protocol",
-      "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 402,
       "kind": "direct",
@@ -4790,7 +4892,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 409,
+      "line": 403,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4799,7 +4901,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 415,
+      "line": 410,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4808,7 +4910,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 418,
+      "line": 416,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectExec",
+      "callerPluginId": "protocol",
+      "callee": "d.connectMgr.Queue",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 419,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4817,7 +4928,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.execConnectMethod",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 426,
+      "line": 427,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4825,15 +4936,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 429,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectExec",
-      "callerPluginId": "protocol",
-      "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 430,
       "kind": "direct",
@@ -4842,7 +4944,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
-      "callee": "d.publishConnect",
+      "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 431,
       "kind": "direct",
@@ -4851,16 +4953,16 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
-      "callee": "d.connectMgr.Queue",
+      "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 436,
+      "line": 432,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
     {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
-      "callee": "d.recordApprovalHistory",
+      "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 437,
       "kind": "direct",
@@ -4871,7 +4973,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 440,
+      "line": 438,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectExec",
+      "callerPluginId": "protocol",
+      "callee": "d.recordApprovalHistory",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 441,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4880,7 +4991,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 442,
+      "line": 443,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4889,7 +5000,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.execConnectLaunch",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 460,
+      "line": 461,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4898,7 +5009,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.verifiedConnectSource",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 478,
+      "line": 479,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4907,7 +5018,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 482,
+      "line": 483,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4916,7 +5027,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.deploymentGeneration",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 482,
+      "line": 483,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4925,7 +5036,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 483,
+      "line": 484,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4934,7 +5045,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.lookupValidAuth",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 494,
+      "line": 495,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4943,15 +5054,6 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.SerializedAuthChange",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 499,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "opConnectExec",
-      "callerPluginId": "protocol",
-      "callee": "d.connectMgr.AuthStore",
-      "file": "internal/daemon/dispatch_connect.go",
       "line": 500,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
@@ -4959,7 +5061,7 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
-      "callee": "d.connectMgr.Connections",
+      "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
       "line": 501,
       "kind": "direct",
@@ -4977,9 +5079,18 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "opConnectExec",
       "callerPluginId": "protocol",
+      "callee": "d.connectMgr.Connections",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 503,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectExec",
+      "callerPluginId": "protocol",
       "callee": "d.connectMgr.History",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 509,
+      "line": 510,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4988,7 +5099,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 513,
+      "line": 514,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -4997,7 +5108,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.validateConnectAuth",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 522,
+      "line": 523,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5006,7 +5117,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.paramsMapOf",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 531,
+      "line": 532,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5015,7 +5126,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.hasAutoPermission",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 541,
+      "line": 542,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5024,7 +5135,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.execApprovedBusiness",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 548,
+      "line": 549,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5033,7 +5144,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 550,
+      "line": 551,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5042,7 +5153,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.recordApprovalHistory",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 556,
+      "line": 557,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5051,7 +5162,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 561,
+      "line": 562,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5060,7 +5171,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.opConnectPaymentPayWithAuth",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 567,
+      "line": 568,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5069,7 +5180,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 571,
+      "line": 572,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5078,7 +5189,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.connectMgr.Queue",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 576,
+      "line": 577,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5087,7 +5198,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.publishConnect",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 577,
+      "line": 578,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5096,7 +5207,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "protocol",
       "callee": "d.opConnectPaymentStatus",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 583,
+      "line": 584,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5114,7 +5225,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.needInit",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 608,
+      "line": 609,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5123,7 +5234,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.needRunning",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 611,
+      "line": 612,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5132,7 +5243,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.needUnlocked",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 614,
+      "line": 615,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5141,7 +5252,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 622,
+      "line": 623,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5150,7 +5261,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 626,
+      "line": 627,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5159,7 +5270,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 628,
+      "line": 629,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5168,7 +5279,16 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 641,
+      "line": 642,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectLaunchIssue",
+      "callerPluginId": "apps",
+      "callee": "d.verifyDirectoryFilesDeployment",
+      "file": "internal/daemon/dispatch_connect.go",
+      "line": 648,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5177,7 +5297,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 645,
+      "line": 651,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5186,7 +5306,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 648,
+      "line": 654,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5195,7 +5315,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.connectMgr.LaunchStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 648,
+      "line": 654,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -5204,7 +5324,232 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "apps",
       "callee": "d.deploymentGeneration",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 648,
+      "line": 654,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketAdd",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 71,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketAdd",
+      "callerPluginId": "",
+      "callee": "d.market.Add",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 78,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketAdd",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 81,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketConfigure",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 50,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketConfigure",
+      "callerPluginId": "",
+      "callee": "d.market.Configure",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 53,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketConfigure",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 56,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketDiscard",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 60,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketDiscard",
+      "callerPluginId": "",
+      "callee": "d.market.Discard",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 63,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketDiscard",
+      "callerPluginId": "",
+      "callee": "d.publishConnect",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 66,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketDiscard",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 67,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRemove",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 85,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRemove",
+      "callerPluginId": "",
+      "callee": "d.market.Remove",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 88,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRemove",
+      "callerPluginId": "",
+      "callee": "d.publishConnect",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 91,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRemove",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 92,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRetry",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 96,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRetry",
+      "callerPluginId": "",
+      "callee": "d.market.Retry",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 99,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketRetry",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 102,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketState",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 20,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketState",
+      "callerPluginId": "",
+      "callee": "d.market.Ready",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 23,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketState",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 26,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketSync",
+      "callerPluginId": "",
+      "callee": "d.marketAccess",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 30,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketSync",
+      "callerPluginId": "",
+      "callee": "d.market.SyncMarket",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 36,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketSync",
+      "callerPluginId": "",
+      "callee": "d.market.SyncAll",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 38,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketSync",
+      "callerPluginId": "",
+      "callee": "d.publishConnect",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 45,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "opConnectMarketSync",
+      "callerPluginId": "",
+      "callee": "d.market.StateView",
+      "file": "internal/daemon/dispatch_market.go",
+      "line": 46,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -6977,7 +7322,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 366,
+      "line": 367,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -6986,7 +7331,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 377,
+      "line": 378,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -6995,7 +7340,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 382,
+      "line": 383,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7652,7 +7997,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 650,
+      "line": 679,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7660,42 +8005,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "ServeHTTP",
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
-      "file": "internal/daemon/daemon.go",
-      "line": 652,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "ServeHTTP",
-      "callerPluginId": "",
-      "callee": "d.store.Snapshot",
-      "file": "internal/daemon/daemon.go",
-      "line": 661,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "ServeHTTP",
-      "callerPluginId": "",
-      "callee": "d.mu.Unlock",
-      "file": "internal/daemon/daemon.go",
-      "line": 669,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "ServeHTTP",
-      "callerPluginId": "",
-      "callee": "d.httpHandler",
-      "file": "internal/daemon/daemon.go",
-      "line": 673,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "ServeHTTP",
-      "callerPluginId": "",
-      "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
       "line": 681,
       "kind": "direct",
@@ -7704,9 +8013,45 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "ServeHTTP",
       "callerPluginId": "",
+      "callee": "d.store.Snapshot",
+      "file": "internal/daemon/daemon.go",
+      "line": 690,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "ServeHTTP",
+      "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 684,
+      "line": 698,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "ServeHTTP",
+      "callerPluginId": "",
+      "callee": "d.httpHandler",
+      "file": "internal/daemon/daemon.go",
+      "line": 702,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "ServeHTTP",
+      "callerPluginId": "",
+      "callee": "d.mu.Lock",
+      "file": "internal/daemon/daemon.go",
+      "line": 710,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "ServeHTTP",
+      "callerPluginId": "",
+      "callee": "d.mu.Unlock",
+      "file": "internal/daemon/daemon.go",
+      "line": 713,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7715,7 +8060,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.startMu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 609,
+      "line": 638,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7724,7 +8069,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.startMu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 610,
+      "line": 639,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7733,7 +8078,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.watchWg.Add",
       "file": "internal/daemon/daemon.go",
-      "line": 621,
+      "line": 650,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7742,7 +8087,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.watchWg.Done",
       "file": "internal/daemon/daemon.go",
-      "line": 623,
+      "line": 652,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7751,7 +8096,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.watchReload",
       "file": "internal/daemon/daemon.go",
-      "line": 624,
+      "line": 653,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7760,7 +8105,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.watchWg.Add",
       "file": "internal/daemon/daemon.go",
-      "line": 626,
+      "line": 655,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7769,7 +8114,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.watchWg.Done",
       "file": "internal/daemon/daemon.go",
-      "line": 628,
+      "line": 657,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7778,7 +8123,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.watchApprovalExpiry",
       "file": "internal/daemon/daemon.go",
-      "line": 629,
+      "line": 658,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7859,7 +8204,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 264,
+      "line": 273,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7868,7 +8213,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 265,
+      "line": 274,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7877,7 +8222,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.dispatchMu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 281,
+      "line": 290,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -7886,7 +8231,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.dispatchMu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 283,
+      "line": 292,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8057,7 +8402,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.unlockMu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 446,
+      "line": 472,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8066,7 +8411,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.unlockMu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 447,
+      "line": 473,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8075,7 +8420,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 448,
+      "line": 474,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8084,7 +8429,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 450,
+      "line": 476,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8093,7 +8438,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 454,
+      "line": 480,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8102,7 +8447,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 458,
+      "line": 484,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8111,7 +8456,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 461,
+      "line": 487,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8120,7 +8465,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/daemon.go",
-      "line": 475,
+      "line": 501,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8129,7 +8474,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.CompleteNetworkBinding",
       "file": "internal/daemon/daemon.go",
-      "line": 486,
+      "line": 512,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8138,7 +8483,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/daemon.go",
-      "line": 497,
+      "line": 523,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8147,7 +8492,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 500,
+      "line": 526,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8155,51 +8500,6 @@ export const PLUGIN_GRAPH = {
       "callerHandler": "Unlock",
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
-      "file": "internal/daemon/daemon.go",
-      "line": 505,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "Unlock",
-      "callerPluginId": "",
-      "callee": "d.mu.Unlock",
-      "file": "internal/daemon/daemon.go",
-      "line": 521,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "Unlock",
-      "callerPluginId": "",
-      "callee": "d.isStopping",
-      "file": "internal/daemon/daemon.go",
-      "line": 525,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "Unlock",
-      "callerPluginId": "",
-      "callee": "d.ensureSellerStarted",
-      "file": "internal/daemon/daemon.go",
-      "line": 529,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "Unlock",
-      "callerPluginId": "",
-      "callee": "d.ensureCollectorsStarted",
-      "file": "internal/daemon/daemon.go",
-      "line": 530,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "Unlock",
-      "callerPluginId": "",
-      "callee": "d.feedCollectors",
       "file": "internal/daemon/daemon.go",
       "line": 531,
       "kind": "direct",
@@ -8208,18 +8508,9 @@ export const PLUGIN_GRAPH = {
     {
       "callerHandler": "Unlock",
       "callerPluginId": "",
-      "callee": "d.publishWallet",
+      "callee": "d.mu.Unlock",
       "file": "internal/daemon/daemon.go",
-      "line": 534,
-      "kind": "direct",
-      "ownership": "daemon-shared-unconsolidated"
-    },
-    {
-      "callerHandler": "Unlock",
-      "callerPluginId": "",
-      "callee": "d.startBalanceWatcher",
-      "file": "internal/daemon/daemon.go",
-      "line": 535,
+      "line": 547,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8228,7 +8519,70 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isStopping",
       "file": "internal/daemon/daemon.go",
-      "line": 539,
+      "line": 551,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.market.FirstSync",
+      "file": "internal/daemon/daemon.go",
+      "line": 556,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.ensureSellerStarted",
+      "file": "internal/daemon/daemon.go",
+      "line": 558,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.ensureCollectorsStarted",
+      "file": "internal/daemon/daemon.go",
+      "line": 559,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.feedCollectors",
+      "file": "internal/daemon/daemon.go",
+      "line": 560,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.publishWallet",
+      "file": "internal/daemon/daemon.go",
+      "line": 563,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.startBalanceWatcher",
+      "file": "internal/daemon/daemon.go",
+      "line": 564,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "Unlock",
+      "callerPluginId": "",
+      "callee": "d.isStopping",
+      "file": "internal/daemon/daemon.go",
+      "line": 568,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8237,7 +8591,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.startTask",
       "file": "internal/daemon/daemon.go",
-      "line": 542,
+      "line": 571,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8255,7 +8609,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.AuthStore",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 269,
+      "line": 270,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8264,7 +8618,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 281,
+      "line": 282,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8273,7 +8627,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Generation",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 286,
+      "line": 287,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8282,7 +8636,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.isInitialized",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 289,
+      "line": 290,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8291,7 +8645,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.store.Snapshot",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 292,
+      "line": 293,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8300,7 +8654,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Lock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 296,
+      "line": 297,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8309,7 +8663,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.mu.Unlock",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 298,
+      "line": 299,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8318,7 +8672,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Connections",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 303,
+      "line": 304,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8327,7 +8681,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.connectMgr.Connections",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 306,
+      "line": 307,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8453,7 +8807,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.Identity",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 152,
+      "line": 195,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8462,7 +8816,34 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.deployments.WasDeploymentOrigin",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 156,
+      "line": 198,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "verifyDirectoryFilesDeployment",
+      "callerPluginId": "",
+      "callee": "d.deployments.RecordBySeed",
+      "file": "internal/daemon/dispatch_connect_deployment.go",
+      "line": 104,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "verifyDirectoryFilesDeployment",
+      "callerPluginId": "",
+      "callee": "d.connectMgr.Directory",
+      "file": "internal/daemon/dispatch_connect_deployment.go",
+      "line": 126,
+      "kind": "direct",
+      "ownership": "daemon-shared-unconsolidated"
+    },
+    {
+      "callerHandler": "verifySeedPublication",
+      "callerPluginId": "",
+      "callee": "d.deployments.Install",
+      "file": "internal/daemon/market_manager.go",
+      "line": 70,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8471,7 +8852,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.dispatchWg.Wait",
       "file": "internal/daemon/daemon.go",
-      "line": 292,
+      "line": 301,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8480,7 +8861,7 @@ export const PLUGIN_GRAPH = {
       "callerPluginId": "",
       "callee": "d.sellerWg.Wait",
       "file": "internal/daemon/daemon.go",
-      "line": 308,
+      "line": 317,
       "kind": "direct",
       "ownership": "daemon-shared-unconsolidated"
     },
@@ -8677,7 +9058,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_protocol.go",
         "regLine": 34,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 132
+        "implLine": 133
       }
     },
     {
@@ -8691,7 +9072,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_protocol.go",
         "regLine": 14,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 45
+        "implLine": 46
       }
     },
     {
@@ -8718,7 +9099,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_protocol.go",
         "regLine": 22,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 84
+        "implLine": 85
       }
     },
     {
@@ -8730,7 +9111,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_protocol.go",
         "regLine": 26,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 104
+        "implLine": 105
       }
     },
     {
@@ -8742,7 +9123,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_protocol.go",
         "regLine": 18,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 60
+        "implLine": 61
       }
     },
     {
@@ -8766,9 +9147,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDeploymentInstall",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 58,
+        "regLine": 50,
         "implFile": "internal/daemon/dispatch_connect_deployment.go",
-        "implLine": 100
+        "implLine": 136
       }
     },
     {
@@ -8780,9 +9161,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDeploymentList",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 82,
+        "regLine": 74,
         "implFile": "internal/daemon/dispatch_connect_deployment.go",
-        "implLine": 138
+        "implLine": 180
       }
     },
     {
@@ -8792,9 +9173,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDeploymentStart",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 66,
+        "regLine": 58,
         "implFile": "internal/daemon/dispatch_connect_deployment.go",
-        "implLine": 116
+        "implLine": 151
       }
     },
     {
@@ -8804,21 +9185,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDeploymentStop",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 74,
+        "regLine": 66,
         "implFile": "internal/daemon/dispatch_connect_deployment.go",
-        "implLine": 129
-      }
-    },
-    {
-      "pluginId": "apps",
-      "method": "connect.directory.add",
-      "webCallIndexes": [],
-      "goHandler": {
-        "handler": "opConnectDirectoryAdd",
-        "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 26,
-        "implFile": "internal/daemon/dispatch_connect_directory.go",
-        "implLine": 75
+        "implLine": 171
       }
     },
     {
@@ -8828,9 +9197,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDirectoryFavorite",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 42,
+        "regLine": 34,
         "implFile": "internal/daemon/dispatch_connect_directory.go",
-        "implLine": 115
+        "implLine": 62
       }
     },
     {
@@ -8844,7 +9213,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_apps.go",
         "regLine": 22,
         "implFile": "internal/daemon/dispatch_connect_directory.go",
-        "implLine": 53
+        "implLine": 23
       }
     },
     {
@@ -8854,9 +9223,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDirectoryRemove",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 34,
+        "regLine": 26,
         "implFile": "internal/daemon/dispatch_connect_directory.go",
-        "implLine": 102
+        "implLine": 48
       }
     },
     {
@@ -8866,9 +9235,9 @@ export const PLUGIN_GRAPH = {
       "goHandler": {
         "handler": "opConnectDirectorySelect",
         "regFile": "internal/daemon/plugin_apps.go",
-        "regLine": 50,
+        "regLine": 42,
         "implFile": "internal/daemon/dispatch_connect_directory.go",
-        "implLine": 125
+        "implLine": 73
       }
     },
     {
@@ -8896,8 +9265,50 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_apps.go",
         "regLine": 14,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 601
+        "implLine": 602
       }
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.add",
+      "webCallIndexes": [],
+      "goHandler": null
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.configure",
+      "webCallIndexes": [],
+      "goHandler": null
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.discard",
+      "webCallIndexes": [],
+      "goHandler": null
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.remove",
+      "webCallIndexes": [],
+      "goHandler": null
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.retry",
+      "webCallIndexes": [],
+      "goHandler": null
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.state",
+      "webCallIndexes": [],
+      "goHandler": null
+    },
+    {
+      "pluginId": "market",
+      "method": "connect.market.sync",
+      "webCallIndexes": [],
+      "goHandler": null
     },
     {
       "pluginId": "protocol",
@@ -8939,7 +9350,7 @@ export const PLUGIN_GRAPH = {
         "regFile": "internal/daemon/plugin_protocol.go",
         "regLine": 42,
         "implFile": "internal/daemon/dispatch_connect.go",
-        "implLine": 388
+        "implLine": 389
       }
     },
     {
@@ -9319,14 +9730,14 @@ export const PLUGIN_GRAPH = {
     {
       "side": "go",
       "file": "internal/daemon/daemon.go",
-      "line": 382,
+      "line": 391,
       "caller": "close",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/daemon.go",
-      "line": 698,
+      "line": 727,
       "caller": "ServeHTTP",
       "reason": "chained-call-target-unresolved"
     },
@@ -9606,49 +10017,49 @@ export const PLUGIN_GRAPH = {
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_deployment.go",
-      "line": 108,
-      "caller": "opConnectDeploymentInstall",
+      "line": 126,
+      "caller": "verifyDirectoryFilesDeployment",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 59,
+      "line": 27,
       "caller": "opConnectDirectoryList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 63,
+      "line": 30,
       "caller": "opConnectDirectoryList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 68,
+      "line": 36,
       "caller": "opConnectDirectoryList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 109,
+      "line": 55,
       "caller": "opConnectDirectoryRemove",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 119,
+      "line": 66,
       "caller": "opConnectDirectoryFavorite",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect_directory.go",
-      "line": 132,
+      "line": 80,
       "caller": "opConnectDirectorySelect",
       "reason": "chained-call-target-unresolved"
     },
@@ -9893,218 +10304,211 @@ export const PLUGIN_GRAPH = {
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 50,
+      "line": 51,
       "caller": "opConnectApprovalsList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 65,
+      "line": 66,
       "caller": "opConnectBindingsList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 70,
+      "line": 71,
       "caller": "opConnectBindingsList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 88,
+      "line": 89,
       "caller": "opConnectAuthList",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 114,
+      "line": 115,
       "caller": "opConnectAuthRevoke",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 116,
+      "line": 117,
       "caller": "opConnectAuthRevoke",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 122,
+      "line": 123,
       "caller": "opConnectAuthRevoke",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 152,
+      "line": 153,
       "caller": "opConnectApprovalsDecide",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 172,
+      "line": 173,
       "caller": "opConnectApprovalsDecide",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 184,
+      "line": 185,
       "caller": "opConnectApprovalsDecide",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 214,
+      "line": 215,
       "caller": "opConnectApprovalsDecide",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 227,
+      "line": 228,
       "caller": "opConnectApprovalsDecide",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 269,
+      "line": 270,
       "caller": "validateConnectAuth",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 303,
+      "line": 304,
       "caller": "validateConnectAuth",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 306,
+      "line": 307,
       "caller": "validateConnectAuth",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 321,
+      "line": 322,
       "caller": "lookupValidAuth",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 366,
+      "line": 367,
       "caller": "recheckAuthLive",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 402,
+      "line": 403,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 409,
+      "line": 410,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 415,
+      "line": 416,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 418,
+      "line": 419,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 429,
+      "line": 430,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 436,
+      "line": 437,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 482,
+      "line": 483,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 500,
+      "line": 501,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 502,
+      "line": 503,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 509,
+      "line": 510,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 514,
+      "line": 515,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 576,
+      "line": 577,
       "caller": "opConnectExec",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 648,
+      "line": 654,
       "caller": "opConnectLaunchIssue",
-      "reason": "chained-call-target-unresolved"
-    },
-    {
-      "side": "go",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 684,
-      "caller": "execConnectLaunch",
       "reason": "chained-call-target-unresolved"
     },
     {
@@ -10117,63 +10521,56 @@ export const PLUGIN_GRAPH = {
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 691,
+      "line": 694,
       "caller": "execConnectLaunch",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 729,
+      "line": 724,
       "caller": "execConnectLaunch",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 760,
+      "line": 754,
       "caller": "execConnectLaunch",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 764,
+      "line": 758,
       "caller": "execConnectLaunch",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 770,
+      "line": 767,
       "caller": "execConnectLaunch",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 782,
-      "caller": "execConnectLaunch",
-      "reason": "chained-call-target-unresolved"
-    },
-    {
-      "side": "go",
-      "file": "internal/daemon/dispatch_connect.go",
-      "line": 833,
+      "line": 818,
       "caller": "execConnectMethod",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 864,
+      "line": 852,
       "caller": "execConnectMethod",
       "reason": "chained-call-target-unresolved"
     },
     {
       "side": "go",
       "file": "internal/daemon/dispatch_connect.go",
-      "line": 867,
+      "line": 856,
       "caller": "execConnectMethod",
       "reason": "chained-call-target-unresolved"
     },
@@ -10196,6 +10593,27 @@ export const PLUGIN_GRAPH = {
       "file": "internal/daemon/dispatch.go",
       "line": 132,
       "caller": "Dispatch",
+      "reason": "chained-call-target-unresolved"
+    },
+    {
+      "side": "go",
+      "file": "internal/daemon/market_manager.go",
+      "line": 49,
+      "caller": "appHasUsage",
+      "reason": "chained-call-target-unresolved"
+    },
+    {
+      "side": "go",
+      "file": "internal/daemon/market_manager.go",
+      "line": 54,
+      "caller": "appHasUsage",
+      "reason": "chained-call-target-unresolved"
+    },
+    {
+      "side": "go",
+      "file": "internal/daemon/market_manager.go",
+      "line": 59,
+      "caller": "appHasUsage",
       "reason": "chained-call-target-unresolved"
     },
     {

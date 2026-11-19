@@ -5,7 +5,6 @@
     "methods": [
       "connect.launch.issue",
       "connect.directory.list",
-      "connect.directory.add",
       "connect.directory.remove",
       "connect.directory.favorite",
       "connect.directory.select",
@@ -17,9 +16,9 @@
     "documentation": {
       "name": "应用管理",
       "summary": "应用目录、部署与启动管理",
-      "duties": "负责应用目录的增删、收藏与选择，以及 Files 部署的安装、启动、停止与查询；钱包主动启动签发一次性令牌。",
+      "duties": "负责应用目录的删除、收藏与选择（收录由市场同步与手工来源负责），以及 Files 部署的安装、启动、停止与查询；钱包主动启动签发一次性令牌。",
       "boundary": "正式方法已由 apps.daemon 承接；应用目录身份、部署登记与启动令牌的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
-      "data": "应用目录与部署登记归属 apps 目录；启动令牌只在内存持有，不持久化。"
+      "data": "应用目录与部署登记归属 apps 目录（目录发布资料仅由 market 插件批次写入）；启动令牌只在内存持有，不持久化。"
     }
   },
   {
@@ -141,6 +140,26 @@
       "duties": "负责后台状态与钱包信息查询，以及钱包的解锁、新建与导入；密码只进请求体，不进响应或日志。",
       "boundary": "正式方法已由 vault.daemon 承接；钱包密钥、身份与余额查询的装配仍有 Daemon 集中持有部分，不能视为业务所有权收口完成。",
       "data": "钱包密钥归属 vault/key.json；身份与网络绑定归属 vault/info.json；私钥只在内存解密持有。"
+    }
+  },
+  {
+    "pluginId": "market",
+    "unitId": "market.daemon",
+    "methods": [
+      "connect.market.state",
+      "connect.market.sync",
+      "connect.market.configure",
+      "connect.market.discard",
+      "connect.market.add",
+      "connect.market.remove",
+      "connect.market.retry"
+    ],
+    "documentation": {
+      "name": "市场与手工来源",
+      "summary": "市场同步状态、手动刷新与手工来源、待验证项管理",
+      "duties": "负责拉取各市场完整目录并按来源批次提交 Connect 目录（逐 App 结果）、市场配置的登记与移除、手工 URL 验签与 Files 整包验证、待验证项的提交、重试与移除。",
+      "boundary": "正式方法已由 market.daemon 承接；目录数据的唯一写入方是本插件（批次提交），市场拉取与验证复用 Daemon 装配的既有能力。",
+      "data": "市场配置、按来源同步记录、在途批次日志、手工来源与待验证项归属 apps/market-state.json；目录发布资料经批次提交写入 apps/directory.json。"
     }
   }
 ]

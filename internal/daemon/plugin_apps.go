@@ -23,14 +23,6 @@ func (d *Daemon) appsAPIPlugin() webloom.Plugin {
 			res, perr := d.opConnectDirectoryList(ctx)
 			return res, nil, perr
 		},
-		kmapi.MethodConnectDirectoryAdd: func(ctx context.Context, params json.RawMessage, attachments map[string][]byte) (any, map[string][]byte, *kmapi.ErrorDetail) {
-			var p kmapi.ConnectDirectoryAddRequest
-			if err := decodeStrict(params, &p); err != nil {
-				return nil, nil, errDetail(kmapi.ErrBadRequest, "参数非法")
-			}
-			res, perr := d.opConnectDirectoryAdd(ctx, p)
-			return res, nil, perr
-		},
 		kmapi.MethodConnectDirectoryRemove: func(ctx context.Context, params json.RawMessage, attachments map[string][]byte) (any, map[string][]byte, *kmapi.ErrorDetail) {
 			var p kmapi.ConnectDirectoryRemoveRequest
 			if err := decodeStrict(params, &p); err != nil {

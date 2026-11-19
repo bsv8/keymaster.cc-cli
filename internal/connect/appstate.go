@@ -3,6 +3,7 @@ package connect
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/bsv8/keymaster.cc-cli/apppublication"
 	"github.com/bsv8/keymaster.cc-cli/walletcrypto"
 	"os"
 	"path/filepath"
@@ -66,20 +67,23 @@ type HistoryEvent struct {
 const maxHistoryEvents = 2000
 
 type AppState struct {
-	mu     sync.Mutex
-	path   string
-	perms  map[string]*PermissionEntry
-	events []HistoryEvent
-	seq    int64
+	mu       sync.Mutex
+	path     string
+	perms    map[string]*PermissionEntry
+	events   []HistoryEvent
+	displays map[string]apppublication.AppDisplay
+	seq      int64
 }
 
 type appStateFile struct {
 	Permissions []PermissionEntry `json:"permissions"`
 	Events      []HistoryEvent    `json:"events"`
+	// Displays 保存已验证 App 的展示资料；属于连接与使用记录，不写入发布资料。
+	Displays map[string]apppublication.AppDisplay `json:"displays,omitempty"`
 }
 
 func NewAppState(pluginDir string) *AppState {
-	return &AppState{path: filepath.Join(pluginDir, "apps.json"), perms: map[string]*PermissionEntry{}}
+	return &AppState{path: filepath.Join(pluginDir, "apps.json"), perms: map[string]*PermissionEntry{}, displays: map[string]apppublication.AppDisplay{}}
 }
 
 func (s *AppState) Load() error {
@@ -110,8 +114,20 @@ func (s *AppState) Load() error {
 			return fmt.Errorf("incompatible application history identity")
 		}
 	}
+	for key, display := range f.Displays {
+		if ApplicationKey(key) == "" {
+			return fmt.Errorf("incompatible application display identity")
+		}
+		if _, err := apppublication.ParseDisplay(apppublication.DisplayMap(display)); err != nil {
+			return err
+		}
+	}
 	s.perms = m
 	s.events = append([]HistoryEvent(nil), f.Events...)
+	s.displays = f.Displays
+	if s.displays == nil {
+		s.displays = map[string]apppublication.AppDisplay{}
+	}
 	return nil
 }
 
@@ -127,7 +143,7 @@ func (s *AppState) saveLocked() error {
 		plist = append(plist, cp)
 	}
 	sort.Slice(plist, func(i, j int) bool { return plist[i].AppKey < plist[j].AppKey })
-	raw, err := json.MarshalIndent(appStateFile{Permissions: plist, Events: s.events}, "", "  ")
+	raw, err := json.MarshalIndent(appStateFile{Permissions: plist, Events: s.events, Displays: s.displays}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -335,4 +351,33 @@ func (s *AppState) RevokeWithEvent(appKey, method string, event HistoryEvent) er
 		return err
 	}
 	return nil
+}
+
+// RememberDisplay 记录已验证 App 的展示资料；属于连接与使用记录，不写发布资料。
+func (s *AppState) RememberDisplay(key string, display apppublication.AppDisplay) error {
+	if ApplicationKey(key) == "" {
+		return fmt.Errorf("App public key required")
+	}
+	if _, err := apppublication.ParseDisplay(apppublication.DisplayMap(display)); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp, ok := s.displays[key]
+	if ok && cp == display {
+		return nil
+	}
+	s.displays[key] = display
+	return s.saveLocked()
+}
+
+// Displays 返回展示资料的浅拷贝快照。
+func (s *AppState) Displays() map[string]apppublication.AppDisplay {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]apppublication.AppDisplay, len(s.displays))
+	for key, display := range s.displays {
+		out[key] = display
+	}
+	return out
 }

@@ -452,6 +452,22 @@ func (m *Manager) IdentityByID(id string) (Record, bool) {
 	}
 	return Record{}, false
 }
+
+// RecordBySeed 读取指定 seed 的已安装部署并重验落盘，返回实际部署的公钥、
+// seed 与 PublicationID，供目录启动在 Go 后台核对目录对应 Files 渠道。
+func (m *Manager) RecordBySeed(seed string) (Record, error) {
+	if !validSeed(seed) {
+		return Record{}, fmt.Errorf("invalid indexseedhashhex")
+	}
+	if active, ok := m.IdentityByID(seed); ok {
+		return active, nil
+	}
+	record, _, err := m.read(seed)
+	if err != nil {
+		return Record{}, err
+	}
+	return record, nil
+}
 func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true

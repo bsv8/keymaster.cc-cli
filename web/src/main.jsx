@@ -10,6 +10,7 @@ import { ApplicationWorkspace, WorkspaceTabs, useWorkspace, useApplicationWorksp
 import { OverviewApps } from './overviewApps.jsx';
 import { GlobalApproval } from './approvalCenter.jsx';
 import { MarketPage, AppDetailPage } from './appMarket.jsx';
+import { MarketSettingsPage } from './marketSettings.jsx';
 import { PluginDiagnosticsPage } from './pluginDiagnostics.jsx';
 
 const TABS = [
@@ -437,12 +438,12 @@ function SettingsPage({ onTheme }) {
 /** 工作区持有应用，内部路由导航不会结束应用连接。 */
 
 function App() {
-  const pageFromLocation = () => window.location.pathname.startsWith('/app/') ? window.location.pathname : TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? (window.location.pathname === '/settings/plugins' ? 'plugins' : 'overview');
+  const pageFromLocation = () => window.location.pathname.startsWith('/app/') ? window.location.pathname : TABS.find(tab => `/${tab.id}` === window.location.pathname)?.id ?? (window.location.pathname === '/settings/plugins' ? 'plugins' : window.location.pathname === '/settings/market' ? 'market-settings' : 'overview');
   const [page, updatePage] = useState(pageFromLocation);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const setPage = (next) => {
     workspace.select(null);
-    const path = next === 'overview' ? '/' : next === 'plugins' ? '/settings/plugins' : next.startsWith('/') ? next : `/${next}`;
+    const path = next === 'overview' ? '/' : next === 'plugins' ? '/settings/plugins' : next === 'market-settings' ? '/settings/market' : next.startsWith('/') ? next : `/${next}`;
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
     updatePage(pageFromLocation());
   };
@@ -811,6 +812,7 @@ function App() {
 
       {page === 'apps' && <MarketPage navigate={setPage} />}
       {page.startsWith('/app/') && <AppDetailPage key={page} appId={page.slice(5)} navigate={setPage} />}
+      {page === 'market-settings' && <MarketSettingsPage navigate={setPage} />}
       {page === 'plugins' && <PluginDiagnosticsPage />}
 
           <p className="hint">{t('主题跟随系统或设置页选择（settings 唯一来源，本页不写 localStorage）。远程访问请自备反向代理与认证。')}</p>

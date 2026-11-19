@@ -399,6 +399,19 @@ func DecodePublication(content string) (*PublicationProof, error) {
 	return &PublicationProof{Publication: p, SignatureHex: parts[1]}, nil
 }
 
+// EncodePublication 返回已验证发布的记录字符串：
+// base64url(规范 JSON) + "." + 签名。与 DecodePublication 互为反函数。
+func EncodePublication(p *Publication, signatureHex string) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("publication missing")
+	}
+	canonical, err := CanonicalPublication(p)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(canonical)) + "." + signatureHex, nil
+}
+
 // PublicationID identifies the complete verified publication across its channels.
 func PublicationID(p *Publication) (string, error) {
 	canonical, err := CanonicalPublication(p)

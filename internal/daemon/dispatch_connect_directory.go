@@ -2,15 +2,12 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
-	"github.com/bsv8/keymaster.cc-cli/internal/connect"
-	"io"
-	"net/http"
 	"os"
 	"strings"
-	"time"
+
+	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
+	"github.com/bsv8/keymaster.cc-cli/apppublication"
+	"github.com/bsv8/keymaster.cc-cli/internal/connect"
 )
 
 func getenv(k string) string { return strings.TrimSpace(os.Getenv(k)) }
@@ -21,97 +18,47 @@ func (d *Daemon) directoryMarketURL() string {
 	return "https://market.bsv8.com"
 }
 
-// fetchMarket 只接受公开 entries/urls/files 格式，拒绝旧 origin 目录及整份坏快照。
-func fetchMarket(url string) ([]connect.DirectoryEntry, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(url, "/") + "/v1/market")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("market status %d", resp.StatusCode)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > 1<<20 {
-		return nil, fmt.Errorf("market snapshot too large")
-	}
-	var doc struct {
-		Entries []connect.DirectoryEntry `json:"entries"`
-	}
-	if err = json.Unmarshal(raw, &doc); err != nil {
-		return nil, err
-	}
-	if err = connect.ValidateDirectorySnapshot(doc.Entries); err != nil {
-		return nil, err
-	}
-	return doc.Entries, nil
-}
+// opConnectDirectoryList 只读本地已归属数据；不发请求、不触发市场刷新。
+// 市场同步由后台首次同步与 /settings/market 手动刷新负责。
 func (d *Daemon) opConnectDirectoryList(ctx context.Context) (any, *kmapi.ErrorDetail) {
 	if d.connectMgr == nil {
 		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
 	}
-	store := d.connectMgr.Directory()
-	if url := d.directoryMarketURL(); url != "" {
-		leader, call := store.ClaimMarketFetch(time.Now().UnixMilli())
-		if call != nil {
-			if leader {
-				entries, err := fetchMarket(url)
-				_ = store.CompleteMarketFetch(entries, time.Now().UnixMilli(), err)
-			} else {
-				select {
-				case <-call.Done():
-				case <-ctx.Done():
-					return nil, errDetail(kmapi.ErrInternal, ctx.Err().Error())
-				}
-			}
+	view := d.connectMgr.Directory().View()
+	// 已验证连接的展示资料随使用记录保存；只作展示，不构成可启动入口。
+	// 用户手动删除的 App 不进入展示投影，新的已验证连接清除删除标记后恢复。
+	deleted := d.connectMgr.Directory().DeletedKeys()
+	deletedSet := map[string]bool{}
+	for _, key := range deleted {
+		deletedSet[key] = true
+	}
+	known := map[string]apppublication.AppDisplay{}
+	for key, display := range d.connectMgr.Permissions().Displays() {
+		if deletedSet[key] {
+			continue
 		}
+		known[key] = display
 	}
-	return store.View(), nil
+	view["knownApplications"] = known
+	return view, nil
 }
-func (d *Daemon) opConnectDirectoryAdd(ctx context.Context, p kmapi.ConnectDirectoryAddRequest) (any, *kmapi.ErrorDetail) {
-	if d.connectMgr == nil {
-		return nil, errDetail(kmapi.ErrInternal, "Connect 未就绪")
-	}
-	if isAppCaller(ctx) {
-		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权添加目录")
-	}
-	if (p.URL == nil) == (p.Indexseedhashhex == nil) {
-		return nil, errDetail(kmapi.ErrBadRequest, "exactly one URL or seed is required")
-	}
-	store := d.connectMgr.Directory()
-	pending, err := store.AddPending(connect.DirectoryPending{URL: stringOrEmpty(p.URL), Indexseedhashhex: stringOrEmpty(p.Indexseedhashhex), Name: stringOrEmpty(p.Name), Description: stringOrEmpty(p.Description), Icon: stringOrEmpty(p.Icon)})
-	if err != nil {
-		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
-	}
-	if pending.Indexseedhashhex != "" {
-		// install 在整包验证后统一解析 seed pending；此处不能重复提交目录。
-		_, e := d.opConnectDeploymentInstall(ctx, kmapi.ConnectDeploymentInstallRequest{Indexseedhashhex: pending.Indexseedhashhex})
-		if e != nil {
-			if err := store.PendingError(pending.PendingID, fmt.Errorf("%s", e.Message)); err != nil {
-				return nil, errDetail(kmapi.ErrInternal, err.Error())
-			}
-		}
-	}
-	d.publishConnect()
-	return store.View(), nil
-}
+
+// opConnectDirectoryRemove 是用户手动删除应用：写入删除标记，阻止来源插件
+// 的重放恢复。待验证项归 Market（connect.market.remove）。
 func (d *Daemon) opConnectDirectoryRemove(ctx context.Context, p kmapi.ConnectDirectoryRemoveRequest) (any, *kmapi.ErrorDetail) {
 	if isAppCaller(ctx) {
 		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权删除目录")
 	}
-	if (p.AppPublicKeyHex == nil) == (p.PendingID == nil) {
-		return nil, errDetail(kmapi.ErrBadRequest, "exactly one App public key or pending ID is required")
+	if p.AppPublicKeyHex == "" {
+		return nil, errDetail(kmapi.ErrBadRequest, "App public key required")
 	}
-	if err := d.connectMgr.Directory().Remove(stringOrEmpty(p.AppPublicKeyHex), stringOrEmpty(p.PendingID)); err != nil {
+	if err := d.connectMgr.Directory().Remove(p.AppPublicKeyHex); err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
 	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
+
 func (d *Daemon) opConnectDirectoryFavorite(ctx context.Context, p kmapi.ConnectDirectoryFavoriteRequest) (any, *kmapi.ErrorDetail) {
 	if isAppCaller(ctx) {
 		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权收藏目录")
@@ -122,6 +69,7 @@ func (d *Daemon) opConnectDirectoryFavorite(ctx context.Context, p kmapi.Connect
 	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
+
 func (d *Daemon) opConnectDirectorySelect(ctx context.Context, p kmapi.ConnectDirectorySelectRequest) (any, *kmapi.ErrorDetail) {
 	if isAppCaller(ctx) {
 		return nil, errDetail(kmapi.ErrOriginRejected, "App 无权修改目录")
@@ -135,6 +83,7 @@ func (d *Daemon) opConnectDirectorySelect(ctx context.Context, p kmapi.ConnectDi
 	d.publishConnect()
 	return kmapi.Ok{Ok: true}, nil
 }
+
 func stringOrEmpty(s *string) string {
 	if s == nil {
 		return ""

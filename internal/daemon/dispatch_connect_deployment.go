@@ -97,6 +97,42 @@ func (d *Daemon) deploymentAccess(ctx context.Context) *kmapi.ErrorDetail {
 	}
 	return d.needUnlocked()
 }
+func (d *Daemon) verifyDirectoryFilesDeployment(expectedAppPublicKeyHex, seed string) error {
+	if d.connectMgr == nil || d.deployments == nil {
+		return fmt.Errorf("Connect 未就绪")
+	}
+	record, err := d.deployments.RecordBySeed(seed)
+	if err != nil {
+		return fmt.Errorf("部署不存在或验签失败: %w", err)
+	}
+	deployedKey := connect.ApplicationKey(record.AppPublicKeyHex)
+	if deployedKey == "" {
+		return fmt.Errorf("部署公钥非法")
+	}
+	if expected := connect.ApplicationKey(expectedAppPublicKeyHex); expectedAppPublicKeyHex != "" {
+		if expected == "" {
+			return fmt.Errorf("目录启动 App 公钥非法")
+		}
+		if expected != deployedKey {
+			return fmt.Errorf("部署公钥与目录目标不一致")
+		}
+	}
+	if record.Indexseedhashhex != seed {
+		return fmt.Errorf("部署 seed 与目录目标不一致")
+	}
+	if record.PublicationID == "" {
+		return fmt.Errorf("部署证明摘要缺失")
+	}
+	expectedPublicationID, err := d.connectMgr.Directory().FilesPublicationID(deployedKey, seed)
+	if err != nil {
+		return err
+	}
+	if record.PublicationID != expectedPublicationID {
+		return fmt.Errorf("部署证明与目录发布不一致")
+	}
+	return nil
+}
+
 func (d *Daemon) opConnectDeploymentInstall(ctx context.Context, p kmapi.ConnectDeploymentInstallRequest) (any, *kmapi.ErrorDetail) {
 	if e := d.deploymentAccess(ctx); e != nil {
 		return nil, e
@@ -105,9 +141,8 @@ func (d *Daemon) opConnectDeploymentInstall(ctx context.Context, p kmapi.Connect
 	if err != nil {
 		return nil, errDetail(kmapi.ErrBadRequest, err.Error())
 	}
-	if err := d.connectMgr.Directory().ResolveSeed(r.Indexseedhashhex, r.AppPublicKeyHex, r.AppVersion, r.PublicationID, r.Display); err != nil {
-		return nil, errDetail(kmapi.ErrInternal, err.Error())
-	}
+	// 安装验证只产出部署登记，不写目录数据；目录条目由市场同步与手工
+	// 来源提交（connect.market.*）负责。
 	return struct {
 		kmapi.ConnectDeploymentInstallResponse
 		AppVersion string `json:"appVersion"`
@@ -116,6 +151,13 @@ func (d *Daemon) opConnectDeploymentInstall(ctx context.Context, p kmapi.Connect
 func (d *Daemon) opConnectDeploymentStart(ctx context.Context, p kmapi.ConnectDeploymentStartRequest) (any, *kmapi.ErrorDetail) {
 	if e := d.deploymentAccess(ctx); e != nil {
 		return nil, e
+	}
+	// 目录启动传 App 公钥和所选 seed，由 Go 在启动服务前核对当前目录与实际
+	// 部署；独立启动省略该字段，沿用原有整包验证，不查目录。
+	if expected := stringOrEmpty(p.ExpectedAppPublicKeyHex); expected != "" {
+		if err := d.verifyDirectoryFilesDeployment(expected, p.DeploymentID); err != nil {
+			return nil, errDetail(kmapi.ErrBadRequest, err.Error())
+		}
 	}
 	r, err := d.deployments.Start(p.DeploymentID)
 	if err != nil {
@@ -147,29 +189,23 @@ func (d *Daemon) opConnectDeploymentList(ctx context.Context) (any, *kmapi.Error
 }
 
 // verifiedConnectSource 只信任当前监听登记或有效 URL 发布记录，绝不采用页面自报 Files 身份。
-// 同一处理阶段解码一次并复用结果：身份、版本、展示与目录入口共用这份已验证发布。
-func (d *Daemon) verifiedConnectSource(params map[string]any, origin string) (string, string, connect.DirectoryEntry, apppublication.AppDisplay, error) {
+// 同一处理阶段解码一次并复用结果：连接授权、展示资料与历史记录共用这份已验证身份，
+// 不写目录数据。
+func (d *Daemon) verifiedConnectSource(params map[string]any, origin string) (string, string, apppublication.AppDisplay, error) {
 	if r, ok := d.deployments.Identity(origin); ok {
-		entry := connect.DirectoryEntry{PublicationID: r.PublicationID, AppVersion: r.AppVersion, AppPublicKeyHex: r.AppPublicKeyHex, Name: r.Display.Name, Description: r.Display.Description, Icon: r.Display.Icon, URLs: []connect.DirectoryURL{}, Files: []connect.DirectoryFiles{{Indexseedhashhex: r.Indexseedhashhex, Display: r.Display}}}
-		return r.AppPublicKeyHex, r.DeploymentID, entry, r.Display, nil
+		return r.AppPublicKeyHex, r.DeploymentID, r.Display, nil
 	}
 	if d.deployments.WasDeploymentOrigin(origin) {
-		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, fmt.Errorf("Files deployment origin is no longer active")
+		return "", "", apppublication.AppDisplay{}, fmt.Errorf("Files deployment origin is no longer active")
 	}
 	p, present, err := connect.VerifiedPublication(params, origin)
 	if err != nil {
-		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, err
+		return "", "", apppublication.AppDisplay{}, err
 	}
 	if !present {
-		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, fmt.Errorf("verified App identity is required")
+		return "", "", apppublication.AppDisplay{}, fmt.Errorf("verified App identity is required")
 	}
-	publicationID, err := apppublication.PublicationID(p)
-	if err != nil {
-		return "", "", connect.DirectoryEntry{}, apppublication.AppDisplay{}, err
-	}
-
-	entry := connect.DirectoryEntry{PublicationID: publicationID, AppVersion: p.AppVersion, AppPublicKeyHex: p.AppPublicKeyHex, Name: p.Name, Description: p.Description, Icon: p.Display().Icon, URLs: []connect.DirectoryURL{{URL: p.URL.Address, Origin: origin, Display: p.Display()}}, Files: []connect.DirectoryFiles{}}
-	return p.AppPublicKeyHex, "", entry, p.Display(), nil
+	return p.AppPublicKeyHex, "", p.Display(), nil
 }
 
 func (d *Daemon) deploymentGeneration(origin string) string {

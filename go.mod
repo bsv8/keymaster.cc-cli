@@ -8,7 +8,8 @@ require (
 	github.com/bsv8/BitFSProtocol v0.6.0
 	github.com/bsv8/ChannelProtocol v0.6.0
 	github.com/bsv8/KeyHold/go/v2 v2.1.0
-	github.com/bsv8/KeymasterAPIProtocol v0.1.5
+	github.com/bsv8/KeymasterAPIProtocol v0.1.6
+	github.com/bsv8/KeymasterMarketProtocol v0.1.1
 	github.com/bsv8/MasterSeed v1.1.0
 	github.com/bsv8/SatSubscriptionProtocol v0.3.0
 	github.com/bsv8/bitcoin-libp2p v0.3.2
@@ -42,7 +43,7 @@ require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bsv8/MultisigPool/v4 v4.0.0
-	github.com/bsv8/WebLoom/go v0.6.1
+	github.com/bsv8/WebLoom/go v0.6.2
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect

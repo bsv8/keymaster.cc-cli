@@ -34,6 +34,7 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/datadir"
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
 	"github.com/bsv8/keymaster.cc-cli/internal/events"
+	"github.com/bsv8/keymaster.cc-cli/internal/market"
 	"github.com/bsv8/keymaster.cc-cli/internal/webui"
 	"github.com/gorilla/websocket"
 )
@@ -104,6 +105,10 @@ type Daemon struct {
 
 	deployments *appdeployment.Manager
 	connectMgr  *connect.Manager
+	market      *market.Manager
+	// marketCancel 取消 Market 后台任务（首次同步与异步验证）的生命周期；
+	// Close 在释放数据目录锁之前取消并等待其退出。
+	marketCancel context.CancelFunc
 
 	// portOverride forces the HTTP listen port for this run only (0 = from
 	// settings or default). Set once in Open from Options, read in ServeHTTP.
@@ -208,6 +213,10 @@ func Open(opts Options) (*Daemon, error) {
 	if err := d.connectMgr.Load(); err != nil {
 		_ = guard.Release()
 		return nil, fmt.Errorf("daemon: 加载 App 授权失败: %w", err)
+	}
+	if err := d.initMarketManager(); err != nil {
+		_ = guard.Release()
+		return nil, fmt.Errorf("daemon: 加载市场同步状态失败: %w", err)
 	}
 	store := appconfig.New(layout.Dir)
 	releaseAll := func() {
@@ -412,6 +421,23 @@ func (d *Daemon) close() error {
 		case <-time.After(5 * time.Second):
 		}
 	}
+	// Market 后台任务（首次同步与异步验证）已脱离 RPC 排空：在此取消并等待
+	// 退出，之后才释放数据目录锁；抓取与下载都响应取消，预算覆盖最坏等待。
+	if d.marketCancel != nil {
+		d.marketCancel()
+		d.marketCancel = nil
+	}
+	if d.market != nil {
+		marketDone := make(chan struct{})
+		go func() {
+			d.market.Wait()
+			close(marketDone)
+		}()
+		select {
+		case <-marketDone:
+		case <-time.After(45 * time.Second):
+		}
+	}
 	// 关闭消息总线：订阅连接随之结束，不再接受新发布。
 	if d.events != nil {
 		d.events.Close()
@@ -525,6 +551,9 @@ func (d *Daemon) Unlock(password string) error {
 	if d.isStopping() {
 		return nil
 	}
+	// 钱包身份与存储就绪：触发本轮运行唯一一次市场同步（插件装配已在
+	// finishOpen 完成）。市场拉取挂起不阻塞解锁返回。
+	go d.market.FirstSync()
 	// Start multi-root selling in the background (idempotent).
 	go d.ensureSellerStarted()
 	d.ensureCollectorsStarted()

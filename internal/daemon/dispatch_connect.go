@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bsv8/KeymasterAPIProtocol/kmapi"
+	"github.com/bsv8/keymaster.cc-cli/apppublication"
 	"github.com/bsv8/keymaster.cc-cli/internal/connect"
 )
 
@@ -475,7 +476,7 @@ func (d *Daemon) opConnectExec(ctx context.Context, raw json.RawMessage, attachm
 			b, _ := json.Marshal(p.Params)
 			_ = json.Unmarshal(b, &paramsMap)
 		}
-		appHex, deploymentID, _, _, identityErr := d.verifiedConnectSource(paramsMap, canonical)
+		appHex, deploymentID, _, identityErr := d.verifiedConnectSource(paramsMap, canonical)
 		if identityErr != nil {
 			return nil, nil, errDetail(kmapi.ErrOriginRejected, identityErr.Error())
 		}
@@ -642,6 +643,11 @@ func (d *Daemon) opConnectLaunchIssue(ctx context.Context, p kmapi.ConnectLaunch
 		if !ok || active.DeploymentID != id {
 			return nil, errDetail(kmapi.ErrOriginRejected, "deployment no longer active")
 		}
+		// 目录 Files 启动在签发令牌前核对当前目录对应渠道的证明摘要；
+		// 已安装部署走同一检查，不回退到独立启动。
+		if err := d.verifyDirectoryFilesDeployment(stringOrEmpty(p.ExpectedAppPublicKeyHex), id); err != nil {
+			return nil, errDetail(kmapi.ErrBadRequest, err.Error())
+		}
 	} else if _, ok := d.deployments.Identity(canonical); ok {
 		return nil, errDetail(kmapi.ErrOriginRejected, "Files launch requires active deployment context")
 	}
@@ -725,8 +731,8 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 	// 授权，显式退出按 authorizationId 撤销本连接，整来源断开仍走
 	// connect.auth.revoke（按 App 公钥全撤）。
 	// 启动消费 proof 仅作一致性核对：提交的证明须与令牌绑定的来源一致，
-	// 不一致直接拒绝；身份、展示、版本与目录入口合用这一条已验证结果。
-	launchAppHex, deploymentID, publication, display, identityErr := d.verifiedConnectSource(paramsMap, canonical)
+	// 不一致直接拒绝；身份与展示资料合用这一条已验证结果，不写目录数据。
+	launchAppHex, deploymentID, display, identityErr := d.verifiedConnectSource(paramsMap, canonical)
 	if identityErr != nil {
 		return nil, nil, errDetail(kmapi.ErrOriginRejected, identityErr.Error())
 	}
@@ -742,17 +748,15 @@ func (d *Daemon) execConnectLaunch(ctx context.Context, p kmapi.ConnectExecReque
 		Generation:      d.connectMgr.Generation(),
 		AppPublicKeyHex: launchAppHex, DeploymentID: deploymentID, DeploymentGeneration: rec.DeploymentGeneration,
 	}
-	if err := d.connectMgr.Directory().Resolve("", publication); err != nil {
-		return nil, nil, errDetail(kmapi.ErrOriginRejected, err.Error())
-	}
-	if err := d.connectMgr.Directory().RememberDisplay(launchAppHex, display); err != nil {
-		return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
-	}
-	// 目录事务先提交；失败时尚未保存授权或登记活动连接。
-	if rec.URL != "" {
-		if err := d.connectMgr.Directory().ResolveURL(rec.URL, publication, display); err != nil {
-			return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
+	// 建连结果只用于连接与使用记录，不写入发布资料。展示资料随使用记录
+	// 保存；被用户删除的 App 通过新连接恢复管理资格。
+	if display != (apppublication.AppDisplay{}) {
+		if err := d.connectMgr.Permissions().RememberDisplay(launchAppHex, display); err != nil {
+			return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
 		}
+	}
+	if err := d.connectMgr.Directory().RestoreApp(launchAppHex); err != nil {
+		return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
 	}
 	// 授权保存与传输绑定在同一关闭锁内完成：传输已关闭不保存，已保存
 	// 必已绑定，不留下游离授权；失败时归还令牌供重试。
@@ -835,18 +839,22 @@ func (d *Daemon) execConnectMethod(ctx context.Context, a connect.Approval) (any
 			}
 		}
 		// 认领复核：已验证发布的公钥必须与审批保存的身份一致。
-		_, _, publication, display, materialErr := d.verifiedConnectSource(a.Params, a.Origin)
+		verifiedAppHex, _, display, materialErr := d.verifiedConnectSource(a.Params, a.Origin)
 		if materialErr != nil {
 			return nil, nil, errDetail(kmapi.ErrOriginRejected, "应用资料验证失败")
 		}
-		if publication.AppPublicKeyHex != loginAppHex {
+		if verifiedAppHex != loginAppHex {
 			return nil, nil, errDetail(kmapi.ErrOriginRejected, "verified App identity differs from approval")
 		}
-		if err := d.connectMgr.Directory().Resolve("", publication); err != nil {
-			return nil, nil, errDetail(kmapi.ErrOriginRejected, err.Error())
+		// 建连结果只用于连接与使用记录，不写入发布资料；被用户删除的 App
+		// 通过新连接恢复管理资格。
+		if display != (apppublication.AppDisplay{}) {
+			if err := d.connectMgr.Permissions().RememberDisplay(loginAppHex, display); err != nil {
+				return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
+			}
 		}
-		if err := d.connectMgr.Directory().RememberDisplay(loginAppHex, display); err != nil {
-			return nil, nil, errDetail(kmapi.ErrInternal, "保存应用资料失败")
+		if err := d.connectMgr.Directory().RestoreApp(loginAppHex); err != nil {
+			return nil, nil, errDetail(kmapi.ErrInternal, err.Error())
 		}
 		savedLoginAuth := connect.Auth{
 			AuthorizationID: authorizationID,

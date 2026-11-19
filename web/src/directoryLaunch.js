@@ -10,7 +10,7 @@ export async function prepareDirectoryEntry(entry, call) {
   let installed = list.deployments.find(d => d.indexseedhashhex === selected.indexseedhashhex);
   if (!installed) installed = await call('connect.deployment.install', { indexseedhashhex: selected.indexseedhashhex });
   if (entry.appPublicKeyHex && installed.appPublicKeyHex !== entry.appPublicKeyHex) throw new Error('部署公钥与目录目标不一致');
-  const running = await call('connect.deployment.start', { deploymentId: installed.deploymentId });
+  const running = await call('connect.deployment.start', { deploymentId: installed.deploymentId, expectedAppPublicKeyHex: entry.appPublicKeyHex });
   return { url: running.url, expectedAppPublicKeyHex: running.appPublicKeyHex, deploymentId: running.deploymentId };
 }
 export function directoryLaunchTarget(entry, prepare) {

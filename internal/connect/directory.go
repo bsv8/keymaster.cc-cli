@@ -1,7 +1,6 @@
 package connect
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"github.com/bsv8/keymaster.cc-cli/apppublication"
@@ -13,20 +12,20 @@ import (
 	"sync"
 )
 
-const DirectoryTTL = int64(600000)
+// 手工来源使用固定标识；市场来源 ID（market-default、market_<随机值> 等）
+// 由 Market 层分配并保证唯一，Connect 把来源 ID 当作关联键，不复验其拼写。
+const SourceManual = "manual"
 
 type DirectoryURL struct {
 	PublicationID string                    `json:"publicationId,omitempty"`
 	Display       apppublication.AppDisplay `json:"display"`
 	URL           string                    `json:"url"`
 	Origin        string                    `json:"origin"`
-	VerifiedAt    int64                     `json:"verifiedAt,omitempty"`
 }
 type DirectoryFiles struct {
 	PublicationID    string                    `json:"publicationId,omitempty"`
 	Display          apppublication.AppDisplay `json:"display"`
 	Indexseedhashhex string                    `json:"indexseedhashhex"`
-	VerifiedAt       int64                     `json:"verifiedAt,omitempty"`
 }
 type DirectorySelection struct {
 	URL              string `json:"url,omitempty"`
@@ -42,51 +41,41 @@ type DirectoryEntry struct {
 	URLs            []DirectoryURL      `json:"urls"`
 	Files           []DirectoryFiles    `json:"files"`
 	Favorite        bool                `json:"favorite"`
-	MarketListed    bool                `json:"marketListed"`
-	Local           bool                `json:"local"`
 	Selected        *DirectorySelection `json:"selected,omitempty"`
 }
-type DirectoryPending struct {
-	PendingID        string `json:"pendingId"`
-	URL              string `json:"url,omitempty"`
-	Indexseedhashhex string `json:"indexseedhashhex,omitempty"`
-	Name             string `json:"name,omitempty"`
-	Description      string `json:"description,omitempty"`
-	Icon             string `json:"icon,omitempty"`
-	Error            string `json:"error,omitempty"`
-}
-type MarketCache struct {
-	Entries               []DirectoryEntry `json:"entries"`
-	LastSuccessfulFetchAt int64            `json:"lastSuccessfulFetchAt"`
-}
-type directoryFile struct {
-	Displays  map[string]apppublication.AppDisplay `json:"displays,omitempty"`
-	Version   int                                  `json:"version"`
-	Market    MarketCache                          `json:"market"`
-	Local     map[string]DirectoryEntry            `json:"local"`
-	Favorites map[string]bool                      `json:"favorites"`
-	Pending   map[string]DirectoryPending          `json:"pending"`
-	Selection map[string]DirectorySelection        `json:"selection"`
-}
-type MarketFetchCall struct {
-	done chan struct{}
-	err  error
+
+// SourceRecord 记录某来源已接受的整份发布；不拼接其他来源的字段。
+// Sequence 是持久化提交序号：同版本不同内容按实际提交顺序判定，取序号
+// 更大者；相同来源重放同一份已保存内容不改变序号。
+type SourceRecord struct {
+	SourceID    string         `json:"sourceId"`
+	Publication DirectoryEntry `json:"publication"`
+	Sequence    int64          `json:"sequence"`
 }
 
-func (c *MarketFetchCall) Done() <-chan struct{} { return c.done }
-func (c *MarketFetchCall) Err() error            { return c.err }
+type directoryFile struct {
+	Version     int                                `json:"version"`
+	Apps        map[string]DirectoryEntry          `json:"apps"`
+	Sources     map[string]map[string]SourceRecord `json:"sources"`
+	Favorites   map[string]bool                    `json:"favorites"`
+	DeletedKeys []string                           `json:"deletedKeys"`
+	Selection   map[string]DirectorySelection      `json:"selection"`
+	// Sequence 为目录级单调递增提交序号；仅成功提交时推进。
+	Sequence int64 `json:"sequence"`
+}
 
 type DirectoryStore struct {
-	mu          sync.Mutex
-	path        string
-	state       directoryFile
-	fetchCall   *MarketFetchCall
-	marketError string
-	loadError   error
+	mu        sync.Mutex
+	path      string
+	state     directoryFile
+	loadError error
 }
 
 func NewDirectoryStore(dir string) *DirectoryStore {
-	return &DirectoryStore{path: filepath.Join(dir, "directory.json"), state: directoryFile{Version: 2, Market: MarketCache{Entries: []DirectoryEntry{}}, Local: map[string]DirectoryEntry{}, Favorites: map[string]bool{}, Pending: map[string]DirectoryPending{}, Selection: map[string]DirectorySelection{}}}
+	return &DirectoryStore{path: filepath.Join(dir, "directory.json"), state: emptyDirectoryFile()}
+}
+func emptyDirectoryFile() directoryFile {
+	return directoryFile{Version: 1, Apps: map[string]DirectoryEntry{}, Sources: map[string]map[string]SourceRecord{}, Favorites: map[string]bool{}, DeletedKeys: []string{}, Selection: map[string]DirectorySelection{}}
 }
 
 // CanonicalEntryURL 保留完整路径、查询和片段，来源仅作传输边界。
@@ -161,12 +150,13 @@ func isSeed(s string) bool {
 		return false
 	}
 	for _, c := range s {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
 	return true
 }
+
 func (s *DirectoryStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,19 +170,13 @@ func (s *DirectoryStore) Load() error {
 	}
 	var f directoryFile
 	err = json.Unmarshal(raw, &f)
-	if err == nil && (f.Version != 2 || f.Local == nil || f.Pending == nil || f.Favorites == nil || f.Selection == nil) {
+	if err == nil && (f.Version != 1 || f.Apps == nil || f.Sources == nil || f.Favorites == nil || f.Selection == nil || f.DeletedKeys == nil) {
 		err = fmt.Errorf("incompatible directory format")
 	}
 	if err == nil {
-		err = ValidateDirectorySnapshot(f.Market.Entries)
-		if f.Market.LastSuccessfulFetchAt < 0 {
-			err = fmt.Errorf("invalid market timestamp")
-		}
-	}
-	if err == nil {
-		for key, e := range f.Local {
+		for key, e := range f.Apps {
 			if e.AppPublicKeyHex != key {
-				err = fmt.Errorf("incompatible local App identity")
+				err = fmt.Errorf("incompatible App identity")
 				break
 			}
 			if err = ValidateDirectorySnapshot([]DirectoryEntry{e}); err != nil {
@@ -201,9 +185,49 @@ func (s *DirectoryStore) Load() error {
 		}
 	}
 	if err == nil {
+		for key, perSource := range f.Sources {
+			if ApplicationKey(key) == "" || perSource == nil {
+				err = fmt.Errorf("incompatible App sources")
+				break
+			}
+			if _, ok := f.Apps[key]; !ok {
+				err = fmt.Errorf("source without current App entry")
+				break
+			}
+			for sourceID, record := range perSource {
+				if sourceID == "" {
+					err = fmt.Errorf("empty source identity")
+					break
+				}
+				if record.SourceID != sourceID || record.Publication.AppPublicKeyHex != key {
+					err = fmt.Errorf("incompatible source record")
+					break
+				}
+				if record.Sequence <= 0 {
+					err = fmt.Errorf("invalid source sequence")
+					break
+				}
+				if err = ValidateDirectorySnapshot([]DirectoryEntry{record.Publication}); err != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	}
+	if err == nil {
 		for key := range f.Favorites {
 			if ApplicationKey(key) == "" {
 				err = fmt.Errorf("incompatible favorite identity")
+				break
+			}
+		}
+	}
+	if err == nil {
+		for _, key := range f.DeletedKeys {
+			if ApplicationKey(key) == "" {
+				err = fmt.Errorf("incompatible deletion identity")
 				break
 			}
 		}
@@ -226,38 +250,9 @@ func (s *DirectoryStore) Load() error {
 			}
 		}
 	}
-	if err == nil {
-		for id, p := range f.Pending {
-			if p.PendingID != id || id == "" || (p.URL == "") == (p.Indexseedhashhex == "") {
-				err = fmt.Errorf("invalid pending identity")
-				break
-			}
-			if p.URL != "" {
-				full, _, e := CanonicalEntryURL(p.URL)
-				if e != nil || full != p.URL {
-					err = fmt.Errorf("invalid pending URL")
-					break
-				}
-			} else if !isSeed(p.Indexseedhashhex) {
-				err = fmt.Errorf("invalid pending seed")
-				break
-			}
-		}
-	}
-
 	if err != nil {
 		s.loadError = err
 		return err
-	}
-	for key, display := range f.Displays {
-		if ApplicationKey(key) == "" {
-			s.loadError = fmt.Errorf("invalid display identity")
-			return s.loadError
-		}
-		if _, err := apppublication.ParseDisplay(apppublication.DisplayMap(display)); err != nil {
-			s.loadError = err
-			return err
-		}
 	}
 	s.state = f
 	return nil
@@ -294,104 +289,172 @@ func (s *DirectoryStore) transactLocked(change func(*directoryFile) error) error
 	s.state = next
 	return nil
 }
-func (s *DirectoryStore) AddPending(p DirectoryPending) (DirectoryPending, error) {
-	if (p.URL == "") == (p.Indexseedhashhex == "") {
-		return p, fmt.Errorf("exactly one URL or seed is required")
-	}
-	if p.URL != "" {
-		full, _, err := CanonicalEntryURL(p.URL)
-		if err != nil {
-			return p, err
-		}
-		p.URL = full
-	} else if !isSeed(p.Indexseedhashhex) {
-		return p, fmt.Errorf("invalid seed")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, old := range s.state.Pending {
-		if old.URL == p.URL && old.Indexseedhashhex == p.Indexseedhashhex {
-			return old, nil
-		}
-	}
-	p.PendingID = "pending_" + rand.Text()
-	err := s.transactLocked(func(f *directoryFile) error { f.Pending[p.PendingID] = p; return nil })
-	return p, err
-}
-func (s *DirectoryStore) PendingError(id string, cause error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.transactLocked(func(f *directoryFile) error {
-		p, ok := f.Pending[id]
-		if !ok {
-			return fmt.Errorf("pending item not found")
-		}
-		p.Error = cause.Error()
-		f.Pending[id] = p
-		return nil
-	})
+
+// SourceChange 是来源插件提交的两类变更：提交已验证发布或标记来源失效。
+type SourceChange struct {
+	Kind            string // "submit" | "invalidate"
+	SourceID        string
+	AppPublicKeyHex string
+	AppVersion      string // submit
+	Publication     DirectoryEntry
 }
 
-// Resolve 只接受宿主已经验证的身份。目录中的预期公钥不能调用本方法授予身份。
-func (s *DirectoryStore) Resolve(id string, e DirectoryEntry) error {
-	if err := ValidateDirectorySnapshot([]DirectoryEntry{e}); err != nil {
-		return err
+// SourceChangeResult 逐 App 返回结果；低版本只拒对应 App，不影响同批其他变更。
+type SourceChangeResult struct {
+	SourceID        string `json:"sourceId"`
+	AppPublicKeyHex string `json:"appPublicKeyHex"`
+	Status          string `json:"status"` // applied | unchanged | lower-version-rejected | failed
+	Reason          string `json:"reason,omitempty"`
+}
+
+// samePublication 比较整份发布内容：版本、展示资料与渠道；不含收藏、选择等用户状态。
+func samePublication(a, b DirectoryEntry) bool {
+	return a.AppVersion == b.AppVersion && a.Name == b.Name && a.Description == b.Description && a.Icon == b.Icon &&
+		slices.Equal(a.URLs, b.URLs) && slices.Equal(a.Files, b.Files)
+}
+
+// pickCurrent 从剩余有效来源取回一份完整发布：最高版本，同版本取最近一次成功应用。
+func pickCurrent(perSource map[string]SourceRecord) (DirectoryEntry, string, bool) {
+	var winner *SourceRecord
+	for _, record := range perSource {
+		if winner == nil {
+			winner = &record
+			continue
+		}
+		cmp := apppublication.CompareAppVersions(record.Publication.AppVersion, winner.Publication.AppVersion)
+		if cmp > 0 || cmp == 0 && record.Sequence > winner.Sequence {
+			winner = &record
+		}
 	}
+	if winner == nil {
+		return DirectoryEntry{}, "", false
+	}
+	return winner.Publication, winner.SourceID, true
+}
+
+func applySelection(entry *DirectoryEntry, selected DirectorySelection, ok bool) {
+	entry.Selected = nil
+	if ok && directoryHasSelection(*entry, selected) {
+		copySel := selected
+		entry.Selected = &copySel
+	}
+}
+
+// ApplyBatch 是 Connect 的受限批次写入入口：仅来源插件（Market 同步与手工提交）调用。
+// 提交已验证发布时高版本与后到的同版本整份覆盖；低版本只拒对应 App。来源失效只解除
+// 指定来源；仍有其他有效来源时保留应用，最后一个来源失效后有收藏或使用数据则保留，
+// 其余自动移除。hasUsage 无法确认时按“有使用”处理（保留）。
+// 目录写盘失败时返回错误且结果无效：调用方不得据失效结果记账，须整轮作废重试。
+func (s *DirectoryStore) ApplyBatch(changes []SourceChange, hasUsage func(string) bool) ([]SourceChangeResult, error) {
+	results := make([]SourceChangeResult, 0, len(changes))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.transactLocked(func(f *directoryFile) error {
-		var market DirectoryEntry
-		for _, listed := range f.Market.Entries {
-			if listed.AppPublicKeyHex != e.AppPublicKeyHex {
-				continue
-			}
-			if apppublication.CompareAppVersions(e.AppVersion, listed.AppVersion) < 0 {
-				return fmt.Errorf("older appVersion rejected")
-			}
-			market = listed
-			break
-		}
-		key := e.AppPublicKeyHex
-		e.Selected = nil
-		if old, ok := f.Local[key]; ok {
-			if apppublication.CompareAppVersions(e.AppVersion, old.AppVersion) < 0 {
-				return fmt.Errorf("older appVersion rejected")
-			}
-			// Independent channel checks may fill in another channel only when
-			// both attest to the identical signed publication.
-			if e.PublicationID != "" && e.PublicationID == old.PublicationID {
-				if len(e.URLs) == 0 {
-					e.URLs = old.URLs
+	if err := s.transactLocked(func(f *directoryFile) error {
+		for _, change := range changes {
+			result := SourceChangeResult{SourceID: change.SourceID, AppPublicKeyHex: change.AppPublicKeyHex}
+			switch change.Kind {
+			case "submit":
+				if change.SourceID == "" {
+					result.Status, result.Reason = "failed", "empty source"
+					break
 				}
-				if len(e.Files) == 0 {
-					e.Files = old.Files
+				publication := change.Publication
+				if err := ValidateDirectorySnapshot([]DirectoryEntry{publication}); err != nil {
+					result.Status, result.Reason = "failed", err.Error()
+					break
 				}
-			}
-		}
-		if e.PublicationID != "" && market.AppVersion == e.AppVersion {
-			for _, channel := range market.URLs {
-				if len(e.URLs) == 0 && channel.PublicationID == e.PublicationID {
-					e.URLs = []DirectoryURL{channel}
+				if publication.AppPublicKeyHex != change.AppPublicKeyHex {
+					result.Status, result.Reason = "failed", "publication key mismatch"
+					break
 				}
-			}
-			for _, channel := range market.Files {
-				if len(e.Files) == 0 && channel.PublicationID == e.PublicationID {
-					e.Files = []DirectoryFiles{channel}
+				if publication.AppVersion != change.AppVersion {
+					result.Status, result.Reason = "failed", "version mismatch"
+					break
 				}
+				if slices.Contains(f.DeletedKeys, change.AppPublicKeyHex) {
+					result.Status, result.Reason = "failed", "deleted by user"
+					break
+				}
+				perSource := f.Sources[change.AppPublicKeyHex]
+				if old, ok := perSource[change.SourceID]; ok && samePublication(old.Publication, publication) {
+					result.Status = "unchanged"
+					break
+				}
+				if current, ok := f.Apps[change.AppPublicKeyHex]; ok &&
+					apppublication.CompareAppVersions(publication.AppVersion, current.AppVersion) < 0 {
+					result.Status, result.Reason = "lower-version-rejected",
+						fmt.Sprintf("lower appVersion rejected: %s < %s", publication.AppVersion, current.AppVersion)
+					break
+				}
+				if perSource == nil {
+					perSource = map[string]SourceRecord{}
+				}
+				f.Sequence++
+				perSource[change.SourceID] = SourceRecord{SourceID: change.SourceID, Publication: publication, Sequence: f.Sequence}
+				f.Sources[change.AppPublicKeyHex] = perSource
+				picked, _, _ := pickCurrent(perSource)
+				previous := f.Apps[change.AppPublicKeyHex]
+				next := picked
+				next.Favorite = f.Favorites[change.AppPublicKeyHex]
+				if previous.Selected != nil {
+					applySelection(&next, *previous.Selected, true)
+				}
+				f.Apps[change.AppPublicKeyHex] = next
+				if previous.AppVersion != "" && samePublication(previous, next) {
+					result.Status = "unchanged"
+				} else {
+					result.Status = "applied"
+				}
+			case "invalidate":
+				if change.SourceID == "" {
+					result.Status, result.Reason = "failed", "empty source"
+					break
+				}
+				perSource := f.Sources[change.AppPublicKeyHex]
+				if _, ok := perSource[change.SourceID]; !ok {
+					result.Status = "unchanged"
+					break
+				}
+				delete(perSource, change.SourceID)
+				if len(perSource) == 0 {
+					delete(f.Sources, change.AppPublicKeyHex)
+				} else {
+					f.Sources[change.AppPublicKeyHex] = perSource
+				}
+				if len(perSource) > 0 {
+					picked, _, _ := pickCurrent(perSource)
+					previous := f.Apps[change.AppPublicKeyHex]
+					next := picked
+					next.Favorite = f.Favorites[change.AppPublicKeyHex]
+					if previous.Selected != nil {
+						applySelection(&next, *previous.Selected, true)
+					}
+					f.Apps[change.AppPublicKeyHex] = next
+				} else {
+					// 最后一个来源已失效：有收藏或使用数据保留条目（可能展示已失效入口），
+					// 否则自动移除；hasUsage 无法确认时按有使用处理。
+					used := f.Favorites[change.AppPublicKeyHex]
+					if !used && hasUsage != nil {
+						used = hasUsage(change.AppPublicKeyHex)
+					}
+					if !used {
+						delete(f.Apps, change.AppPublicKeyHex)
+						delete(f.Selection, change.AppPublicKeyHex)
+					}
+				}
+				result.Status = "applied"
+			default:
+				result.Status, result.Reason = "failed", "unknown change kind"
 			}
-		}
-		if selected, ok := f.Selection[key]; ok && !directoryHasSelection(e, selected) {
-			delete(f.Selection, key)
-		}
-
-		e.Local = true
-		f.Local[e.AppPublicKeyHex] = e
-		if id != "" {
-			delete(f.Pending, id)
+			results = append(results, result)
 		}
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
+
 func directoryHasSelection(entry DirectoryEntry, sel DirectorySelection) bool {
 	if (sel.URL == "") == (sel.Indexseedhashhex == "") {
 		return false
@@ -409,75 +472,61 @@ func directoryHasSelection(entry DirectoryEntry, sel DirectorySelection) bool {
 	return false
 }
 
-func mergeDirectory(a, b DirectoryEntry) DirectoryEntry {
-	if apppublication.CompareAppVersions(b.AppVersion, a.AppVersion) <= 0 {
-		return a
-	}
-	return b
+// DeletedKeys 返回用户手动删除的 App 公钥快照；目录展示与页面补齐按其过滤。
+func (s *DirectoryStore) DeletedKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.state.DeletedKeys...)
 }
+
 func (s *DirectoryStore) listLocked() []DirectoryEntry {
 	out := []DirectoryEntry{}
-	seen := map[string]bool{}
-	add := func(e DirectoryEntry, listed bool) {
-		key := e.AppPublicKeyHex
-		if local, ok := s.state.Local[key]; ok {
-			e = mergeDirectory(local, e)
-			e.Local = true
+	keys := make([]string, 0, len(s.state.Apps))
+	for key := range s.state.Apps {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		entry := s.state.Apps[key]
+		entry.Favorite = s.state.Favorites[key]
+		entry.Selected = nil
+		if selected, ok := s.state.Selection[key]; ok && directoryHasSelection(entry, selected) {
+			copySel := selected
+			entry.Selected = &copySel
 		}
-		e.MarketListed = listed
-		e.Favorite = s.state.Favorites[key]
-		e.Selected = nil
-		if selected, ok := s.state.Selection[key]; ok && directoryHasSelection(e, selected) {
-			copy := selected
-			e.Selected = &copy
-		}
-		// Display one complete signed channel, retaining the user's selected entry.
+		// 展示一个完整签名渠道的资料，保留用户选择的入口。
 		var display apppublication.AppDisplay
-		if len(e.URLs) > 0 {
-			first := e.URLs[0]
-			for _, u := range e.URLs {
+		if len(entry.URLs) > 0 {
+			first := entry.URLs[0]
+			for _, u := range entry.URLs {
 				if u.URL < first.URL {
 					first = u
 				}
 			}
 			display = first.Display
-		} else if len(e.Files) > 0 {
-			first := e.Files[0]
-			for _, f := range e.Files {
+		} else if len(entry.Files) > 0 {
+			first := entry.Files[0]
+			for _, f := range entry.Files {
 				if f.Indexseedhashhex < first.Indexseedhashhex {
 					first = f
 				}
 			}
 			display = first.Display
 		}
-		if e.Selected != nil {
-			for _, u := range e.URLs {
-				if e.Selected.URL == u.URL {
+		if entry.Selected != nil {
+			for _, u := range entry.URLs {
+				if entry.Selected.URL == u.URL {
 					display = u.Display
 				}
 			}
-			for _, f := range e.Files {
-				if e.Selected.Indexseedhashhex == f.Indexseedhashhex {
+			for _, f := range entry.Files {
+				if entry.Selected.Indexseedhashhex == f.Indexseedhashhex {
 					display = f.Display
 				}
 			}
 		}
-		e.Name, e.Description, e.Icon = display.Name, display.Description, display.Icon
-		out = append(out, e)
-		seen[key] = true
-	}
-	for _, e := range s.state.Market.Entries {
-		add(e, true)
-	}
-	keys := []string{}
-	for k := range s.state.Local {
-		if !seen[k] {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		add(s.state.Local[k], false)
+		entry.Name, entry.Description, entry.Icon = display.Name, display.Description, display.Icon
+		out = append(out, entry)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Favorite && !out[j].Favorite })
 	return out
@@ -502,235 +551,122 @@ func (s *DirectoryStore) List() []DirectoryEntry {
 	defer s.mu.Unlock()
 	return publicDirectoryEntries(s.listLocked())
 }
+
+// FilesPublicationID 返回当前目录中指定 App 公钥与 Files seed 对应渠道的
+// 证明摘要，供目录启动在 Go 后台核对实际部署。目录条目不存在、渠道已变更
+// 或证明摘要为空均返回错误，调用方须拒绝目录启动。
+func (s *DirectoryStore) FilesPublicationID(appPublicKeyHex, seed string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := ApplicationKey(appPublicKeyHex)
+	if key == "" {
+		return "", fmt.Errorf("App public key required")
+	}
+	if !isSeed(seed) {
+		return "", fmt.Errorf("invalid Files seed")
+	}
+	entry, ok := s.state.Apps[key]
+	if !ok {
+		return "", fmt.Errorf("目录条目不存在")
+	}
+	for _, channel := range entry.Files {
+		if channel.Indexseedhashhex == seed {
+			if channel.PublicationID == "" {
+				return "", fmt.Errorf("目录证明摘要缺失")
+			}
+			return channel.PublicationID, nil
+		}
+	}
+	return "", fmt.Errorf("目录 Files 渠道已变更")
+}
+
+// View 只读本地已归属数据；不发请求、不触发市场刷新。
 func (s *DirectoryStore) View() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pending := []DirectoryPending{}
-	for _, p := range s.state.Pending {
-		pending = append(pending, p)
-	}
-	sort.Slice(pending, func(i, j int) bool { return pending[i].PendingID < pending[j].PendingID })
-	out := map[string]any{"entries": publicDirectoryEntries(s.listLocked()), "pending": pending, "knownApplications": s.state.Displays, "favorites": s.state.Favorites}
+	out := map[string]any{"entries": publicDirectoryEntries(s.listLocked()), "favorites": s.state.Favorites, "deletedKeys": append([]string{}, s.state.DeletedKeys...)}
 	if s.loadError != nil {
-		out["marketError"] = s.loadError.Error()
-	} else if s.marketError != "" {
-		out["marketError"] = s.marketError
+		out["directoryError"] = s.loadError.Error()
 	}
 	return out
 }
-func (s *DirectoryStore) Remove(key, id string) error {
-	if (key == "") == (id == "") {
-		return fmt.Errorf("exactly one App public key or pending ID is required")
+
+// Remove 是用户手动删除：移除目录条目、来源关联与收藏，并写入删除标记，
+// 阻止来源插件的重放恢复。待验证项归 Market，不经本方法。
+func (s *DirectoryStore) Remove(key string) error {
+	if ApplicationKey(key) == "" {
+		return fmt.Errorf("App public key required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.transactLocked(func(f *directoryFile) error {
-		if id != "" {
-			if _, ok := f.Pending[id]; !ok {
-				return fmt.Errorf("pending item not found")
-			}
-			delete(f.Pending, id)
-			return nil
-		}
-		if f.Favorites[key] {
-			return fmt.Errorf("unfavorite before removing")
-		}
-		if _, ok := f.Local[key]; !ok {
-			return fmt.Errorf("local item not found")
-		}
-		delete(f.Local, key)
+		delete(f.Apps, key)
+		delete(f.Sources, key)
+		delete(f.Favorites, key)
 		delete(f.Selection, key)
+		if !slices.Contains(f.DeletedKeys, key) {
+			f.DeletedKeys = append(f.DeletedKeys, key)
+		}
 		return nil
 	})
 }
-func (s *DirectoryStore) Favorite(key string, value bool) error {
+
+// RestoreApp 只清除删除标记：新的已验证连接可恢复该 App 的管理资格，
+// 不写发布资料。
+func (s *DirectoryStore) RestoreApp(key string) error {
+	if ApplicationKey(key) == "" {
+		return fmt.Errorf("App public key required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var found *DirectoryEntry
-	for _, e := range s.listLocked() {
-		if e.AppPublicKeyHex == key {
-			copy := e
-			found = &copy
-			break
-		}
-	}
+	return s.transactLocked(func(f *directoryFile) error {
+		f.DeletedKeys = slices.DeleteFunc(f.DeletedKeys, func(k string) bool { return k == key })
+		return nil
+	})
+}
+
+// Favorite 只保存本机置顶标记，不改变来源与发布资料。
+func (s *DirectoryStore) Favorite(key string, value bool) error {
 	if ApplicationKey(key) == "" {
-		return fmt.Errorf("invalid App public key")
+		return fmt.Errorf("App public key required")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.transactLocked(func(f *directoryFile) error {
 		if value {
 			f.Favorites[key] = true
-			if found != nil {
-				copy := *found
-				copy.Local = true
-				f.Local[key] = copy
-			}
 		} else {
 			delete(f.Favorites, key)
+			if _, ok := f.Sources[key]; !ok && f.Apps[key].AppVersion != "" {
+				// 无来源且无使用判定的条目随取消收藏移除；使用判定由调用方
+				// hasUsage 在来源失效路径处理，收藏路径保持简单删除。
+				delete(f.Apps, key)
+			}
+		}
+		if app, ok := f.Apps[key]; ok {
+			app.Favorite = value
+			f.Apps[key] = app
 		}
 		return nil
 	})
 }
+
 func (s *DirectoryStore) Select(key string, selection DirectorySelection) error {
 	if (selection.URL == "") == (selection.Indexseedhashhex == "") {
 		return fmt.Errorf("exactly one channel is required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	valid := false
-	var selectedApp DirectoryEntry
-	for _, e := range s.listLocked() {
-		if e.AppPublicKeyHex == key {
-			selectedApp = e
-			for _, u := range e.URLs {
-				valid = valid || selection.URL != "" && u.URL == selection.URL
-			}
-			for _, f := range e.Files {
-				valid = valid || selection.Indexseedhashhex != "" && f.Indexseedhashhex == selection.Indexseedhashhex
-			}
-		}
+	app, ok := s.state.Apps[key]
+	if !ok {
+		return fmt.Errorf("App not found")
 	}
-	if !valid {
+	if !directoryHasSelection(app, selection) {
 		return fmt.Errorf("selected channel not found")
 	}
 	return s.transactLocked(func(f *directoryFile) error {
-		// 用户明确选择的入口也保存本地快照；刷新/下架不能使选择丢失。
-		f.Local[key] = selectedApp
+		// 用户明确选择的入口持久保存；来源更新不覆盖。
 		f.Selection[key] = selection
-		return nil
-	})
-}
-func (s *DirectoryStore) ClaimMarketFetch(now int64) (bool, *MarketFetchCall) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.loadError != nil {
-		return false, nil
-	}
-	if s.state.Market.LastSuccessfulFetchAt != 0 && now-s.state.Market.LastSuccessfulFetchAt < DirectoryTTL {
-		return false, nil
-	}
-	if s.fetchCall != nil {
-		return false, s.fetchCall
-	}
-	s.fetchCall = &MarketFetchCall{done: make(chan struct{})}
-	return true, s.fetchCall
-}
-func (s *DirectoryStore) CompleteMarketFetch(entries []DirectoryEntry, at int64, cause error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	call := s.fetchCall
-	if call == nil {
-		return fmt.Errorf("no market fetch in progress")
-	}
-	defer close(call.done)
-	s.fetchCall = nil
-	if cause == nil {
-		cause = ValidateDirectorySnapshot(entries)
-	}
-	if cause == nil {
-		cause = s.transactLocked(func(f *directoryFile) error {
-			for _, incoming := range entries {
-				unchanged := false
-				for _, old := range f.Market.Entries {
-					if incoming.AppPublicKeyHex != old.AppPublicKeyHex {
-						continue
-					}
-					if apppublication.CompareAppVersions(incoming.AppVersion, old.AppVersion) < 0 {
-						return fmt.Errorf("older appVersion rejected")
-					}
-					unchanged = old.AppVersion == incoming.AppVersion &&
-						slices.Equal(old.URLs, incoming.URLs) && slices.Equal(old.Files, incoming.Files)
-					break
-				}
-				// Seeing the same market publication again does not submit it again.
-				if unchanged && f.Local[incoming.AppPublicKeyHex].PublicationID != "" {
-					continue
-				}
-
-				if sel, ok := f.Selection[incoming.AppPublicKeyHex]; ok && !directoryHasSelection(incoming, sel) {
-					delete(f.Selection, incoming.AppPublicKeyHex)
-				}
-				if old, ok := f.Local[incoming.AppPublicKeyHex]; ok {
-					if apppublication.CompareAppVersions(incoming.AppVersion, old.AppVersion) < 0 {
-						return fmt.Errorf("older appVersion rejected")
-					}
-					// Refresh the saved snapshot without clearing its local ownership.
-					updated := incoming
-					updated.Local = true
-					updated.Selected = nil
-					f.Local[incoming.AppPublicKeyHex] = updated
-				}
-			}
-			f.Market = MarketCache{Entries: entries, LastSuccessfulFetchAt: at}
-			return nil
-		})
-	}
-	call.err = cause
-	s.marketError = ""
-	if cause != nil {
-		s.marketError = cause.Error()
-	}
-	return cause
-}
-func (s *DirectoryStore) GetCache() (MarketCache, map[string]DirectoryEntry, map[string]bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.state.Market, s.state.Local, s.state.Favorites
-}
-
-// ResolveURL 在钱包实际验证本次启动后才把匹配的 pending URL 归并。
-func (s *DirectoryStore) ResolveURL(url string, publication DirectoryEntry, display apppublication.AppDisplay) error {
-	full, origin, err := CanonicalEntryURL(url)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	ids := []DirectoryPending{}
-	for _, p := range s.state.Pending {
-		if p.URL == full {
-			ids = append(ids, p)
-		}
-	}
-	s.mu.Unlock()
-	for _, p := range ids {
-		publication.URLs = []DirectoryURL{{URL: full, Origin: origin, Display: display}}
-		if err := s.Resolve(p.PendingID, publication); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ResolveSeed 仅由安装器在整包验证完成后调用，失败下载不得认领 App 公钥。
-func (s *DirectoryStore) ResolveSeed(seed, key, version, publicationID string, display apppublication.AppDisplay) error {
-	s.mu.Lock()
-	pending := []DirectoryPending{}
-	for _, p := range s.state.Pending {
-		if p.Indexseedhashhex == seed {
-			pending = append(pending, p)
-		}
-	}
-	s.mu.Unlock()
-	for _, p := range pending {
-		if err := s.Resolve(p.PendingID, DirectoryEntry{PublicationID: publicationID, AppVersion: version, AppPublicKeyHex: key, Name: display.Name, Description: display.Description, Icon: display.Icon, URLs: []DirectoryURL{}, Files: []DirectoryFiles{{Indexseedhashhex: seed, Display: display}}}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// RememberDisplay retains verified App presentation without inventing a launch URL.
-func (s *DirectoryStore) RememberDisplay(key string, display apppublication.AppDisplay) error {
-	if ApplicationKey(key) == "" {
-		return fmt.Errorf("invalid App public key")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.transactLocked(func(f *directoryFile) error {
-		if f.Displays == nil {
-			f.Displays = map[string]apppublication.AppDisplay{}
-		}
-		f.Displays[key] = display
 		return nil
 	})
 }
