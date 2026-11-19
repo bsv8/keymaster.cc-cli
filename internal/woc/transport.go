@@ -13,15 +13,20 @@ import (
 // use Request.GetBody: identical bytes, never a newly built or signed transaction.
 func (c *Client) do(request *http.Request) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		c.requestMu.Lock()
-		sendAt := c.nextRequest
-		if sendAt.Before(time.Now()) {
-			sendAt = time.Now()
-		}
-		c.nextRequest = sendAt.Add(350 * time.Millisecond)
-		c.requestMu.Unlock()
-		if err := waitRequest(request, time.Until(sendAt)); err != nil {
-			return nil, err
+		for {
+			c.requestMu.Lock()
+			now := time.Now()
+			wait := c.nextRequest.Sub(now)
+			if wait <= 0 && request.Context().Err() == nil {
+				c.nextRequest = now.Add(350 * time.Millisecond)
+			}
+			c.requestMu.Unlock()
+			if err := waitRequest(request, wait); err != nil {
+				return nil, err
+			}
+			if wait <= 0 {
+				break
+			}
 		}
 		started := time.Now()
 		bitfsdebug.Log("keymaster.cc-cli", "chain.http.start", func() any {
@@ -35,7 +40,7 @@ func (c *Client) do(request *http.Request) (*http.Response, error) {
 			}
 			return map[string]any{"method": request.Method, "path": request.URL.Path, "attempt": attempt + 1, "httpStatus": status, "elapsedMs": float64(time.Since(started).Microseconds()) / 1000, "error": err}
 		})
-		if err != nil || response.StatusCode != http.StatusTooManyRequests || attempt >= 3 {
+		if err != nil || response.StatusCode != http.StatusTooManyRequests {
 			return response, err
 		}
 		if request.Body != nil && request.GetBody == nil {
@@ -49,21 +54,23 @@ func (c *Client) do(request *http.Request) (*http.Response, error) {
 				delay = time.Until(at)
 			}
 		}
-		// If the provider asks for a longer pause, retain its exact unknown receipt
-		// instead of retrying earlier than requested or blocking a session indefinitely.
-		if delay > 30*time.Second {
-			return response, nil
-		}
 		if delay < time.Second {
 			delay = time.Second
+		}
+		c.requestMu.Lock()
+		if until := time.Now().Add(delay); until.After(c.nextRequest) {
+			c.nextRequest = until
+		}
+		c.requestMu.Unlock()
+		// Longer pauses stay in the shared gate. Return the provider receipt to
+		// this caller instead of holding the protocol call indefinitely.
+		if delay > 30*time.Second || attempt >= 3 {
+			return response, nil
 		}
 		response.Body.Close()
 		bitfsdebug.Log("keymaster.cc-cli", "chain.http.backoff", func() any {
 			return map[string]any{"path": request.URL.Path, "attempt": attempt + 1, "delayMs": delay.Milliseconds(), "httpStatus": 429}
 		})
-		if err := waitRequest(request, delay); err != nil {
-			return nil, err
-		}
 		next := request.Clone(request.Context())
 		if request.GetBody != nil {
 			next.Body, err = request.GetBody()

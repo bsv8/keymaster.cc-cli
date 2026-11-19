@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	bitfsdebug "github.com/bsv8/BitFSProtocol/debug"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -18,22 +20,24 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	ma "github.com/multiformats/go-multiaddr"
 
+	"github.com/bsv8/keymaster.cc-bitfs/arbitration"
+	"github.com/bsv8/keymaster.cc-bitfs/bitfs"
+	"github.com/bsv8/keymaster.cc-bitfs/download"
+	"github.com/bsv8/keymaster.cc-bitfs/ledger"
+	"github.com/bsv8/keymaster.cc-bitfs/output"
+	"github.com/bsv8/keymaster.cc-bitfs/store"
+	"github.com/bsv8/keymaster.cc-bitfs/transport"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
-	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
 	"github.com/bsv8/keymaster.cc-cli/internal/discovery"
-	"github.com/bsv8/keymaster.cc-cli/internal/download"
-	"github.com/bsv8/keymaster.cc-cli/internal/ledger"
-	"github.com/bsv8/keymaster.cc-cli/internal/output"
-	"github.com/bsv8/keymaster.cc-cli/internal/store"
-	"github.com/bsv8/keymaster.cc-cli/internal/transport"
+	"github.com/bsv8/keymaster.cc-cli/internal/lock"
+	"github.com/bsv8/keymaster.cc-cli/internal/state"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
-	"github.com/bsv8/keymaster.cc-cli/internal/woc"
 	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 
 func (d *Daemon) runTask(seed string) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	d.tasks.mu.Lock()
 	t, ok := d.tasks.tasks[seed]
 	if !ok {
@@ -141,16 +145,28 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 	// would self-conflict inside this process.
 
 	clientRoot := filepath.Join(d.layout.DownloadDir, seed)
-	wocClient := woc.New(wocBaseURL(info.BsvNetwork), settings.WOCAPIKey)
-	initialHeight, err := wocClient.ChainHeight(ctx)
+	workStore, err := store.Open(clientRoot)
 	if err != nil {
-		return fmt.Errorf("读取链高度失败: %w", err)
+		return err
 	}
-	// Shared tip for the life of this task so long downloads do not settle
-	// protocol facts on a stale height.
-	tip := &chainHeight{}
-	tip.set(initialHeight)
-	go tip.refreshLoop(ctx, wocClient)
+	// Fast path: already finalized.
+	assembler, err := output.New(workStore, rootPath)
+	if err != nil {
+		return err
+	}
+	if final, err := assembler.Final(); err == nil && final != nil {
+		d.tasks.mu.Lock()
+		if cur, ok := d.tasks.tasks[seed]; ok {
+			cur.State = TaskDone
+			cur.FinalPath = final.Path
+			cur.Bytes = final.Bytes
+			cur.Detail = "已完成"
+			d.tasks.publishLocked(cur)
+		}
+		d.tasks.mu.Unlock()
+		return nil
+	}
+	wocClient := d.chainClient(info.BsvNetwork, settings.WOCAPIKey)
 	w, releaseWallet, err := wallet.Shared(wocClient, wallet.Options{
 		Network: info.BsvNetwork, PrivateKey: privateKey,
 		FeeRateSatoshisPerKb: settings.FeeRateSatoshisPerKb,
@@ -159,11 +175,7 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 		return err
 	}
 	defer releaseWallet()
-	workStore, err := store.Open(clientRoot)
-	if err != nil {
-		return err
-	}
-	l, err := ledger.Open(filepath.Join(clientRoot, "ledger.json"), seed, info.BsvNetwork, seed)
+	l, err := ledger.OpenRepository(workStore, "ledger.json", seed, info.BsvNetwork, seed)
 	if err != nil {
 		return err
 	}
@@ -173,31 +185,22 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 		return err
 	}
 	facts := func() protocol.Facts {
-		return protocol.Facts{Now: time.Now(), BlockHeight: protocol.BlockHeight(tip.get())}
+		return bitfsChainFacts(ctx, wocClient)
 	}
 	// Snapshot the fee policy with the task: later settings edits must not
 	// change this run's funding through the shared pool.
 	taskFeeRate := settings.FeeRateSatoshisPerKb
 	buyerTask := &bitfs.BuyerTask{
-		Wallet: w, Ledger: l, Store: workStore, Signer: signerInstance,
+		Wallet: &bitfsFunding{wallet: w}, Ledger: l, Store: workStore, Signer: signerInstance,
 		Facts: facts, MinerFeeRate: protocol.SatoshisPerKilobyte(taskFeeRate),
 		WalletFeeRateSatoshisPerKb: taskFeeRate,
-		Chain:                      wocClient, UnresolvedDir: filepath.Join(d.layout.DownloadDir, "unresolved"),
-	}
-	// Fast path: already finalized.
-	if assembler, err := output.New(workStore, rootPath); err == nil {
-		if final, err := assembler.Final(); err == nil && final != nil {
-			d.tasks.mu.Lock()
-			if cur, ok := d.tasks.tasks[seed]; ok {
-				cur.State = TaskDone
-				cur.FinalPath = final.Path
-				cur.Bytes = final.Bytes
-				cur.Detail = "已完成"
-				d.tasks.publishLocked(cur)
-			}
-			d.tasks.mu.Unlock()
-			return nil
-		}
+		Chain:                      bitfsCloseChain{wocClient},
+		OnCloseObserved:            func(txid string, raw []byte) error { return w.ObserveAccepted(txid, hex.EncodeToString(raw)) },
+		OnUnresolved: func(record bitfs.UnresolvedRound) error {
+			return state.Append(filepath.Join(d.layout.DownloadDir, "unresolved"), state.Unresolved{
+				RecordedAt: record.RecordedAt, Kind: record.Kind, Reason: record.Reason,
+			})
+		},
 	}
 	// Resume path: existing pool evidence.
 	if pools := l.Pools(); len(pools) > 0 {
@@ -278,28 +281,32 @@ func (d *Daemon) executeDownload(ctx context.Context, seed string) error {
 	if listenErr != nil {
 		return fmt.Errorf("监听 BitFS 会话失败: %w", listenErr)
 	}
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
-	// Keep the daemon cancel wired to the run context.
-	go func() {
-		<-ctx.Done()
-		runCancel()
-	}()
-	if _, err := publisher.PublishDemand(runCtx, seed, 10*time.Minute); err != nil {
-		return fmt.Errorf("发布需求失败: %w", err)
-	}
-	d.updateTask(seed, func(cur *Task) {
-		cur.Detail = "已发布需求，等待卖方连接"
-	})
-	result, runErr := download.Run(runCtx, download.Options{
+	result, runErr := download.Run(context.WithoutCancel(ctx), download.Options{
 		Arbitration: arbitrationClient,
-		Task:        buyerTask, SeedHash: seed, OutputDir: rootPath,
-		Wallet: w, Store: workStore,
-		RequestQuotes: func(requestCtx context.Context) error {
-			_, err := publisher.PublishDemand(requestCtx, seed, 10*time.Minute)
-			return err
+		Task:        buyerTask, SeedHash: seed, Output: assembler, Store: workStore,
+		Stop: ctx.Done(), StopTimeout: 5 * time.Second,
+		Lock: func(_ context.Context, _ string) (func(), error) {
+			guard, err := lock.Acquire(filepath.Join(clientRoot, "scheduler", ".active.lock"))
+			if err != nil {
+				return nil, err
+			}
+			return func() { _ = guard.Release() }, nil
 		},
-		Accept: func(acceptCtx context.Context) (*transport.Session, error) {
+		RequestQuotes: func(requestCtx context.Context) error {
+			if _, err := publisher.PublishDemand(requestCtx, seed, 10*time.Minute); err != nil {
+				return fmt.Errorf("发布需求失败: %w", err)
+			}
+			bitfsdebug.Log("keymaster.cc-cli", "download.demand.published", func() any {
+				return map[string]any{"seedHash": seed}
+			})
+			d.updateTask(seed, func(cur *Task) {
+				if cur.BlocksDone == 0 {
+					cur.Detail = "已发布需求，等待卖方连接"
+				}
+			})
+			return nil
+		},
+		Accept: func(acceptCtx context.Context) (download.Session, error) {
 			select {
 			case session := <-sessionCh:
 				return session, nil
@@ -353,8 +360,11 @@ func (d *Daemon) updateTask(seed string, fn func(*Task)) {
 	d.tasks.mu.Lock()
 	defer d.tasks.mu.Unlock()
 	if cur, ok := d.tasks.tasks[seed]; ok {
+		before := taskDTO(cur)
 		fn(cur)
-		d.tasks.publishLocked(cur)
+		if !reflect.DeepEqual(before, taskDTO(cur)) {
+			d.tasks.publishLocked(cur)
+		}
 	}
 }
 

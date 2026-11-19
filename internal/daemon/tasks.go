@@ -61,8 +61,7 @@ type taskManager struct {
 	// events 是统一消息总线；publishLocked 在任务持久化成功后发布，
 	// 从不等待订阅者。nil 时不发布（单测/未初始化路径）。
 	events *events.Broker
-	// onTerminal 在任务进入终态后触发余额刷新（异步，不阻塞执行）。
-	onTerminal func()
+
 	// stopping latches at shutdown: no new runs start afterwards.
 	stopping bool
 	// wg tracks live run goroutines so shutdown waits for actual exit,
@@ -210,9 +209,6 @@ func (m *taskManager) publishLocked(t *Task) {
 				m.events.Publish(kmapi.TopicTask, t.SeedHashHex, nil, data)
 			}
 		}
-	}
-	if terminal && m.onTerminal != nil {
-		m.onTerminal()
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
+	"github.com/bsv8/keymaster.cc-bitfs/arbitration"
 )
 
 const defaultArbiterPublicKey = "036258d4f23285e868cd91ad0a84c7ec4d798dc6e3965e3f75755d9c0dca4fc4ac"

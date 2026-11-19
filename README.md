@@ -175,18 +175,20 @@ TS 单元测试和外围模拟位于 `test/shared/download-scheduler/`。
 
 ## 存储与卖方基础
 
+BitFS 买卖和调度执行从相邻的 `../keymaster.cc-bitfs` 编译。后台装配已有钱包、共享根目录和连接，直接构建时需要该相邻仓。
+
 | 包 | 用途 |
 | --- | --- |
 | `internal/store` | 单任务工作目录：`SaveExact` 首次写入即绑定 exact bytes，`Save` 原子替换快照 |
-| `internal/ledger` | 资金账本与交易 outbox：txid 绑定原始字节、状态机与累计付款上限、未决查询 |
+| BitFS `ledger` | 资金账本与交易 outbox：txid 绑定原始字节、状态机与累计付款上限、未决查询 |
 | `internal/catalog` | 磁盘直列 + SQLite 内容映射；按路径/长度增量计算 MasterSeed，单写队列；跳过隐藏/符号链接/零字节/临时文件 |
 | `internal/pricing` | 文件定价：缺省回退、文件独立价格、批量「覆盖全部/仅未定价」、无目录继承 |
-| `internal/bitfs` | 买方协议执行层：开池（先验后付）→ 采购（Kind 5/6/7，本地付款日志）→ 关池（Kind 12/13 + 按 txid 观察） |
+| BitFS `bitfs` | 买方协议执行层：开池（先验后付）→ 采购（Kind 5/6/7，本地付款日志）→ 关池（Kind 12/13 + 按 txid 观察） |
 | `internal/woc` | WhatsonChain 客户端：UTXO 查询、广播、按 txid 取回原文 |
-| `internal/host` | 调度器宿主：按执行持久化内核状态 + 命令 outbox（`scheduler/tasks/<seed>.<exec>.json` + `.current` 指针）、命令幂等执行、`open/download/drain/close` 与买方执行层接线（宿主池键统一 `eN/` 前缀）、事实回灌 |
-| `internal/output` | 下载文件组装：以已验证 seed 为清单逐块校验、`<seed-hash>.km` 临时文件、安全唯一名原子改名与改名崩溃恢复 |
-| `internal/sell` | 卖方协议执行层：目录+定价报价、预签/验资/交付/收款/关池（卖方广播），exact 复用与先落盘后发送 |
-| `internal/arbitration` | 可信端点身份校验与仲裁 info v2 查询；新池预算使用实际条目费率，不提供完整提交/取回应用工作流 |
+| BitFS `host` | 调度器宿主：按执行持久化内核状态 + 命令 outbox（`scheduler/tasks/<seed>.<exec>.json` + `.current` 指针）、命令幂等执行、`open/download/drain/close` 与买方执行层接线（宿主池键统一 `eN/` 前缀）、事实回灌 |
+| BitFS `output` | 下载文件组装：以已验证 seed 为清单逐块校验、`<seed-hash>.km` 临时文件、安全唯一名原子改名与改名崩溃恢复 |
+| BitFS `seller` | 卖方协议执行层：目录+定价报价、预签/验资/交付/收款/关池（卖方广播），exact 复用与先落盘后发送 |
+| BitFS `arbitration` | 可信端点身份校验与仲裁 info v2 查询；新池预算使用实际条目费率，不提供完整提交/取回应用工作流 |
 | `internal/ssp` | SatSubscription 客户端：libp2p `/ssp/1.0.0` 长连接、uvarint 分帧、订阅/发布/投递 |
 | `internal/discovery` | 需求发现：签名 Hash 请求发布（`bsv8.hash.request.v1`）与卖方验签监听 |
 | `internal/transport` | BitFS 传输：`/bitfs/wire/1.0.0` + uvarint 分帧（与浏览器同一协议），卖方拨号/买方接流 |

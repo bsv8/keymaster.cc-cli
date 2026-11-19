@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // ErrNotFound reports that WhatsonChain does not know a requested transaction
@@ -37,10 +39,15 @@ var txidPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // Client talks to one network's WhatsonChain endpoint.
 type Client struct {
 	baseURL     string
+	apiKeyMu    sync.RWMutex
 	apiKey      string
 	http        *http.Client
 	requestMu   sync.Mutex
 	nextRequest time.Time
+	reads       singleflight.Group
+	tipMu       sync.Mutex
+	tip         uint32
+	tipAt       time.Time
 }
 
 // New creates a client for the given API base URL (for example
@@ -108,6 +115,20 @@ func (c *Client) ListUnspent(ctx context.Context, address string) ([]UTXO, error
 
 // ChainHeight returns the current best block height.
 func (c *Client) ChainHeight(ctx context.Context) (uint32, error) {
+	c.tipMu.Lock()
+	defer c.tipMu.Unlock()
+	if time.Since(c.tipAt) < time.Minute {
+		return c.tip, nil
+	}
+	height, err := c.fetchChainHeight(ctx)
+	if err != nil {
+		return 0, err
+	}
+	c.tip, c.tipAt = height, time.Now()
+	return height, nil
+}
+
+func (c *Client) fetchChainHeight(ctx context.Context) (uint32, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/chain/info", nil)
 	if err != nil {
 		return 0, err
@@ -138,6 +159,23 @@ func (c *Client) ChainHeight(ctx context.Context) (uint32, error) {
 // reported as ErrNotFound so recovery code can keep waiting instead of
 // treating an unobserved transaction as failure.
 func (c *Client) TransactionRaw(ctx context.Context, txid string) ([]byte, error) {
+	result := c.reads.DoChan(txid, func() (any, error) {
+		lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		return c.fetchTransactionRaw(lookup, txid)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case observed := <-result:
+		if observed.Err != nil {
+			return nil, observed.Err
+		}
+		return append([]byte(nil), observed.Val.([]byte)...), nil
+	}
+}
+
+func (c *Client) fetchTransactionRaw(ctx context.Context, txid string) ([]byte, error) {
 	if !txidPattern.MatchString(txid) {
 		return nil, fmt.Errorf("woc: invalid txid %q", txid)
 	}
@@ -170,7 +208,15 @@ func (c *Client) TransactionRaw(ctx context.Context, txid string) ([]byte, error
 	return raw, nil
 }
 
+func (c *Client) SetAPIKey(key string) {
+	c.apiKeyMu.Lock()
+	defer c.apiKeyMu.Unlock()
+	c.apiKey = key
+}
+
 func (c *Client) authorize(request *http.Request) {
+	c.apiKeyMu.RLock()
+	defer c.apiKeyMu.RUnlock()
 	if c.apiKey != "" {
 		request.Header.Set("woc-api-key", c.apiKey)
 	}

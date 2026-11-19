@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
+	"github.com/bsv8/keymaster.cc-bitfs/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )

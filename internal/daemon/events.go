@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -212,29 +211,4 @@ func (d *Daemon) publishCollector() {
 		return
 	}
 	d.events.Publish(kmapi.TopicCollector, "", nil, toMap(d.collectorStatusView()))
-}
-
-// balanceState 返回余额快照态（供快照与发布共用）。
-func (d *Daemon) balanceState() map[string]any {
-	out := map[string]any{}
-	bal, cached, queryErr := d.queryBalance(context.Background())
-	if queryErr != nil {
-		out["error"] = queryErr.Error()
-		if cached != nil {
-			out["totalSats"] = cached.Total
-			out["availableSats"] = cached.Available
-			out["allocatedSats"] = cached.Allocated
-			out["queryTime"] = cached.QueryTime
-			out["cached"] = true
-		} else {
-			out["cached"] = false
-		}
-		return out
-	}
-	out["totalSats"] = bal.Total
-	out["availableSats"] = bal.Available
-	out["allocatedSats"] = bal.Allocated
-	out["queryTime"] = bal.QueryTime
-	out["cached"] = false
-	return out
 }

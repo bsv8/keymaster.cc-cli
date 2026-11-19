@@ -28,7 +28,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
+	"github.com/bsv8/keymaster.cc-bitfs/arbitration"
 )
 
 const (

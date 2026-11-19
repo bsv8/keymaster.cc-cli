@@ -184,25 +184,17 @@ func (d *Daemon) opInfo(ctx context.Context) (any, *kmapi.ErrorDetail) {
 		Locked:    state != StateUnlocked,
 		Address:   address,
 	}
-	bal, cached, queryErr := d.queryBalance(ctx)
-	if queryErr != nil {
-		out.Error = optStr(queryErr.Error())
-		if cached != nil {
-			out.TotalSats = optU64(cached.Total, true)
-			out.AvailableSats = optU64(cached.Available, true)
-			out.AllocatedSats = optU64(cached.Allocated, true)
-			out.QueryTime = reqStr(cached.QueryTime)
-			out.Cached = optBool(true, true)
-		} else {
-			out.Cached = optBool(false, true)
-		}
-	} else {
-		out.TotalSats = optU64(bal.Total, true)
-		out.AvailableSats = optU64(bal.Available, true)
-		out.AllocatedSats = optU64(bal.Allocated, true)
-		out.QueryTime = reqStr(bal.QueryTime)
-		out.Cached = optBool(false, true)
+	balance := d.balanceState()
+	if available, ok := balance["availableSats"].(uint64); ok {
+		out.AvailableSats = optU64(available, true)
 	}
+	if observed, ok := balance["queryTime"].(string); ok {
+		out.QueryTime = reqStr(observed)
+	}
+	if problem, ok := balance["error"].(string); ok {
+		out.Error = optStr(problem)
+	}
+	out.Cached = optBool(balance["cached"] == true, true)
 	return out, nil
 }
 
@@ -495,6 +487,7 @@ func (d *Daemon) opSettingsUpdate(ctx context.Context, p kmapi.SettingsUpdate) (
 		d.settingsApplyMu.Unlock()
 		return nil, errDetail(kmapi.ErrConflict, err.Error())
 	}
+	d.updateChainAPIKey(updated.WOCAPIKey)
 	for _, h := range d.roots.list() {
 		if h.deleted || h.pricing == nil {
 			continue
@@ -521,6 +514,7 @@ func (d *Daemon) opSettingsReset(ctx context.Context, p kmapi.RevisionRequest) (
 		d.settingsApplyMu.Unlock()
 		return nil, errDetail(kmapi.ErrConflict, err.Error())
 	}
+	d.updateChainAPIKey(updated.WOCAPIKey)
 	for _, h := range d.roots.list() {
 		if h.deleted || h.pricing == nil {
 			continue

@@ -703,8 +703,7 @@ function App() {
                   {(info?.address || status?.address) && <button className="ghost" onClick={() => copy(info?.address || status?.address)}>{t('复制')}</button>}
                 </span>
               </dd>
-              <dt>{t('总额')}</dt><dd>{info?.totalSats ?? '—'} {t('sats')}</dd>
-              <dt>{t('可用 / 占用')}</dt><dd>{info?.availableSats ?? '—'} / {info?.allocatedSats ?? '—'} {t('sats')}</dd>
+              <dt>{t('可用余额')}</dt><dd>{info?.availableSats ?? '—'} {t('sats')}</dd>
               <dt>{t('查询')}</dt>
               <dd>
                 {info?.queryTime || '—'}

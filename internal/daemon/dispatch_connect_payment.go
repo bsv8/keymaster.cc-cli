@@ -353,7 +353,7 @@ func (d *Daemon) opConnectPaymentPay(ctx context.Context, auth connect.Auth, par
 	paymentID := claimedPlaceholder.PaymentID
 	// 冻结：使用钱包选币能力构造完整 outputs + 找零，费用按全部脚本实际长度计算，余额需覆盖总额+矿工费。
 	// priv 已在占位前复制并校验非空，此处直接使用占位时快照的授权与网络，不重新读取可变状态。
-	wocClient := woc.New(wocBaseURL(network), settings.WOCAPIKey)
+	wocClient := d.chainClient(network, settings.WOCAPIKey)
 	w, releaseWallet, err := wallet.Shared(wocClient, wallet.Options{
 		Network: network, PrivateKey: priv,
 		FeeRateSatoshisPerKb: settings.FeeRateSatoshisPerKb,
@@ -644,7 +644,7 @@ func (d *Daemon) execPaymentApproved(ctx context.Context, approval connect.Appro
 		if serr != nil {
 			return nil, nil, errDetail(kmapi.ErrInternal, serr.Error())
 		}
-		wocClient := woc.New(wocBaseURL(info.BsvNetwork), settings.WOCAPIKey)
+		wocClient := d.chainClient(info.BsvNetwork, settings.WOCAPIKey)
 		broadcastTxid, broadcastErr = wocClient.Broadcast(ctx, rawHex)
 		_ = txid
 	}

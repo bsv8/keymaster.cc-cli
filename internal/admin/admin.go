@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bsv8/keymaster.cc-bitfs/seller"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
 	"github.com/bsv8/keymaster.cc-cli/internal/collector"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
-	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 )
 
 // Options configures the admin server.
@@ -234,7 +234,7 @@ func (s *Server) handleUI(writer http.ResponseWriter, request *http.Request) {
 	// data. Everything sensitive loads after the key verifies against
 	// /api/status.
 	_ = writer
-		http.Error(writer, "legacy admin retired, use daemon Web UI", http.StatusGone)
+	http.Error(writer, "legacy admin retired, use daemon Web UI", http.StatusGone)
 }
 
 func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request) {
@@ -364,7 +364,7 @@ func (s *Server) handleRefresh(writer http.ResponseWriter, request *http.Request
 	if s.options.Collector != nil && (report.Indexed > 0 || report.Removed > 0) {
 		// 名称变化经目录核对发现：重映射后把最新信息交给采集队列。
 		if entries, err := s.options.Catalog.List(request.Context()); err == nil {
-			collector.FeedEntries(s.options.Collector, entries, sell.MediaTypeForFileName)
+			collector.FeedEntries(s.options.Collector, entries, seller.MediaTypeForFileName)
 		}
 	}
 	writeJSON(writer, report)

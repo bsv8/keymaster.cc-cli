@@ -35,7 +35,9 @@ import (
 	"github.com/bsv8/keymaster.cc-cli/internal/dlock"
 	"github.com/bsv8/keymaster.cc-cli/internal/events"
 	"github.com/bsv8/keymaster.cc-cli/internal/market"
+	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
 	"github.com/bsv8/keymaster.cc-cli/internal/webui"
+	"github.com/bsv8/keymaster.cc-cli/internal/woc"
 	"github.com/gorilla/websocket"
 )
 
@@ -66,19 +68,20 @@ type Daemon struct {
 	layout     datadir.Layout
 	store      *appconfig.Store
 
-	mu           sync.Mutex
-	state        State
-	privateKey   []byte
-	publicKey    string
-	address      string
-	unlockMu     sync.Mutex
-	initMu       sync.Mutex
-	balanceMu    sync.Mutex
-	balanceCache *balanceSnapshot
-	// balanceWatching 标记余额采集循环已启动；lastPublished 记录上次
-	// 已发布的余额状态，用于变化检测（均由 balanceMu 保护）。
-	balanceWatching bool
-	lastPublished   lastBalance
+	mu                sync.Mutex
+	state             State
+	privateKey        []byte
+	publicKey         string
+	address           string
+	unlockMu          sync.Mutex
+	initMu            sync.Mutex
+	balanceMu         sync.Mutex
+	balanceRefreshErr error
+	lastPublished     lastBalance
+	fundingWallet     *wallet.Wallet
+	releaseFunding    func()
+	chainMu           sync.Mutex
+	chain             *woc.Client
 
 	tasks *taskManager
 	roots *rootsManager
@@ -171,19 +174,11 @@ const (
 	DaemonAPIVersion = "v1"
 )
 
-type balanceSnapshot struct {
-	Total     uint64 `json:"totalSats"`
-	Available uint64 `json:"availableSats"`
-	Allocated uint64 `json:"allocatedSats"`
-	QueryTime string `json:"queryTime"`
-}
-
-// lastBalance 记录上次已发布的余额状态，用于变化检测。
 type lastBalance struct {
-	Total, Available, Allocated uint64
-	Err                         string
-	Cached                      bool
-	// published 标记是否发布过；首次采集无论结果都发布一次。
+	Available uint64
+	Known     bool
+	Err       string
+	Cached    bool
 	published bool
 }
 
@@ -244,7 +239,6 @@ func Open(opts Options) (*Daemon, error) {
 		d.state = StateLocked
 		d.tasks = newTaskManager(layout, store)
 		d.tasks.events = d.events
-		d.tasks.onTerminal = func() { go d.refreshBalance("task-terminal") }
 		if err := d.tasks.loadPersisted(); err != nil {
 			releaseAll()
 			return nil, fmt.Errorf("daemon: 加载任务记录失败: %w", err)
@@ -447,6 +441,11 @@ func (d *Daemon) close() error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.releaseFunding != nil {
+		d.releaseFunding()
+		d.releaseFunding = nil
+		d.fundingWallet = nil
+	}
 	clearKey(d.privateKey)
 	d.privateKey = nil
 	// Break the seller cancel reference so a later Unlock cannot reuse it.
@@ -498,7 +497,7 @@ func (d *Daemon) Unlock(password string) error {
 		return errors.New("解锁失败：密码错误")
 	}
 	// Verify against info.json binding.
-	info, _, err := d.store.Snapshot()
+	info, settings, err := d.store.Snapshot()
 	if err != nil {
 		clearBytes(result.PrivateKey)
 		return err
@@ -517,6 +516,14 @@ func (d *Daemon) Unlock(password string) error {
 		clearBytes(result.PrivateKey)
 		return errors.New("钱包网络身份认证失败")
 	}
+	tipClient := d.chainClient(info.BsvNetwork, settings.WOCAPIKey)
+	funding, releaseFunding, err := wallet.Shared(tipClient, wallet.Options{
+		Network: info.BsvNetwork, PrivateKey: result.PrivateKey, FeeRateSatoshisPerKb: settings.FeeRateSatoshisPerKb,
+	})
+	if err != nil {
+		clearBytes(result.PrivateKey)
+		return fmt.Errorf("打开钱包分配池失败: %w", err)
+	}
 	// Commit state under lock, snapshot resume list, then release before
 	// starting background abilities.
 	var resume []string
@@ -524,15 +531,19 @@ func (d *Daemon) Unlock(password string) error {
 	// Another unlock may have won while we were doing KDF.
 	if d.state == StateUnlocked {
 		d.mu.Unlock()
+		releaseFunding()
 		clearBytes(result.PrivateKey)
 		return nil
 	}
 	if d.state == StateStopping {
 		d.mu.Unlock()
+		releaseFunding()
 		clearBytes(result.PrivateKey)
 		return errors.New("后台停止中")
 	}
 	d.privateKey = result.PrivateKey
+	d.fundingWallet = funding
+	d.releaseFunding = releaseFunding
 	d.publicKey = result.PublicKeyHex
 	d.state = StateUnlocked
 	if d.tasks != nil {

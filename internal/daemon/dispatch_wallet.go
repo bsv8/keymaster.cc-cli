@@ -133,7 +133,6 @@ func (d *Daemon) persistNewWallet(network, pubHex, auth string, keyRaw []byte) *
 	// 重载后台状态为已锁定（需解锁后可用）。
 	tasks := newTaskManager(d.layout, store)
 	tasks.events = d.events
-	tasks.onTerminal = func() { go d.refreshBalance("task-terminal") }
 	roots := newRootsManager(d.layout, store)
 	collectors := newCollectorsManager(d.layout.Dir, store, d.collectorSign)
 	if err := roots.openAll(context.Background()); err != nil {

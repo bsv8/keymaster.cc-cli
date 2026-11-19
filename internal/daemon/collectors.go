@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bsv8/keymaster.cc-bitfs/seller"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
 	"github.com/bsv8/keymaster.cc-cli/internal/collector"
-	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 )
 
 // collectorsManager fans every submission out to every enabled BitFSCollector
@@ -128,7 +128,7 @@ func (m *collectorsManager) each(fn func(id string, svc *collector.Service)) {
 	}
 }
 
-func sellMediaType(name string) string { return sell.MediaTypeForFileName(name) }
+func sellMediaType(name string) string { return seller.MediaTypeForFileName(name) }
 
 // collectorSign signs a 32-byte collector digest with the unlocked wallet key.
 // Locked daemons refuse so submissions never proceed without a key.

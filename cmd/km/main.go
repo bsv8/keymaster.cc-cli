@@ -453,6 +453,8 @@ func cmdInfo(g globalFlags, args []string) int {
 				fmt.Print("）")
 			}
 			fmt.Println()
+		} else if info.AvailableSats != nil {
+			fmt.Printf("可用余额: %d sats\n", *info.AvailableSats)
 		}
 		if info.QueryTime != nil && *info.QueryTime != "" {
 			if cached {

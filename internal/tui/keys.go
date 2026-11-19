@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/download"
+	"github.com/bsv8/keymaster.cc-bitfs/download"
 	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 

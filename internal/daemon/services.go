@@ -7,8 +7,8 @@ import (
 	"os"
 
 	"github.com/bsv8/bitcoin-libp2p/signer"
+	"github.com/bsv8/keymaster.cc-bitfs/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/appconfig"
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
 	"github.com/bsv8/keymaster.cc-cli/internal/ssp"
 )
 

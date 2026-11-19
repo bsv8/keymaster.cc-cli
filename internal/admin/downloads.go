@@ -30,9 +30,9 @@ import (
 
 	masterseed "github.com/bsv8/MasterSeed"
 
-	"github.com/bsv8/keymaster.cc-cli/internal/host"
+	"github.com/bsv8/keymaster.cc-bitfs/host"
+	"github.com/bsv8/keymaster.cc-bitfs/store"
 	"github.com/bsv8/keymaster.cc-cli/internal/lock"
-	"github.com/bsv8/keymaster.cc-cli/internal/store"
 	"github.com/bsv8/keymaster.cc-download-scheduler/scheduler"
 )
 

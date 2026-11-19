@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -24,17 +25,16 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 
 	primitives "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	"github.com/bsv8/keymaster.cc-cli/internal/arbitration"
-	"github.com/bsv8/keymaster.cc-cli/internal/bitfs"
+	"github.com/bsv8/keymaster.cc-bitfs/arbitration"
+	"github.com/bsv8/keymaster.cc-bitfs/bitfs"
+	"github.com/bsv8/keymaster.cc-bitfs/seller"
+	"github.com/bsv8/keymaster.cc-bitfs/transport"
 	"github.com/bsv8/keymaster.cc-cli/internal/catalog"
 	"github.com/bsv8/keymaster.cc-cli/internal/discovery"
 	"github.com/bsv8/keymaster.cc-cli/internal/pricing"
-	"github.com/bsv8/keymaster.cc-cli/internal/sell"
 	websignal "github.com/bsv8/keymaster.cc-cli/internal/signal"
 	"github.com/bsv8/keymaster.cc-cli/internal/store"
-	"github.com/bsv8/keymaster.cc-cli/internal/transport"
 	"github.com/bsv8/keymaster.cc-cli/internal/wallet"
-	"github.com/bsv8/keymaster.cc-cli/internal/woc"
 )
 
 // sellerRuntime tracks the background seller loop started after unlock.
@@ -105,17 +105,7 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 		return
 	}
 	defer clearBytes(privateKey)
-	wocClient := woc.New(wocBaseURL(info.BsvNetwork), settings.WOCAPIKey)
-	initialHeight, err := wocClient.ChainHeight(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "km: 读取链高度失败（报价与卖方检查将不可用）:", err)
-		return
-	}
-	// Shared tip: quotes and protocol checks must not run on a launch-time
-	// value while the loop lives for days.
-	tip := &chainHeight{}
-	tip.set(initialHeight)
-	go tip.refreshLoop(ctx, wocClient)
+	wocClient := d.chainClient(info.BsvNetwork, settings.WOCAPIKey)
 	sellerWallet, releaseWallet, err := wallet.Shared(wocClient, wallet.Options{
 		Network: info.BsvNetwork, PrivateKey: privateKey,
 		FeeRateSatoshisPerKb: settings.FeeRateSatoshisPerKb,
@@ -171,24 +161,6 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 		fmt.Fprintln(os.Stderr, "km:", err)
 		return
 	}
-	// Multi-root lookup helper.
-	findRoot := func(seedHash string) (*catalog.Catalog, *pricing.Pricing, string, *catalog.Entry) {
-		for _, h := range d.roots.list() {
-			if h.deleted {
-				continue
-			}
-			if h.catalog == nil || h.pricing == nil {
-				continue
-			}
-			entry, err := h.catalog.Preferred(ctx, seedHash)
-			if err != nil || entry == nil {
-				continue
-			}
-			return h.catalog, h.pricing, h.root.ID, entry
-		}
-		return nil, nil, "", nil
-	}
-	_ = findRoot
 	localSigner, err := signer.NewLocalSigner(privateKey)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "km: 创建发现身份失败:", err)
@@ -263,13 +235,20 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 		if chosenCat == nil {
 			return
 		}
-		service := &sell.Seller{
+		service := &seller.Seller{
 			Sessions: sessions, Signer: signerInstance,
 			Facts: func() protocol.Facts {
-				return protocol.Facts{Now: time.Now(), BlockHeight: protocol.BlockHeight(tip.get())}
+				return bitfsChainFacts(ctx, wocClient)
 			},
-			Catalog: chosenCat, Pricing: chosenPricing, RootID: chosenRootID,
-			Arbiters: arbiters, Wallet: sellerWallet, Arbitration: arbitrationClient,
+			Catalog: bitfsCatalog{chosenCat}, Pricing: chosenPricing, RootID: chosenRootID,
+			Arbiters: arbiters,
+			Arbitration: func(ctx context.Context, key []byte) (seller.ArbitrationFee, error) {
+				_, info, err := arbitrationClient.Select(ctx, [][]byte{key})
+				return seller.ArbitrationFee{BaseSat: info.BaseSat, PerItemSat: info.PerItemSat}, err
+			},
+			SubmitClose: func(ctx context.Context, input seller.CloseSubmission) error {
+				return submitBitfsSaleClose(ctx, sellerWallet, input)
+			},
 		}
 		locator := ""
 		for _, candidate := range demand.Locators {
@@ -294,7 +273,7 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 			return
 		}
 		sessionID := "d-" + demand.MessageID
-		if _, err := service.CreateQuote(ctx, sell.QuoteRequest{
+		if _, err := service.CreateQuote(ctx, seller.QuoteRequest{
 			SessionID: sessionID, SellerID: sellerID,
 			BuyerPublicKey: buyerKey, SeedHashHex: demand.SeedHashHex,
 		}); err != nil {
@@ -318,8 +297,14 @@ func (d *Daemon) runSellerLoop(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "km: 连接买方失败 %s: %v\n", demand.MessageID, err)
 			return
 		}
+		defer session.Close()
+		if !bytes.Equal(session.RemotePublicKey(), buyerKeyRaw) {
+			fmt.Fprintln(os.Stderr, "km: BitFS 会话对端公钥与需求不一致")
+			return
+		}
 		fmt.Printf("已报价并连接买方 session=%s seed=%s root=%s\n", sessionID, demand.SeedHashHex, chosenRootID)
-		go func() { <-ctx.Done(); _ = session.Close() }()
+		stopSession := context.AfterFunc(ctx, func() { _ = session.Close() })
+		defer stopSession()
 		d.roots.retain(chosenRootID)
 		serveErr := service.Serve(ctx, sessionID, session)
 		d.roots.release(chosenRootID)
@@ -390,7 +375,7 @@ func firstSupplier(services runtimeServices) string {
 	return ""
 }
 
-func serveWebRTCDemand(ctx context.Context, roots *rootsManager, demand discovery.Demand, sessionID string, service *sell.Seller, signaling *websignal.Inbox, webrtcTransport *webrtcinterconnect.Transport, sellerHost host.Host) {
+func serveWebRTCDemand(ctx context.Context, roots *rootsManager, demand discovery.Demand, sessionID string, service *seller.Seller, signaling *websignal.Inbox, webrtcTransport *webrtcinterconnect.Transport, sellerHost host.Host) {
 	webrtcSessionID, err := websignal.NewSessionID()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "km: 生成 WebRTC 会话编号失败 %s: %v\n", demand.MessageID, err)
@@ -444,7 +429,9 @@ func serveWebRTCDemand(ctx context.Context, roots *rootsManager, demand discover
 		return
 	}
 	fmt.Printf("已报价并经 WebRTC 连接买方 session=%s seed=%s\n", sessionID, demand.SeedHashHex)
-	go func() { <-ctx.Done(); _ = session.Close() }()
+	defer session.Close()
+	stopSession := context.AfterFunc(ctx, func() { _ = session.Close() })
+	defer stopSession()
 	defer signaling.CloseSession(webrtcSessionID)
 	roots.retain(service.RootID)
 	serveErr := service.Serve(ctx, sessionID, session)

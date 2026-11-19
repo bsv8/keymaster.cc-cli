@@ -11,6 +11,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
@@ -57,10 +61,18 @@ type Wallet struct {
 	feeRate       int64
 	pool          *manager.FundingKernel
 	revision      int64
-	initialized   bool
+	observedAt    time.Time
+	balance       atomic.Pointer[balanceProjection]
+	refresh       singleflight.Group
+	fundsChanged  chan struct{}
 	closed        bool
 	accepted      map[string]bool
 	revoked       map[string]bool
+}
+
+type balanceProjection struct {
+	available  uint64
+	observedAt time.Time
 }
 
 func New(chain Chain, options Options) (*Wallet, error) {
@@ -93,12 +105,13 @@ func New(chain Chain, options Options) (*Wallet, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Wallet{chain: chain, unlocker: unlocker, address: address, lockingScript: locking, lockingHex: locking.String(), feeRate: options.FeeRateSatoshisPerKb, pool: pool, accepted: map[string]bool{}, revoked: map[string]bool{}}, nil
+	return &Wallet{chain: chain, unlocker: unlocker, address: address, lockingScript: locking, lockingHex: locking.String(), feeRate: options.FeeRateSatoshisPerKb, pool: pool, fundsChanged: make(chan struct{}, 1), accepted: map[string]bool{}, revoked: map[string]bool{}}, nil
 }
 func (w *Wallet) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.closed = true
+	w.balance.Store(nil)
 	w.pool = nil
 	w.accepted = nil
 	w.revoked = nil
@@ -134,32 +147,113 @@ func (w *Wallet) refreshLocked(ctx context.Context) error {
 		return err
 	}
 	w.revision++
-	w.initialized = true
+	w.observedAt = time.Now().UTC()
+	w.notifyFunds()
 	return nil
 }
 
 // Refresh explicitly updates the chain observation; it is not a submission step.
 func (w *Wallet) Refresh(ctx context.Context) error {
+	return w.refreshSnapshot(ctx, false)
+}
+
+// EnsureObserved loads the initial chain snapshot if no caller has done so.
+func (w *Wallet) EnsureObserved(ctx context.Context) error {
+	if snapshot := w.balance.Load(); snapshot != nil && !snapshot.observedAt.IsZero() {
+		return nil
+	}
+	return w.refreshSnapshot(ctx, true)
+}
+
+func (w *Wallet) refreshSnapshot(ctx context.Context, initial bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	refresh := w.refresh.DoChan("utxo", func() (any, error) {
+		query, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if err := w.live(); err != nil {
+			return nil, err
+		}
+		if initial && !w.observedAt.IsZero() {
+			return nil, nil
+		}
+		if err := query.Err(); err != nil {
+			return nil, err
+		}
+		return nil, w.refreshLocked(query)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-refresh:
+		return result.Err
+	}
+}
+
+// Balance reads the manager projection without waiting on chain requests.
+func (w *Wallet) Balance() (uint64, time.Time, bool) {
+	if snapshot := w.balance.Load(); snapshot != nil {
+		return snapshot.available, snapshot.observedAt, true
+	}
+	return 0, time.Time{}, false
+}
+
+func (w *Wallet) FundsChanged() <-chan struct{} { return w.fundsChanged }
+
+// notifyFunds is called under the same lock as manager writes.
+func (w *Wallet) notifyFunds() {
+	available, err := manager.ParseAmount(w.pool.Funds().AvailableSats)
+	if err != nil {
+		return
+	}
+	w.balance.Store(&balanceProjection{available: available, observedAt: w.observedAt})
+	select {
+	case w.fundsChanged <- struct{}{}:
+	default:
+	}
+}
+
+// ObserveAccepted injects wallet outputs after the caller has verified the
+// exact transaction was accepted or independently observed on chain.
+func (w *Wallet) ObserveAccepted(txid, rawHex string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.live(); err != nil {
 		return err
 	}
-	return w.refreshLocked(ctx)
+	return w.observeAcceptedLocked(txid, rawHex)
 }
-func (w *Wallet) Available(ctx context.Context) (uint64, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if err := w.live(); err != nil {
-		return 0, err
+
+func (w *Wallet) observeAcceptedLocked(txid, rawHex string) error {
+	if w.accepted[txid] {
+		return nil
 	}
-	if !w.initialized {
-		if err := w.refreshLocked(ctx); err != nil {
-			return 0, err
+	parsed, err := manager.ParseTx(rawHex, txid)
+	if err != nil {
+		return err
+	}
+	if parsed.CanonicalTxID != txid {
+		return errors.New("wallet: observed txid does not match exact bytes")
+	}
+	var utxos []manager.P2pkhUtxo
+	for vout, output := range parsed.Outputs {
+		if output.Script == w.lockingHex && output.Value != 0 {
+			utxos = append(utxos, manager.P2pkhUtxo{TxID: txid, Vout: uint32(vout), Value: strconv.FormatUint(output.Value, 10)})
 		}
 	}
-	return manager.ParseAmount(w.pool.Funds().AvailableSats)
+	if len(utxos) > 0 {
+		if err := w.pool.InjectP2pkhUtxos(utxos); err != nil {
+			return err
+		}
+	}
+	w.accepted[txid] = true
+	w.notifyFunds()
+	return nil
 }
+
 func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, error) {
 	return w.BuildWithFeeRate(ctx, outputs, 0)
 }
@@ -168,16 +262,20 @@ func (w *Wallet) Build(ctx context.Context, outputs []Output) (*SpendResult, err
 // when positive, so concurrent tasks snapshotting different settings cannot
 // change each other's next transaction through the shared pool instance.
 func (w *Wallet) BuildWithFeeRate(ctx context.Context, outputs []Output, feeRateSatoshisPerKb int64) (*SpendResult, error) {
+	if err := w.EnsureObserved(ctx); err != nil {
+		return nil, err
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.live(); err != nil {
 		return nil, err
 	}
-	if !w.initialized {
-		if err := w.refreshLocked(ctx); err != nil {
-			return nil, err
+	version := w.pool.Funds().Version
+	defer func() {
+		if w.pool.Funds().Version != version {
+			w.notifyFunds()
 		}
-	}
+	}()
 	declared := []int{}
 	var target uint64
 	for _, o := range outputs {
@@ -243,6 +341,12 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if err := w.live(); err != nil {
 		return "", err
 	}
+	version := w.pool.Funds().Version
+	defer func() {
+		if w.pool.Funds().Version != version {
+			w.notifyFunds()
+		}
+	}()
 	if p == nil {
 		return "", errors.New("wallet: prepared transaction required")
 	}
@@ -276,21 +380,9 @@ func (w *Wallet) BroadcastPrepared(ctx context.Context, kind string, p *SpendRes
 	if !strings.EqualFold(txid, p.TxID) {
 		return "", fmt.Errorf("wallet: provider txid mismatch: %s", txid)
 	}
-	// The caller owns transaction bytes; the pool receives only new outputs.
-	// Successful input allocations stay locked and must not be released.
-	utxos := []manager.P2pkhUtxo{}
-	for vout, output := range parsed.Outputs {
-		if output.Script == w.lockingHex && output.Value != 0 {
-			utxos = append(utxos, manager.P2pkhUtxo{TxID: p.TxID, Vout: uint32(vout), Value: strconv.FormatUint(output.Value, 10)})
-		}
+	if err := w.observeAcceptedLocked(p.TxID, p.RawHex); err != nil {
+		return "", err
 	}
-	if len(utxos) > 0 {
-		if err := w.pool.InjectP2pkhUtxos(utxos); err != nil {
-			return "", err
-		}
-	}
-	w.accepted[p.preparedTxID] = true
-	w.initialized = true
 	return txid, nil
 }
 
@@ -368,6 +460,12 @@ func (w *Wallet) Release(p *SpendResult) error {
 	if err := w.live(); err != nil {
 		return err
 	}
+	version := w.pool.Funds().Version
+	defer func() {
+		if w.pool.Funds().Version != version {
+			w.notifyFunds()
+		}
+	}()
 	if p.preparedBy != w || p.preparedRaw == "" || p.preparedRaw != p.RawHex || p.preparedAllocation != p.AllocationID || p.preparedTxID == "" || p.preparedTxID != p.TxID {
 		return errors.New("wallet: transaction was not prepared by this wallet")
 	}
@@ -378,14 +476,13 @@ func (w *Wallet) Release(p *SpendResult) error {
 	return nil
 }
 
-// Process-wide wallet sharing: at most one live Wallet per owner/network/fee
-// rate in this process. Separate instances would run independent FundingKernel
+// Process-wide wallet sharing: at most one live Wallet per owner/network
+// in this process. Separate instances would run independent FundingKernel
 // allocation pools, so two concurrent downloads (or a seller plus a buyer)
 // for the same key could allocate the same outpoint to two unbroadcast
 // transactions. A shared instance serializes all allocation through one pool
 // (every method already holds w.mu), so concurrent downloads can never
-// double-allocate. The first holder's chain client is kept; WoC clients are
-// stateless and equivalent per network.
+// double-allocate. The first holder supplies the shared chain client.
 var (
 	sharedMu    sync.Mutex
 	sharedByKey = map[string]*sharedWallet{}
@@ -398,8 +495,8 @@ type sharedWallet struct {
 
 // Shared returns the process-wide wallet for these options and a release
 // function. The caller must call release when done; the underlying wallet
-// closes when the last holder releases. Different fee rates get different
-// instances so one caller's rate never leaks into another's funding.
+// closes when the last holder releases. Callers with their own fee rate use
+// BuildWithFeeRate on the same wallet.
 func Shared(chain Chain, options Options) (*Wallet, func(), error) {
 	if len(options.PrivateKey) != 32 {
 		return nil, nil, errors.New("wallet: key is required")
