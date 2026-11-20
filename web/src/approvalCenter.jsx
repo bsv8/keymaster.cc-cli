@@ -1,28 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { getClient } from './client.js';
-import { watchTopics } from './subscribe.js';
-import { decideApproval, pumpPendingApprovals } from './connect.js';
+import { decideApproval } from './connect.js';
 import { interpretLockingScript } from 'keymaster-connect/script';
-import { useApplicationWorkspace } from './workspace.jsx';
 import { t } from './i18n.js';
 import { useConnectData } from './useConnectData.js';
 import { AppIcon, operationName, eventName } from './appPresentation.jsx';
 import { useMarket, entryPresentation } from './appMarket.jsx';
-
-const METHOD_LABELS = {
-  'identity.get': '身份凭证',
-  'intent.sign': '意图签名',
-  'cipher.encrypt': '加密',
-  'cipher.decrypt': '解密',
-  'payment.pay': '付款',
-};
-
-async function call(method, params) {
-  const c = await getClient();
-  return c.call(undefined, method, params || {});
-}
-
 
 function fmtTime(ms) {
   try { return new Date(ms).toLocaleString(); } catch { return String(ms); }
@@ -46,9 +29,8 @@ function ApprovalCard({ approval, wallet, onDecide, disabled }) {
   };
   const params = approval.params || {};
   return (
-    <div className="card" data-testid={`approval-${approval.id}`} data-method={approval.method} style={{ marginBottom: 8 }}>
-      <p>{operationName(approval.method)} · {approval.origin}</p>
-      <p className="mono">{t('来源')} {approval.origin} · {t('钱包')} {wallet?.network || '—'} {wallet?.address ? wallet.address.slice(0, 8) + '…' : ''}</p>
+    <div data-testid={`approval-${approval.id}`} data-method={approval.method}>
+      <p className="mono">{t('钱包')} {wallet?.network || '—'} {wallet?.address ? wallet.address.slice(0, 8) + '…' : ''}</p>
       {approval.method === 'identity.get' && (
         <div className="mono">
           <p>{t('请求内容')} {params.text || '—'}</p>
@@ -116,13 +98,73 @@ function PaymentPreview({ params }) {
   );
 }
 
+function ActivityRow({ title, status, origin, at, pending = false, onInteraction, children }) {
+  const detailId = useId();
+  const [expandedOverride, setExpandedOverride] = useState();
+  const expanded = expandedOverride ?? pending;
+  return <li className="activity-row">
+    <button type="button" className="application-queue-item" aria-expanded={expanded} aria-controls={detailId} onClick={() => {
+      setExpandedOverride(!expanded);
+      onInteraction();
+    }}>
+      <span className="activity-title">{title}</span><span className="activity-status">{status}</span>
+      {origin && <span className="activity-origin">{origin}</span>}
+      {at != null && <time>{fmtTime(at)}</time>}
+    </button>
+    <div id={detailId} className="activity-detail" hidden={!expanded}>{expanded && children}</div>
+  </li>;
+}
+
+function ActivityGroups({ approvals, history, connections, market, wallet, onInteraction }) {
+  const connectedApps = new Set(connections.map(connection => connection.applicationKey));
+  const groups = new Map();
+  for (const approval of approvals) {
+    const key = approval.appPublicKeyHex || approval.origin;
+    const group = groups.get(key) ?? { pending: [], events: [] };
+    group.pending.push(approval);
+    groups.set(key, group);
+  }
+  for (const event of history) {
+    const key = event.applicationKey || event.origin;
+    const group = groups.get(key) ?? { pending: [], events: [] };
+    group.events.push(event);
+    groups.set(key, group);
+  }
+  if (!groups.size) return <p className="application-note">{t('还没有应用处理记录。')}</p>;
+  return <div className="activity-groups">{[...groups].map(([key, group]) => {
+    const entry = market.entries.find(entry => entry.appPublicKeyHex === key);
+    const display = entry ? entryPresentation(entry, market.deployments) : market.knownApplications?.[key] || {};
+    const name = display.name || t('应用连接申请');
+    const connected = connectedApps.has(key);
+    const status = t(connected ? '已连接' : '未连接');
+    return <section className="activity-group" key={key}>
+      <header>
+        <AppIcon icon={display.icon} url={entry?.urls?.[0]?.url} name={name} size={36} />
+        <h3>{name}</h3>
+        <span className="application-connection-light" data-connected={connected} role="img" aria-label={status} title={status} />
+      </header>
+      <ul>
+        {group.pending.map(item => <ActivityRow key={`pending:${item.id}`} title={operationName(item.method)} status={t('等待授权')} origin={item.origin} at={item.createdAt} pending onInteraction={onInteraction}>
+          <ApprovalCard approval={item} wallet={wallet} onDecide={decide} disabled={false} />
+        </ActivityRow>)}
+        {group.events.sort((a, b) => b.at - a.at).map(event => <ActivityRow key={`history:${event.id}`} title={operationName(event.method)} status={eventName(event)} origin={event.origin} at={event.at} onInteraction={onInteraction}>
+          <p>{t(event.auto ? '使用已有永久授权' : '人工处理或连接事件')}</p>
+        </ActivityRow>)}
+      </ul>
+    </section>;
+  })}</div>;
+}
+
+async function decide(approval, decision, grantAuto) {
+  await decideApproval(approval.id, decision, grantAuto);
+}
+
 export function GlobalApproval({ wallet, showSettings }) {
   const { approvals, apps, err, history } = useConnectData();
   const market = useMarket();
   const [settingsOutlet, setSettingsOutlet] = useState(null);
   useEffect(() => { setSettingsOutlet(showSettings ? document.getElementById('application-reminders-settings') : null); }, [showSettings]);
   const autoSeen = useRef(new Set());
-  const [reviewing, setReviewing] = useState(undefined);
   const [open, setOpen] = useState(false);
   const [sound, setSound] = useState('off');
   const [notification, setNotification] = useState('未开启');
@@ -137,8 +179,7 @@ export function GlobalApproval({ wallet, showSettings }) {
   const count = approvals.length;
   const pendingKey = approvals.map((a) => a.id).join('|');
 
-  const review = (id) => {
-    setReviewing(id ?? approvals[0]?.id);
+  const review = () => {
     setSeen(true);
     setOpen(true);
   };
@@ -169,7 +210,7 @@ export function GlobalApproval({ wallet, showSettings }) {
     if (document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       try {
         const notice = new Notification('Keymaster · 新的应用授权请求', { body: `有 ${count} 项待处理，请回到钱包核对来源和请求。`, tag: 'keymaster-application-approval' });
-        notice.onclick = () => { window.focus(); review(fresh[0].id); notice.close(); };
+        notice.onclick = () => { window.focus(); review(); notice.close(); };
       } catch { setNotification('系统通知发送失败'); }
     }
   }, [pendingKey]);
@@ -199,14 +240,6 @@ export function GlobalApproval({ wallet, showSettings }) {
 
   useEffect(() => () => { try { audio.current?.close(); } catch { /* ignore */ } }, []);
 
-  useEffect(() => { if (open && reviewing === undefined && approvals[0]) setReviewing(approvals[0].id); }, [open, reviewing, approvals]);
-  const current = reviewing ? approvals.find((a) => a.id === reviewing) : approvals[0];
-  const currentEnded = reviewing && !current;
-  const selectedHistory = history.find(event => `history:${event.id}` === reviewing);
-  const decide = async (approval, decision, grantAuto) => {
-    await decideApproval(approval.id, decision, grantAuto);
-  };
-
   return (
     <>
       <button type="button" className="ghost" data-testid="global-pending" onClick={() => review()}>{t('待处理')} {count}</button>
@@ -221,18 +254,7 @@ export function GlobalApproval({ wallet, showSettings }) {
           <header><h2 id="application-approval-title">{t('应用授权 · 待处理')} {count} {t('项')}</h2><button type="button" aria-label={t('关闭审批，返回原工作')} onClick={() => setOpen(false)}>✕</button></header>
           <div className="application-drawer-body">
             {err && <p className="error">{err}</p>}
-            {current ? <ApprovalCard approval={current} wallet={wallet} onDecide={decide} disabled={false} /> : <p>{currentEnded ? t('当前申请已结束或连接已失效。没有可批准的请求。') : t('当前申请已结束或连接已失效。没有可批准的请求。')}</p>}
-            <p className="application-note">{t('逐项核对；新请求不会替换当前申请。批准不等于执行成功。')}</p>
-            <div className="activity-groups">{[...new Set([...approvals.map(item => item.appPublicKeyHex || item.origin), ...history.map(item => item.applicationKey || item.origin)])].map(key => {
-              const entry = market.entries.find(entry => entry.appPublicKeyHex === key);
-              const display = entry ? entryPresentation(entry, market.deployments) : (market.knownApplications || {})[key] || {};
-              const pending = approvals.filter(item => (item.appPublicKeyHex || item.origin) === key);
-              const records = history.filter(item => (item.applicationKey || item.origin) === key).sort((a, b) => b.at - a.at);
-              const name = display.name || '应用连接申请';
-              return <section className="activity-group" key={key}><header><AppIcon icon={display.icon} url={entry?.urls?.[0]?.url} name={name} size={36} /><h3>{name}</h3></header><ul>{pending.map(item => <li key={item.id}><button className="application-queue-item" aria-pressed={reviewing === item.id} onClick={() => { setReviewing(item.id); setSeen(true); }}><span>{operationName(item.method)}</span><span>等待授权</span></button></li>)}{records.map(event => <li key={event.id}><button className="application-queue-item" aria-pressed={reviewing === `history:${event.id}`} onClick={() => setReviewing(`history:${event.id}`)}><span>{operationName(event.method)}</span><span>{eventName(event)}</span><time>{fmtTime(event.at)}</time></button></li>)}</ul></section>;
-            })}</div>
-            {selectedHistory && <section className="application-history"><h3>{operationName(selectedHistory.method)} · {eventName(selectedHistory)}</h3><p>{fmtTime(selectedHistory.at)}</p><p>{selectedHistory.auto ? '使用已有永久授权' : '人工处理或连接事件'}</p></section>}
-
+            {open && <ActivityGroups approvals={approvals} history={history} connections={apps.connections ?? []} market={market} wallet={wallet} onInteraction={() => setSeen(true)} />}
           </div>
         </dialog>
       </>, document.body)}
